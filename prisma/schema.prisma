@@ -1,0 +1,60 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Conversation {
+  id             String    @id @default(cuid())
+  userId         String
+  sessionKey     String    @unique
+  agentName      String
+  sectionContext String?
+  title          String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  messages       Message[]
+  view           ConversationView?
+
+  @@index([userId, updatedAt(sort: Desc)])
+}
+
+// Per-conversation "last viewed" marker (1:1 with Conversation). Kept in a
+// separate table so marking a chat viewed never bumps Conversation.updatedAt
+// (which would reorder the recent list). A chat shows as "new" when it has no
+// view row or its updatedAt is newer than lastViewedAt.
+model ConversationView {
+  conversationId String       @id
+  lastViewedAt   DateTime
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+}
+
+model Message {
+  id                 String       @id @default(cuid())
+  conversationId     String
+  role               String
+  content            String
+  agentglobMessageId String?
+  createdAt          DateTime     @default(now())
+  conversation       Conversation @relation(fields: [conversationId], references: [id])
+
+  @@index([conversationId, createdAt(sort: Asc)])
+}
+
+model AppSetting {
+  key       String   @id // e.g. "drive_oauth"
+  value     String // AES-256-GCM-encrypted JSON (DRIVE_TOKEN_ENCRYPTION_KEY)
+  updatedAt DateTime @updatedAt
+}
+
+model UserDriveFolder {
+  id         String   @id @default(cuid())
+  userId     String   @unique // Clerk userId
+  folderId   String // a subfolder of PLUSIM_DRIVE_ROOT_FOLDER_ID
+  folderName String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
