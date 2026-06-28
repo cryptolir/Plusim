@@ -35,7 +35,7 @@ export function HomeHub({
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <div className="flex min-h-[100dvh] flex-col pb-6">
+      <div className="flex min-h-full flex-col pb-6">
         <OwnerNote markdown={note} />
 
         <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-4 px-3 py-3 lg:flex-row-reverse lg:items-stretch lg:gap-5 lg:px-4">

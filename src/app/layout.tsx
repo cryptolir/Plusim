@@ -5,6 +5,7 @@ import { heIL } from "@clerk/localizations";
 import type { ComponentProps } from "react";
 import { auth } from "@clerk/nextjs/server";
 import { TopBar } from "@/components/TopBar";
+import { BottomNav } from "@/components/BottomNav";
 import "./globals.css";
 
 // Hebrew-first typography: Rubik (friendly geometric body) + Secular One
@@ -52,9 +53,10 @@ export default async function RootLayout({
         dir="rtl"
         className={`${rubik.variable} ${secularOne.variable} ${geistMono.variable} h-full antialiased`}
       >
-        <body className="min-h-full flex flex-col">
+        <body className="flex h-[100dvh] flex-col overflow-hidden">
           {userId && <TopBar />}
-          {children}
+          <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
+          {userId && <BottomNav />}
         </body>
       </html>
     </ClerkProvider>
