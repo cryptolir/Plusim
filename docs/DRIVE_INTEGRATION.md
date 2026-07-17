@@ -17,10 +17,10 @@ Architecture overview lives in [ARCHITECTURE.md](../ARCHITECTURE.md#google-drive
 3. **OAuth consent screen** → User type **Internal** → app name, support email. Add scope `https://www.googleapis.com/auth/drive` (plus `openid`, `.../auth/userinfo.email` to record which account connected).
 4. **Credentials → Create credentials → OAuth client ID → Web application.**
    - Authorized redirect URIs (add both):
-     - `https://app.havaya.me/admin/api/drive/callback`
+     - `https://plusim.xyz/admin/api/drive/callback`
      - `http://localhost:3000/admin/api/drive/callback`
 5. Copy the **Client ID** and **Client secret** into the env vars below.
-6. Make sure the transcripts root folder (`HAVAYA_DRIVE_ROOT_FOLDER_ID`) is owned by — or shared into — the Workspace account that will connect.
+6. Make sure the transcripts root folder (`PLUSIM_DRIVE_ROOT_FOLDER_ID`) is owned by — or shared into — the Workspace account that will connect.
 
 ## 3. Environment variables
 
@@ -30,8 +30,8 @@ All server-only (never `NEXT_PUBLIC_`). In `.env.local` for dev, **Coolify** ser
 |---|---|
 | `GOOGLE_OAUTH_CLIENT_ID` | from the OAuth client |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | from the OAuth client |
-| `GOOGLE_OAUTH_REDIRECT_URI` | prod `https://app.havaya.me/admin/api/drive/callback` · dev `http://localhost:3000/admin/api/drive/callback` (must exactly match a console redirect URI) |
-| `HAVAYA_DRIVE_ROOT_FOLDER_ID` | `14yNZ9AHsmdC2xWBkbVd6n_wm0tpwN4Xg` (prod; set in Coolify) — must be owned by / shared into the connecting account, else writes 403 |
+| `GOOGLE_OAUTH_REDIRECT_URI` | prod `https://plusim.xyz/admin/api/drive/callback` · dev `http://localhost:3000/admin/api/drive/callback` (must exactly match a console redirect URI) |
+| `PLUSIM_DRIVE_ROOT_FOLDER_ID` | `<Plusim transcripts folder id>` (prod; set in Coolify — create a Plusim folder, share into the connecting Workspace account) — must be owned by / shared into the connecting account, else writes 403 |
 | `DRIVE_TOKEN_ENCRYPTION_KEY` | `openssl rand -base64 32` (32-byte base64) — AES-256-GCM for the refresh token at rest |
 | `DRIVE_OAUTH_STATE_SECRET` | `openssl rand -base64 32` — HMAC secret for the OAuth `state` token |
 
@@ -48,7 +48,7 @@ Generate the two secrets fresh per environment; don't reuse the dev value in pro
 ## 5. Contracts & internals
 
 - **Summary marker** — created summaries carry Drive `appProperties`: `havayaSummary="true"`, `meetingDate`, `meetingTitle`, `sourceFileId`. Detection/idempotency query on these (survives file rename), not on filenames.
-- **Root containment** — every caller-supplied `fileId`/`folderId` goes through `assertEntryUnderRoot()` (walks `parents` up to `HAVAYA_DRIVE_ROOT_FOLDER_ID`) before any read/write. The owner token can reach the whole Drive, so this guard is mandatory, not optional.
+- **Root containment** — every caller-supplied `fileId`/`folderId` goes through `assertEntryUnderRoot()` (walks `parents` up to `PLUSIM_DRIVE_ROOT_FOLDER_ID`) before any read/write. The owner token can reach the whole Drive, so this guard is mandatory, not optional.
 - **Summarize trigger** — `POST /admin/api/drive/summarize` reads the transcript (Google Doc → export `text/plain`; `text/*` → `alt=media`; other types rejected), truncates past ~24k chars (logged), and calls `callAgent()` with session `app:havaya:admin-summary:<uuid>`. A **fresh uuid every call** means a re-summarize never inherits the prior attempt's agent memory; `admin-summary` sits at sessionKey split-index-2 and **no `appUserId`** is sent, so no real user's per-user file is touched. The prompt embeds the **summary method** (see next bullet) as a `=== METHOD ===` block and **forbids the agent from using any tools or memory** (no graphiti `add_memory` — otherwise it exceeds the gateway timeout → `(no reply)`); it's asked to lead with `TITLE:` / `DATE:` lines (parsed for the filename, else the source filename + Drive `createdTime` are used).
 - **Summary method (admin-editable)** — the method/structure applied to the transcript is stored in `AppSetting.summary_instructions` (plaintext) and editable from the admin UI in **two places, same setting**: `/admin/settings` and a "Summary method (skill)" field below the browser on `/admin/drive`. `getSummaryInstructions()` (`src/lib/summaryInstructions.ts`) returns the stored value, or the built-in **TAL method** (`DEFAULT_SUMMARY_INSTRUCTIONS`) when blank. It is an **embedded copy**, not read live from the agent's `skills/` — the per-user-workspace sandbox blocks app sessions from reading shared skills, so the method is inlined into the prompt.
 - **"Past meeting"** — `buildPastMeetingHint(userId)` fetches the latest summary from the user's assigned folder and injects it as the invisible first-turn preamble in `/api/chat` (dynamic, unlike the static `SECTION_HINTS`). The transcript never appears in the chat UI or the stored `Message.content`.
