@@ -30,7 +30,15 @@ export async function callAgent(opts: {
 }): Promise<{ reply: string; messageId?: string }> {
   const res = await fetch(`${BASE}/api/public/chat/${AGENT}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      // Authenticate this app-user chat: the request carries appUserId + an
+      // app: sessionKey, so AgentGlob requires the app key to prove we own the
+      // "plusim" namespace (OB-18 / public-chat-app-identity). Same key the
+      // user-file calls already send; safe to send now because the dashboard
+      // accepts it (log-only) before it enforces (accept → send → require).
+      ...(APP_KEY ? { authorization: `Bearer ${APP_KEY}` } : {}),
+    },
     body: JSON.stringify({
       message: opts.message,
       sessionKey: opts.sessionKey,
