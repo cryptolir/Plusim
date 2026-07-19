@@ -22,11 +22,25 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
   const { jobId } = await ctx.params;
   const job = await db.reportJob.findUnique({
     where: { id: jobId },
-    select: { id: true, status: true, targetUserId: true, title: true, sheetUrl: true },
+    select: { id: true, status: true, targetUserId: true, title: true, sheetUrl: true, verification: true },
   });
   if (!job) return NextResponse.json({ error: "not found" }, { status: 404 });
   if (!["completed", "needs_review", "published"].includes(job.status)) {
     return NextResponse.json({ error: `cannot publish a ${job.status} job` }, { status: 409 });
+  }
+  // Never publish a job with FATAL verification diagnostics — a total mismatch,
+  // duplicate dedupKey, date-outside-month, unknown category, or non-xlsx payload
+  // (Rev 4 — Codex P1). A merely-uncategorized (non-fatal) job may publish.
+  const fatal =
+    job.verification !== null &&
+    typeof job.verification === "object" &&
+    !Array.isArray(job.verification) &&
+    (job.verification as { fatal?: unknown }).fatal === true;
+  if (fatal) {
+    return NextResponse.json(
+      { error: "cannot publish — the report has fatal verification diagnostics; re-run the job" },
+      { status: 409 },
+    );
   }
   const remainingUncat = await db.reportTransaction.count({
     where: { jobId, uncategorized: true },
@@ -42,7 +56,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
         const folder = await db.userDriveFolder.findUnique({ where: { userId: job.targetUserId } });
         if (folder) {
           const artifact = await db.reportArtifact.findFirst({
-            where: { jobId, kind: "xlsx" },
+            where: { jobId },
             orderBy: { createdAt: "desc" },
           });
           if (artifact) {

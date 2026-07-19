@@ -9,8 +9,10 @@ the processed report in `/report`. Agent-side skill + ops runbook:
 ## Flow
 
 ```
-/admin/reports (upload, pick target user)
-   → ReportJob + StatementFile rows (bytea in Postgres)
+/admin/reports (upload, pick target user — must have an assigned Drive folder)
+   → raw statements written to the user's Google Drive folder (owner OAuth,
+     containment re-checked at write time) → ReportJob + StatementFile rows
+     (driveFileId + driveFolderId only — NO bytes in Postgres)
    → POST /admin/api/reports/:id/run
         mints per-job token → callAgent() on session app:plusim:report-job:<id>
         message: "PLUSIM_REPORT_JOB v1 / manifest: <url?t=token>"  (≤3000 chars)
@@ -41,7 +43,21 @@ the processed report in `/report`. Agent-side skill + ops runbook:
 - **Auth**: `/api/agent/*` is middleware-public but demands the static runtime
   bearer (`PLUSIM_AGENT_RUNTIME_TOKEN` ≡ agent-side `PLUSIM_RUNTIME_TOKEN`)
   AND a sha256-stored, 24h per-job token minted at dispatch. Published jobs
-  clear their token, so late callbacks can't mutate a published report.
+  clear their token, so late callbacks can't mutate a published report. The
+  result callback persists in one transaction whose job update is conditional on
+  `status in (dispatched|processing)` + the authorizing token hash — 0 rows ⇒
+  409, nothing written (closes the publish/result race).
+- **Drive confinement**: raw statements live in the client's folder. On upload
+  the parent is the DB `UserDriveFolder` (never the request), re-contained with
+  `assertEntryUnderRoot` at write time. On agent download, the read is bound to
+  the job user's CURRENT folder — the row's `driveFolderId` must match and
+  `assertEntryUnderFolder(driveFileId, folderId)` must pass — so a stale or
+  cross-linked file in another user's folder is rejected.
+- **Fail closed**: re-verification tags integrity failures (per-source total
+  mismatch, unknown category, date-outside-month, duplicate dedupKey, non-xlsx)
+  as **fatal**, distinct from reviewable uncategorized rows. Publish refuses any
+  job with fatal diagnostics (409); the agent's own `status:"ok"` never overrides
+  the app's recompute.
 - **Dispatch tolerates timeouts**: the AgentGlob run continues after a client
   abort; the callback (not the chat reply) completes the job. Admin detail
   page polls while `processing` and offers Re-run.
@@ -63,7 +79,9 @@ src/app/admin/(dash)/reports/…            admin UI (upload form, job list, job
 src/components/admin/ReportUploadForm.tsx, ReportJobDetail.tsx
 src/app/report/page.tsx                   client report section (published only)
 src/app/api/reports/[jobId]/download      xlsx download (Clerk + ownership)
-src/lib/googleDrive.ts                    + uploadXlsxAsSpreadsheet() (publish export)
+src/lib/googleDrive.ts                    + uploadBinaryFile() (raw statement upload),
+                                          getFileBytes() (agent download), uploadXlsxAsSpreadsheet()
+                                          (publish export), assertEntryUnderFolder() (read confinement)
 agent/skills/plusim-reports/              the onlyclaw skill (source of truth)
 ```
 

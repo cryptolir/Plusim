@@ -86,20 +86,24 @@ model ReportJob {
   transactions  ReportTransaction[]
 
   @@index([targetUserId, publishedAt(sort: Desc)])
-  @@index([status, updatedAt(sort: Desc)])
 }
 
+// Raw statement bytes live in the client's Google Drive folder (never Postgres),
+// reusing the Havaya owner-OAuth routine. We keep only the Drive ids + metadata:
+//   driveFileId   — the uploaded file
+//   driveFolderId — the UserDriveFolder it was written into, so a read can be
+//                   re-bound to the job user's folder (not merely the owner root).
 model StatementFile {
-  id          String    @id @default(cuid())
-  jobId       String
-  filename    String
-  mime        String
-  size        Int
-  sha256      String
-  bytes       Bytes
-  sourceLabel String? // e.g. "isracard-4962", "max"
-  createdAt   DateTime  @default(now())
-  job         ReportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  id            String    @id @default(cuid())
+  jobId         String
+  filename      String
+  mime          String
+  size          Int
+  driveFileId   String
+  driveFolderId String
+  sourceLabel   String? // e.g. "isracard-4962", "max"
+  createdAt     DateTime  @default(now())
+  job           ReportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
 
   @@index([jobId])
 }
@@ -107,13 +111,12 @@ model StatementFile {
 model ReportArtifact {
   id        String    @id @default(cuid())
   jobId     String
-  kind      String // "xlsx"
   filename  String
   bytes     Bytes
   createdAt DateTime  @default(now())
   job       ReportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
 
-  @@index([jobId, kind])
+  @@index([jobId])
 }
 
 model ReportTransaction {
@@ -142,7 +145,6 @@ model MerchantMapping {
   category        String // taxonomy leaf name
   source          String // "admin" | "agent"
   approved        Boolean  @default(false)
-  hitCount        Int      @default(0)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 

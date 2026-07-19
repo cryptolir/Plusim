@@ -36,7 +36,7 @@ interface JobDetail {
     agentNotes?: string | null;
   } | null;
   files: { id: string; filename: string; mime: string; size: number }[];
-  artifacts: { id: string; kind: string; filename: string }[];
+  artifacts: { id: string; filename: string }[];
   transactions: Txn[];
 }
 
@@ -45,7 +45,6 @@ interface Mapping {
   merchantPattern: string;
   category: string;
   source: string;
-  hitCount: number;
 }
 
 function shekel(agorot: number): string {
@@ -237,7 +236,7 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
                 <span dir="auto" className="font-medium">{m.merchantPattern}</span>
                 <span className="text-muted-foreground">→</span>
                 <span dir="auto">{m.category}</span>
-                <span className="text-xs text-muted-foreground">({m.source}, seen {m.hitCount}×)</span>
+                <span className="text-xs text-muted-foreground">({m.source})</span>
                 <button
                   onClick={() =>
                     action("mapping", `/admin/api/report-mappings/${m.id}`, {

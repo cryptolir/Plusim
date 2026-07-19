@@ -20,7 +20,7 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ jobId: str
   if (!job) return NextResponse.json({ error: "not found" }, { status: 404 });
 
   const artifact = await db.reportArtifact.findFirst({
-    where: { jobId, kind: "xlsx" },
+    where: { jobId },
     orderBy: { createdAt: "desc" },
   });
   if (!artifact) return NextResponse.json({ error: "not found" }, { status: 404 });

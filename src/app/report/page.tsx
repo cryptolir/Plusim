@@ -52,7 +52,7 @@ export default async function ReportPage() {
           uncategorized: true,
         },
       },
-      artifacts: { where: { kind: "xlsx" }, select: { id: true }, take: 1 },
+      artifacts: { select: { id: true }, take: 1 },
     },
   });
 

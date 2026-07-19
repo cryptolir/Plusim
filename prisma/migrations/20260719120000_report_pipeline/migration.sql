@@ -26,8 +26,8 @@ CREATE TABLE "StatementFile" (
     "filename" TEXT NOT NULL,
     "mime" TEXT NOT NULL,
     "size" INTEGER NOT NULL,
-    "sha256" TEXT NOT NULL,
-    "bytes" BYTEA NOT NULL,
+    "driveFileId" TEXT NOT NULL,
+    "driveFolderId" TEXT NOT NULL,
     "sourceLabel" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
@@ -38,7 +38,6 @@ CREATE TABLE "StatementFile" (
 CREATE TABLE "ReportArtifact" (
     "id" TEXT NOT NULL,
     "jobId" TEXT NOT NULL,
-    "kind" TEXT NOT NULL,
     "filename" TEXT NOT NULL,
     "bytes" BYTEA NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -71,7 +70,6 @@ CREATE TABLE "MerchantMapping" (
     "category" TEXT NOT NULL,
     "source" TEXT NOT NULL,
     "approved" BOOLEAN NOT NULL DEFAULT false,
-    "hitCount" INTEGER NOT NULL DEFAULT 0,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -82,13 +80,10 @@ CREATE TABLE "MerchantMapping" (
 CREATE INDEX "ReportJob_targetUserId_publishedAt_idx" ON "ReportJob"("targetUserId", "publishedAt" DESC);
 
 -- CreateIndex
-CREATE INDEX "ReportJob_status_updatedAt_idx" ON "ReportJob"("status", "updatedAt" DESC);
-
--- CreateIndex
 CREATE INDEX "StatementFile_jobId_idx" ON "StatementFile"("jobId");
 
 -- CreateIndex
-CREATE INDEX "ReportArtifact_jobId_kind_idx" ON "ReportArtifact"("jobId", "kind");
+CREATE INDEX "ReportArtifact_jobId_idx" ON "ReportArtifact"("jobId");
 
 -- CreateIndex
 CREATE INDEX "ReportTransaction_jobId_month_idx" ON "ReportTransaction"("jobId", "month");

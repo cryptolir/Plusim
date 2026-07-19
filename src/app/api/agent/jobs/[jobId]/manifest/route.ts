@@ -24,7 +24,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
   const dictionary = await db.merchantMapping.findMany({
     where: { approved: true },
     select: { merchantPattern: true, category: true },
-    orderBy: { hitCount: "desc" },
+    orderBy: { updatedAt: "desc" },
     take: 2000,
   });
 

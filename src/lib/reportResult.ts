@@ -131,6 +131,13 @@ export function parseAgentResult(body: unknown): AgentResult {
 
 export interface VerificationOutcome {
   ok: boolean;
+  /**
+   * True when any integrity check failed (per-source total mismatch, unknown
+   * category, date-outside-month, duplicate dedupKey, orphan source). These are
+   * FATAL — distinct from a job that merely has uncategorized rows awaiting
+   * admin categorization (non-fatal). The publish route refuses fatal jobs.
+   */
+  fatal: boolean;
   problems: string[];
   perSource: {
     label: string;
@@ -201,6 +208,7 @@ export function verifyAgentResult(result: AgentResult): VerificationOutcome {
 
   return {
     ok: problems.length === 0,
+    fatal: problems.length > 0,
     problems,
     perSource,
     txCount: result.transactions.length,

@@ -40,8 +40,8 @@ export async function PATCH(
   if (body.rememberMerchant === true) {
     await db.merchantMapping.upsert({
       where: { merchantPattern: tx.merchant },
-      create: { merchantPattern: tx.merchant, category, source: "admin", approved: true, hitCount: 1 },
-      update: { category, approved: true, source: "admin", hitCount: { increment: 1 } },
+      create: { merchantPattern: tx.merchant, category, source: "admin", approved: true },
+      update: { category, approved: true, source: "admin" },
     });
   }
 

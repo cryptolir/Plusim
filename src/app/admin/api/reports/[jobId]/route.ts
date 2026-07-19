@@ -26,7 +26,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
       completedAt: true,
       publishedAt: true,
       files: { select: { id: true, filename: true, mime: true, size: true, sourceLabel: true } },
-      artifacts: { select: { id: true, kind: true, filename: true, createdAt: true } },
+      artifacts: { select: { id: true, filename: true, createdAt: true } },
       transactions: {
         orderBy: [{ month: "asc" }, { date: "asc" }],
         select: {
@@ -49,7 +49,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     where: { approved: false },
     orderBy: { updatedAt: "desc" },
     take: 100,
-    select: { id: true, merchantPattern: true, category: true, source: true, hitCount: true },
+    select: { id: true, merchantPattern: true, category: true, source: true },
   });
 
   return NextResponse.json({ job, pendingMappings });

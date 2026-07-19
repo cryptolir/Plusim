@@ -48,6 +48,10 @@ export interface AgentJobAuth {
     targetUserId: string;
     status: string;
   };
+  /** sha256 of the presented per-job token (== stored agentTokenHash). Lets the
+   *  result callback do a conditional write keyed on the exact token that
+   *  authorized, so a publish/re-dispatch between auth and write can't be clobbered. */
+  tokenHash: string;
 }
 
 /**
@@ -82,7 +86,10 @@ export async function authorizeAgentJobRequest(
   ) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
-  return { job: { id: job.id, targetUserId: job.targetUserId, status: job.status } };
+  return {
+    job: { id: job.id, targetUserId: job.targetUserId, status: job.status },
+    tokenHash: job.agentTokenHash,
+  };
 }
 
 /** Absolute base URL for links handed to the agent (manifest, files, callback). */
