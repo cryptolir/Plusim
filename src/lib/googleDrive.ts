@@ -275,6 +275,47 @@ export async function createTextFile(opts: {
   return toEntry((await res.json()) as DriveApiFile);
 }
 
+/**
+ * Upload an xlsx and let Drive convert it into a native Google Spreadsheet
+ * (target mimeType application/vnd.google-apps.spreadsheet). Used by the
+ * reports pipeline on publish; tagged with appProperties for idempotency.
+ * Returns the created entry — webViewLink is fetched separately by callers
+ * that need it (FIELDS here excludes it).
+ */
+export async function uploadXlsxAsSpreadsheet(opts: {
+  parentFolderId: string;
+  name: string;
+  xlsx: Buffer;
+  appProperties?: Record<string, string>;
+}): Promise<DriveEntry> {
+  const metadata = {
+    name: opts.name,
+    parents: [opts.parentFolderId],
+    mimeType: "application/vnd.google-apps.spreadsheet",
+    ...(opts.appProperties ? { appProperties: opts.appProperties } : {}),
+  };
+  const boundary = `plusim_${crypto.randomUUID()}`;
+  const head = Buffer.from(
+    `--${boundary}\r\n` +
+      `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+      `${JSON.stringify(metadata)}\r\n` +
+      `--${boundary}\r\n` +
+      `Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n` +
+      `Content-Transfer-Encoding: base64\r\n\r\n`,
+    "utf8",
+  );
+  const tail = Buffer.from(`\r\n--${boundary}--`, "utf8");
+  const body = Buffer.concat([head, Buffer.from(opts.xlsx.toString("base64"), "utf8"), tail]);
+  const params = new URLSearchParams({ uploadType: "multipart", fields: FIELDS, supportsAllDrives: "true" });
+  const res = await driveFetch(`${DRIVE_UPLOAD}/files?${params.toString()}`, {
+    method: "POST",
+    headers: { "content-type": `multipart/related; boundary=${boundary}` },
+    body: new Uint8Array(body),
+  });
+  if (!res.ok) throw new Error(`drive xlsx→sheet upload ${res.status}: ${await res.text()}`);
+  return toEntry((await res.json()) as DriveApiFile);
+}
+
 /** Overwrite a plain-text file's contents (media upload). Google Docs are not editable this way. */
 export async function updateTextFile(entry: DriveEntry, text: string): Promise<DriveEntry> {
   if (entry.mimeType === GOOGLE_DOC_MIME || !entry.mimeType.startsWith("text/")) {
