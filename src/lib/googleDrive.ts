@@ -275,6 +275,102 @@ export async function createTextFile(opts: {
   return toEntry((await res.json()) as DriveApiFile);
 }
 
+/**
+ * Upload an xlsx and let Drive convert it into a native Google Spreadsheet
+ * (target mimeType application/vnd.google-apps.spreadsheet). Used by the
+ * reports pipeline on publish; tagged with appProperties for idempotency.
+ * Returns the created entry — webViewLink is fetched separately by callers
+ * that need it (FIELDS here excludes it).
+ */
+export async function uploadXlsxAsSpreadsheet(opts: {
+  parentFolderId: string;
+  name: string;
+  xlsx: Buffer;
+  appProperties?: Record<string, string>;
+}): Promise<DriveEntry> {
+  const metadata = {
+    name: opts.name,
+    parents: [opts.parentFolderId],
+    mimeType: "application/vnd.google-apps.spreadsheet",
+    ...(opts.appProperties ? { appProperties: opts.appProperties } : {}),
+  };
+  const boundary = `plusim_${crypto.randomUUID()}`;
+  const head = Buffer.from(
+    `--${boundary}\r\n` +
+      `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+      `${JSON.stringify(metadata)}\r\n` +
+      `--${boundary}\r\n` +
+      `Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n` +
+      `Content-Transfer-Encoding: base64\r\n\r\n`,
+    "utf8",
+  );
+  const tail = Buffer.from(`\r\n--${boundary}--`, "utf8");
+  const body = Buffer.concat([head, Buffer.from(opts.xlsx.toString("base64"), "utf8"), tail]);
+  const params = new URLSearchParams({ uploadType: "multipart", fields: FIELDS, supportsAllDrives: "true" });
+  const res = await driveFetch(`${DRIVE_UPLOAD}/files?${params.toString()}`, {
+    method: "POST",
+    headers: { "content-type": `multipart/related; boundary=${boundary}` },
+    body: new Uint8Array(body),
+  });
+  if (!res.ok) throw new Error(`drive xlsx→sheet upload ${res.status}: ${await res.text()}`);
+  return toEntry((await res.json()) as DriveApiFile);
+}
+
+/**
+ * Upload a raw binary file (statement pdf/xlsx) into a Drive folder, preserving
+ * the ORIGINAL mime — no Google-Docs conversion. Used by the reports upload flow
+ * to store raw statements in the client's folder. Tagged with appProperties.
+ */
+export async function uploadBinaryFile(opts: {
+  parentFolderId: string;
+  name: string;
+  mime: string;
+  bytes: Buffer;
+  appProperties?: Record<string, string>;
+}): Promise<DriveEntry> {
+  const metadata = {
+    name: opts.name,
+    parents: [opts.parentFolderId],
+    mimeType: opts.mime,
+    ...(opts.appProperties ? { appProperties: opts.appProperties } : {}),
+  };
+  const boundary = `plusim_${crypto.randomUUID()}`;
+  const head = Buffer.from(
+    `--${boundary}\r\n` +
+      `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+      `${JSON.stringify(metadata)}\r\n` +
+      `--${boundary}\r\n` +
+      `Content-Type: ${opts.mime}\r\n` +
+      `Content-Transfer-Encoding: base64\r\n\r\n`,
+    "utf8",
+  );
+  const tail = Buffer.from(`\r\n--${boundary}--`, "utf8");
+  const body = Buffer.concat([head, Buffer.from(opts.bytes.toString("base64"), "utf8"), tail]);
+  const params = new URLSearchParams({ uploadType: "multipart", fields: FIELDS, supportsAllDrives: "true" });
+  const res = await driveFetch(`${DRIVE_UPLOAD}/files?${params.toString()}`, {
+    method: "POST",
+    headers: { "content-type": `multipart/related; boundary=${boundary}` },
+    body: new Uint8Array(body),
+  });
+  if (!res.ok) throw new Error(`drive binary upload ${res.status}: ${await res.text()}`);
+  return toEntry((await res.json()) as DriveApiFile);
+}
+
+/**
+ * Download raw bytes of a Drive file (alt=media). Google-Docs-native types have
+ * no direct media and are rejected — statements are only ever pdf/xlsx binaries.
+ * Callers must contain the id first (assertEntryUnderRoot / assertEntryUnderFolder).
+ */
+export async function getFileBytes(entry: DriveEntry): Promise<Buffer> {
+  if (entry.isFolder || entry.mimeType.startsWith("application/vnd.google-apps.")) {
+    throw new UnsupportedTranscriptTypeError(`Not a downloadable binary: ${entry.mimeType}`);
+  }
+  const url = `${DRIVE_API}/files/${encodeURIComponent(entry.id)}?alt=media&supportsAllDrives=true`;
+  const res = await driveFetch(url);
+  if (!res.ok) throw new Error(`drive media read ${res.status}: ${await res.text()}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
 /** Overwrite a plain-text file's contents (media upload). Google Docs are not editable this way. */
 export async function updateTextFile(entry: DriveEntry, text: string): Promise<DriveEntry> {
   if (entry.mimeType === GOOGLE_DOC_MIME || !entry.mimeType.startsWith("text/")) {
@@ -345,4 +441,30 @@ export async function assertEntryUnderRoot(id: string): Promise<DriveEntry> {
     current = await getEntry(next);
   }
   throw new DriveOutsideRootError(`Entry ${id} is not under the configured root folder`);
+}
+
+/**
+ * Tighter than assertEntryUnderRoot: prove `fileId` lives under a SPECIFIC
+ * `folderId` (the job user's assigned folder), not merely somewhere under the
+ * owner root. Used by the agent file-download route so a stale/cross-linked
+ * StatementFile pointing at another client's folder under the same root is
+ * rejected. Throws DriveOutsideRootError if the parent chain never reaches
+ * `folderId`. Returns the entry on success.
+ */
+export async function assertEntryUnderFolder(fileId: string, folderId: string): Promise<DriveEntry> {
+  if (!folderId) throw new Error("assertEntryUnderFolder: folderId required");
+  const entry = await getEntry(fileId);
+  if (fileId === folderId) return entry;
+
+  let current = entry;
+  const seen = new Set<string>([fileId]);
+  for (let i = 0; i < 50; i++) {
+    const parents = current.parents ?? [];
+    if (parents.includes(folderId)) return entry;
+    const next = parents.find((p) => !seen.has(p));
+    if (!next) break;
+    seen.add(next);
+    current = await getEntry(next);
+  }
+  throw new DriveOutsideRootError(`Entry ${fileId} is not under folder ${folderId}`);
 }

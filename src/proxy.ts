@@ -13,6 +13,10 @@ const isPublicRoute = createRouteMatcher([
   // refresh session JWTs for background fetches — auth.protect() here would
   // 401 every save. Remove this entry once prod runs pk_live/sk_live keys.
   "/admin/api(.*)",
+  // Agent runtime routes: server-to-server (onlyclaw → app). No browser session
+  // exists on these calls; the handlers enforce their own bearer + per-job
+  // token auth (lib/agentRuntimeAuth.ts).
+  "/api/agent(.*)",
 ]);
 
 export default clerkMiddleware(async (auth, req) => {

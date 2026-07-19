@@ -16,6 +16,9 @@ export default async function DashLayout({ children }: { children: React.ReactNo
             <Link href="/admin/drive" className="text-muted-foreground transition-colors hover:text-foreground">
               Drive
             </Link>
+            <Link href="/admin/reports" className="text-muted-foreground transition-colors hover:text-foreground">
+              Reports
+            </Link>
             <Link href="/admin/settings" className="text-muted-foreground transition-colors hover:text-foreground">
               Settings
             </Link>

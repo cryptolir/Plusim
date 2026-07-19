@@ -58,3 +58,95 @@ model UserDriveFolder {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 }
+
+// ---------------------------------------------------------------------------
+// Statement-categorization pipeline (admin upload → onlyclaw agent → report).
+// Money is stored as agorot integers — never floats. docs/REPORTS_PIPELINE.md.
+// ---------------------------------------------------------------------------
+
+model ReportJob {
+  id            String    @id @default(cuid())
+  targetUserId  String // Clerk userId whose report section shows this job
+  createdBy     String // admin email
+  status        String    @default("uploaded") // uploaded|dispatched|processing|needs_review|completed|published|failed
+  title         String?
+  error         String?
+  verification  Json? // agent-reported + app-recomputed reconciliation
+  sheetUrl      String? // Google Sheets export (set on publish)
+  // Per-job bearer for /api/agent/jobs/<id>/* — sha256 hex of the raw token.
+  agentTokenHash      String?
+  agentTokenExpiresAt DateTime?
+  dispatchedAt  DateTime?
+  completedAt   DateTime?
+  publishedAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  files         StatementFile[]
+  artifacts     ReportArtifact[]
+  transactions  ReportTransaction[]
+
+  @@index([targetUserId, publishedAt(sort: Desc)])
+}
+
+// Raw statement bytes live in the client's Google Drive folder (never Postgres),
+// reusing the Havaya owner-OAuth routine. We keep only the Drive ids + metadata:
+//   driveFileId   — the uploaded file
+//   driveFolderId — the UserDriveFolder it was written into, so a read can be
+//                   re-bound to the job user's folder (not merely the owner root).
+model StatementFile {
+  id            String    @id @default(cuid())
+  jobId         String
+  filename      String
+  mime          String
+  size          Int
+  driveFileId   String
+  driveFolderId String
+  sourceLabel   String? // e.g. "isracard-4962", "max"
+  createdAt     DateTime  @default(now())
+  job           ReportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId])
+}
+
+model ReportArtifact {
+  id        String    @id @default(cuid())
+  jobId     String
+  filename  String
+  bytes     Bytes
+  createdAt DateTime  @default(now())
+  job       ReportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId])
+}
+
+model ReportTransaction {
+  id            String    @id @default(cuid())
+  jobId         String
+  month         String // "2026-06" — calendar month of the TRANSACTION date
+  date          String // ISO "2026-06-14"
+  merchant      String
+  amountAgorot  Int // negative = refund/credit
+  category      String? // taxonomy leaf name; null when uncategorized
+  uncategorized Boolean   @default(false)
+  sourceLabel   String // which statement/card this came from
+  note          String?
+  dedupKey      String // parser-computed identity (voucher id or date|merchant|amount)
+  createdAt     DateTime  @default(now())
+  job           ReportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, month])
+}
+
+// Learned merchant→category dictionary. Approved rows are included in every
+// job manifest so the deterministic pass grows over time.
+model MerchantMapping {
+  id              String   @id @default(cuid())
+  merchantPattern String   @unique // normalized merchant string
+  category        String // taxonomy leaf name
+  source          String // "admin" | "agent"
+  approved        Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([approved])
+}
