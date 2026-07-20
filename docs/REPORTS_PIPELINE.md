@@ -85,6 +85,23 @@ src/lib/googleDrive.ts                    + uploadBinaryFile() (raw statement up
 agent/skills/plusim-reports/              the onlyclaw skill (source of truth)
 ```
 
+## Tests
+
+`pnpm test` (vitest, 43 tests) — one per trust-boundary invariant:
+
+```
+src/lib/reportResult.test.ts              verifyAgentResult fatal-vs-reviewable per class;
+                                          parseAgentResult fail-closed; decodeXlsx non-zip
+src/lib/agentRuntimeAuth.test.ts          both auth layers (bearer + per-job token) — 401/404 matrix
+src/app/api/agent/agentRoutes.test.ts     each public route invokes the guard; files/ folder-confinement
+src/app/api/agent/resultRace.test.ts      conditional write: 0 rows ⇒ 409, nothing persisted
+src/app/admin/api/reports/publishGuard.test.ts    every fatal class ⇒ publish 409; non-fatal ⇒ publishes
+src/app/admin/api/reports/uploadContainment.test.ts   no folder / not connected / moved-or-deleted ⇒ 409
+```
+
+Test files are excluded from the production TypeScript build (`tsconfig` +
+vitest's own config), so `next build` never needs the `vitest` devDependency.
+
 ## Verified baseline
 
 The skill's pipeline was validated against 5 real statements (2 Isracard xlsx,

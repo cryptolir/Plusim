@@ -29,6 +29,8 @@ A running list of features by status. Each entry is a title only — details / s
 
 - **Google Drive meeting-transcripts admin** — **live as of 2026-06 ✅** browse the shared Drive folder, assign a subfolder per user, summarize a transcript with the `life` agent (saved back to Drive), view/edit raw transcripts, delete (trash) files, and a home **"Past meeting"** prompt that resumes chat grounded in the latest summary. OAuth-as-owner (`src/lib/googleDrive.ts`), `AppSetting` (encrypted refresh token) + `UserDriveFolder` models, admin pages under `/admin/drive`. The **summary method is admin-editable** (`/admin/settings` + a field below the browser on `/admin/drive`, stored in `AppSetting.summary_instructions`; default = the TAL method). See [docs/DRIVE_INTEGRATION.md](./docs/DRIVE_INTEGRATION.md).
 
+- **Statement-categorization pipeline** — **live as of 2026-07 ✅** admin uploads Israeli card statements (Isracard/Leumi xlsx, MAX pdf) at `/admin/reports`; the `onlyclaw` agent (per-agent `plusim-reports` skill) parses/dedups/categorizes into the household budget taxonomy and builds a month-sheet xlsx verified to the agora; the target user sees the report at `/report` (RTL tables + xlsx download + Google Sheet). Raw statements live in the client's Drive folder (not Postgres); public `/api/agent/*` routes are gated by a static runtime bearer + per-job token; ingestion fails closed (fatal-vs-reviewable verification + a publish guard). 43 vitest tests. See [docs/REPORTS_PIPELINE.md](./docs/REPORTS_PIPELINE.md) and [agent/skills/plusim-reports/](./agent/skills/plusim-reports/).
+
 ## In progress
 
 - _Nothing actively in development._

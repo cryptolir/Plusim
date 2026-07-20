@@ -49,6 +49,25 @@ This script:
 | `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Clerk dashboard → API Keys |
 | `CLERK_SECRET_KEY` | Clerk dashboard → API Keys |
 | `AGENTGLOB_AGENT_NAME` | `onlyclaw` |
+| `ADMIN_EMAILS` | Comma-separated Clerk emails granted `/admin` access |
+
+### Statement-categorization pipeline (docs/REPORTS_PIPELINE.md)
+
+| Key | Notes |
+|---|---|
+| `PLUSIM_AGENT_RUNTIME_TOKEN` | Static bearer for `/api/agent/*`. Generate `openssl rand -base64 32`; set the **same** value in the AgentGlob workspace secret `PLUSIM_RUNTIME_TOKEN` |
+| `APP_BASE_URL` | `https://plusim.xyz` — used in manifest/file/callback links handed to the agent |
+
+Raw statements are stored in each client's Google Drive folder, so the Drive
+vars below are **required** for this feature (not just the meeting-transcripts
+admin):
+
+| Key | Notes |
+|---|---|
+| `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` | Google Cloud OAuth client (owner consent) |
+| `GOOGLE_OAUTH_REDIRECT_URI` | `https://plusim.xyz/admin/api/drive/callback` |
+| `PLUSIM_DRIVE_ROOT_FOLDER_ID` | The shared Drive root that contains every client subfolder |
+| `DRIVE_TOKEN_ENCRYPTION_KEY` / `DRIVE_OAUTH_STATE_SECRET` | `openssl rand -base64 32` each |
 
 ## Database migrations
 
