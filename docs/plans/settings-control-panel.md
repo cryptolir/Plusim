@@ -1,8 +1,15 @@
 # Plusim — settings control panel + Havaya→Plusim migration cleanup
 
-> **Status:** plan (under review). Feeds the `/admin/settings` rebuild and the
-> finish of the Havaya→Plusim migration. Author changes on the designated branch,
-> merge to `main`, Coolify auto-deploys.
+> **Status:** plan — Rev 2 (ponytail pass folded in; awaiting Codex review).
+> Feeds the `/admin/settings` rebuild and the finish of the Havaya→Plusim
+> migration. Author changes on the designated branch, merge to `main`, Coolify
+> auto-deploys.
+>
+> **Review log:** Rev 1 — initial plan. Rev 2 — ponytail minimalism pass folded
+> in (§ *Ponytail cuts* below): cut the standalone merchant-dictionary CRUD UI,
+> the read-only taxonomy render, the skill-status panel + smoke-test button;
+> `delete` `SECTION_HINTS`; left the `havayaSummary` Drive tag string untouched
+> (correctness). `net: -~300 lines` vs. Rev 1.
 
 ## Context
 
@@ -73,11 +80,13 @@ editor points at the generic one. Reuse `authorizeDriveRequest` for auth
 verbatim (it is the app's admin-save gate, not Drive-specific).
 
 **A1. Chat guidance** (`chat_preamble`). Admin textarea. Injected as the
-first-message preamble for plain conversations, replacing the hardcoded
-`SECTION_HINTS` (whose keys — pricing/features/onboarding — reference pages that
-do not exist in Plusim). `chat/route.ts:86` reads the setting; blank → no
-preamble (today's behavior for unknown contexts). The linked-folder meeting
-context path (`buildLinkedFolderContext`) is unchanged.
+first-message preamble for plain conversations. `chat/route.ts:86` reads the
+setting; blank → no preamble (today's behavior for unknown contexts). The
+linked-folder meeting context path (`buildLinkedFolderContext`) is unchanged.
+**`delete:` the `SECTION_HINTS` map** (`src/lib/sectionHints.ts`) — dead config
+whose keys (pricing/features/onboarding) reference pages that do not exist in
+Plusim; its single live reference in `chat/route.ts` becomes the `chat_preamble`
+read.
 
 **A2. Home prompts** (`home_prompts`, newline-separated) **+ owner note**
 (`home_note`, markdown). `page.tsx` reads these two from the DB instead of the two
@@ -97,17 +106,19 @@ categorization tuning happens in-app and takes effect on the next job. **Blank �
 the current hardcoded constraints object is used as the fallback** (no regression,
 never ship an empty rules block to the agent).
 
-**A5. Merchant dictionary + taxonomy (read/light-write).** A section listing
-`MerchantMapping` rows (pattern → category, approved flag) with add/approve/delete
-via the **existing** `/admin/api/report-mappings` routes, plus a **read-only**
-render of `REPORT_TAXONOMY`. This surfaces at settings level what today is only
-reachable inside a single job's detail page.
+**A5. Merchant dictionary (read-only list).** A section listing the approved
+`MerchantMapping` rows (pattern → category) so the admin can *see* what the
+deterministic categorizer covers, with a link to a job's detail page where they
+are already editable. **No new write surface** — the `/admin/api/report-mappings`
+routes + the `ReportJobDetail` editor already do add/approve/delete
+(*ponytail `yagni:` — don't build a second management UI*). No taxonomy render
+(*ponytail `yagni:` — `REPORT_TAXONOMY` is static config, nothing to manage*).
 
-**A6. Agent/skill status (read-only).** A panel stating the repo skill version
-(`agent/skills/plusim-reports/`), the required env prerequisites, and a **"smoke
-test"** button that POSTs a trivial message to the agent and shows the reply — the
-honest substitute for "manage skills," with a one-line note that skill *files*
-are edited on AgentGlob, not here.
+**A6. Agent/skill note (static).** A one-paragraph note stating that onlyclaw's
+skill *files* are managed on AgentGlob (not API-editable from here), and that
+this page controls the behavior levers the app delivers — chat preamble, home
+content, report rules. No live status panel, no smoke-test button
+(*ponytail `yagni:`/`shrink:` — real report jobs already exercise the agent*).
 
 ### Phase B — financial summary default (decision 1a)
 
@@ -137,17 +148,33 @@ rewrite, keep the mechanism.
   rewritten for Plusim (ARCHITECTURE's mechanics are still accurate — mostly
   find/replace + a reports section). `docs/DRIVE_INTEGRATION.md` "life" → onlyclaw.
 - **Code cosmetics** — rename the `havaya_` multipart boundary
-  (`googleDrive.ts:259`) and the "same routine as Havaya summaries" comments.
-  The **`appProperties.havayaSummary` Drive tag** (`googleDrive.ts:400`,
-  `DriveBrowser.tsx:16`) is **only** renamed after confirming no summary files in
-  the live Drive carry the old tag — otherwise `listSummaries` stops finding them.
-  Safer default: leave the tag string, rename only comments/vars. Decide in review.
+  (`googleDrive.ts:259`, a throwaway local) and the "same routine as Havaya
+  summaries" comments. The **`appProperties.havayaSummary` Drive tag**
+  (`googleDrive.ts:400`, `DriveBrowser.tsx:16`) is **left as-is** — live Drive
+  files already carry it, and renaming the query string would make `listSummaries`
+  stop finding them (correctness > cosmetics). The tag is invisible to users.
 
 ## Non-goals
 
 - Editing onlyclaw's workspace skill files from the app (no AgentGlob API for it).
 - Per-user prompt/note differences (the Option 1 path) — a single admin default only.
 - Changing the agent-facing auth, the reports pipeline, or the taxonomy contents.
+
+## Ponytail cuts (Rev 2)
+
+Over-engineering pass (7-rung ladder; guardrails — trust boundary, data-loss,
+security — never cut):
+
+- `yagni:` standalone merchant-dictionary CRUD manager → read-only list + link
+  (the `report-mappings` routes + `ReportJobDetail` editor already manage them).
+- `yagni:` read-only taxonomy render (`REPORT_TAXONOMY` is static config).
+- `yagni:`/`shrink:` skill-status panel + smoke-test button → a static note.
+- `delete:` `SECTION_HINTS` (dead — keys reference nonexistent Plusim pages).
+- **Kept:** `SETTING_KEYS` allowlist (trust boundary on the generic route),
+  `report_rules`→hardcoded fallback (data integrity), the generic `appSettings`
+  accessor (rung 2 reuse — fewer lines than N per-key modules).
+
+`net: -~300 lines` vs. Rev 1.
 
 ## Risks / contingencies
 
