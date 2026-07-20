@@ -1,8 +1,10 @@
 # Plusim — settings control panel + Havaya→Plusim migration cleanup
 
-> **Status:** plan — Rev 4 (Codex rounds 1–2 folded in; implemented). Feeds the
-> `/admin/settings` rebuild and the finish of the Havaya→Plusim migration. Author
-> changes on the designated branch, merge to `main`, Coolify auto-deploys.
+> **Status:** ✅ **SHIPPED (live 2026-07)** — Rev 4 (ponytail + Codex rounds 1–2
+> folded in). Merged to `main` in PR #9; the app deployed via Coolify and the
+> `report_rules` skill consumer (`run_job.py` + `SKILL.md`) is synced byte-for-byte
+> into onlyclaw's workspace (verified via git blob SHA). This doc is now the
+> as-built record.
 >
 > **Review log:** Rev 1 — initial plan. Rev 2 — ponytail minimalism pass folded
 > in (§ *Ponytail cuts* below): cut the standalone merchant-dictionary CRUD UI,

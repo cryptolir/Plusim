@@ -72,6 +72,29 @@ after any fresh install of the skill from this repo.
    reconciliation ✓ (agora-exact). `needs_review` means a total mismatch or a
    malformed callback — the verification panel lists the reasons.
 
+## 7. Updating the skill
+
+The skill is versioned in the Plusim repo (this folder); the workspace runs a
+copy. To pick up a change, re-sync the changed files into the workspace, keeping
+paths under `skills/plusim-reports/`:
+
+- **GitHub MCP (from a chat/Telegram session):** if onlyclaw has the GitHub MCP
+  server configured (read access to `cryptolir/Plusim`), tell it to read the
+  changed files from `main` and overwrite its workspace copies — note the path
+  shift, e.g. repo `agent/skills/plusim-reports/scripts/run_job.py` → workspace
+  `skills/plusim-reports/scripts/run_job.py`. Confirm with
+  `python3 -m py_compile skills/plusim-reports/scripts/run_job.py` (and compare
+  git blob SHAs to be sure the copy is byte-identical to `main`).
+- **Direct drop:** upload via the dashboard skill install, or copy into the workspace.
+
+Do NOT re-fetch `vendor/` unless a new Python dependency was added; after a full
+re-install of the skill, rebuild it with the §4 command.
+
+**`report_rules`.** Admin categorization rules (set in Plusim `/admin/settings`)
+arrive in the manifest as `reportRules`; `run_job.py prepare` writes them into
+`needs_judgment.json` and `SKILL.md` step 3 applies them to the unresolved
+shortlist. No env/secret change is needed — it rides the existing manifest.
+
 ## Security notes
 
 - Job chat sessions are isolated (`app:plusim:report-job:<jobId>`, no
