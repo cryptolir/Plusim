@@ -43,16 +43,16 @@ export default async function AdminDashboard() {
 
   return (
     <div>
-      <h1 className="mb-4 text-xl font-semibold">Users ({rows.length})</h1>
+      <h1 className="mb-4 text-xl font-semibold">משתמשים ({rows.length})</h1>
       <div className="overflow-x-auto rounded-xl border">
         <table className="w-full text-sm">
           <thead className="bg-muted/50 text-left">
             <tr>
-              <th className="px-3 py-2 font-medium">User</th>
-              <th className="px-3 py-2 font-medium">Last usage</th>
-              <th className="px-3 py-2 font-medium">Chats</th>
-              <th className="px-3 py-2 font-medium">Drive folder</th>
-              <th className="px-3 py-2 font-medium">User file</th>
+              <th className="px-3 py-2 font-medium">משתמש</th>
+              <th className="px-3 py-2 font-medium">שימוש אחרון</th>
+              <th className="px-3 py-2 font-medium">שיחות</th>
+              <th className="px-3 py-2 font-medium">תיקיית Drive</th>
+              <th className="px-3 py-2 font-medium">קובץ משתמש</th>
             </tr>
           </thead>
           <tbody>
@@ -73,18 +73,18 @@ export default async function AdminDashboard() {
                         📁 {r.driveFolder}
                       </span>
                       <Link href={`/admin/users/${r.id}/drive`} className="text-xs text-blue-600 underline">
-                        change
+                        שינוי
                       </Link>
                     </span>
                   ) : (
                     <Link href={`/admin/users/${r.id}/drive`} className="text-blue-600 underline">
-                      Assign
+                      שיוך
                     </Link>
                   )}
                 </td>
                 <td className="px-3 py-2">
                   <Link href={`/admin/users/${r.id}/file`} className="text-blue-600 underline">
-                    Edit file
+                    עריכת קובץ
                   </Link>
                 </td>
               </tr>
@@ -92,7 +92,7 @@ export default async function AdminDashboard() {
             {rows.length === 0 && (
               <tr>
                 <td colSpan={5} className="px-3 py-6 text-center text-muted-foreground">
-                  No users.
+                  אין משתמשים.
                 </td>
               </tr>
             )}

@@ -46,19 +46,19 @@ export default async function AdminDrivePage({
         <h1 className="mb-4 text-xl font-semibold">Google Drive</h1>
         {sp.error && (
           <p className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-            Connection error: {sp.error}
+            שגיאת חיבור: {sp.error}
           </p>
         )}
         <div className="rounded-xl border bg-card p-6">
           <p className="mb-4 text-sm text-muted-foreground">
-            Connect the Google account that owns the meeting transcripts to browse and summarize
-            files. Read + write access is needed (to save summaries back into the folder).
+            חברו את חשבון ה-Google שמחזיק בתמלולי הפגישות כדי לעיין בקבצים ולסכם אותם. נדרשת הרשאת
+            קריאה וכתיבה (כדי לשמור סיכומים בחזרה לתוך התיקייה).
           </p>
           <a
             href="/admin/drive/connect"
             className="inline-flex rounded-full bg-neutral-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-neutral-700"
           >
-            Connect Google Drive
+            חיבור Google Drive
           </a>
         </div>
       </div>
@@ -75,7 +75,7 @@ export default async function AdminDrivePage({
   try {
     [entries, crumbs] = await Promise.all([listChildren(folderId), breadcrumbs(folderId)]);
   } catch (e) {
-    loadError = e instanceof Error ? e.message : "Failed to load folder";
+    loadError = e instanceof Error ? e.message : "טעינת התיקייה נכשלה";
   }
 
   return (
@@ -83,16 +83,16 @@ export default async function AdminDrivePage({
       <div className="mb-3 flex items-center justify-between gap-2">
         <h1 className="text-xl font-semibold">Google Drive</h1>
         <span className="text-xs text-muted-foreground">
-          {email ? `Connected as ${email}` : "Connected"} ·{" "}
+          {email ? `מחובר בתור ${email}` : "מחובר"} ·{" "}
           <a href="/admin/drive/connect" className="underline">
-            reconnect
+            חיבור מחדש
           </a>
         </span>
       </div>
 
       {sp.connected && (
         <p className="mb-3 rounded-lg border border-emerald-200 bg-emerald-50 p-2 text-sm text-emerald-700">
-          Connected ✓
+          מחובר ✓
         </p>
       )}
 
@@ -118,13 +118,13 @@ export default async function AdminDrivePage({
       )}
 
       <section className="mt-8 border-t pt-6">
-        <h2 className="text-sm font-semibold">Summary method (skill)</h2>
+        <h2 className="text-sm font-semibold">שיטת הסיכום (skill)</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          The method the agent applies when summarizing a transcript is now edited on the{" "}
+          השיטה שהסוכן מפעיל כשהוא מסכם תמלול נערכת כעת בעמוד{" "}
           <Link href="/admin/settings" className="underline">
-            Settings
-          </Link>{" "}
-          page.
+            ההגדרות
+          </Link>
+          .
         </p>
       </section>
     </div>

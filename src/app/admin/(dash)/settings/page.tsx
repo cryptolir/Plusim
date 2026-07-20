@@ -32,35 +32,35 @@ export default async function AdminSettingsPage() {
 
   return (
     <div className="mx-auto max-w-3xl pb-16">
-      <h1 className="text-xl font-semibold">Settings</h1>
+      <h1 className="text-xl font-semibold">הגדרות</h1>
       <p className="mt-1 text-sm text-muted-foreground">
-        Control how Plusim talks to users and how the {AGENT} agent behaves — from here, without the
-        AgentGlob dashboard.
+        שלטו כאן באופן שבו Plusim מדבר עם המשתמשים ובאופן שבו סוכן ה-{AGENT} מתנהג — בלי צורך
+        בדשבורד AgentGlob.
       </p>
 
       {/* Chat guidance */}
       <section className="mt-6 border-t pt-6">
-        <h2 className="text-sm font-semibold">Chat guidance</h2>
+        <h2 className="text-sm font-semibold">הנחיות לשיחה</h2>
         <p className="mb-3 mt-1 text-sm text-muted-foreground">
-          Steering text prepended (invisibly) to the first message of every new chat — e.g. tone,
-          language, what to focus on. Leave blank for none. It augments, never replaces, a user&apos;s
-          own meeting-summary context.
+          טקסט הכוונה שמתווסף (באופן בלתי נראה) בתחילת ההודעה הראשונה בכל שיחה חדשה — למשל טון,
+          שפה, במה להתמקד. השאירו ריק אם אין צורך. הטקסט מוסיף להקשר סיכומי הפגישות של המשתמש
+          ולעולם לא מחליף אותו.
         </p>
         <SettingEditor
           settingKey="chat_preamble"
           initial={chatPreamble ?? ""}
           saveToken={saveToken}
-          placeholder="e.g. You are Plusim's financial guide. Be concise and practical; reply in Hebrew."
+          placeholder="לדוגמה: אתה המדריך הפיננסי של Plusim. היה תמציתי ומעשי; השב בעברית."
           heightClass="h-40"
         />
       </section>
 
       {/* Home prompts */}
       <section className="mt-8 border-t pt-6">
-        <h2 className="text-sm font-semibold">Home prompts</h2>
+        <h2 className="text-sm font-semibold">הצעות לעמוד הבית</h2>
         <p className="mb-3 mt-1 text-sm text-muted-foreground">
-          Clickable suggestion chips on the signed-in home hub — <strong>one prompt per line</strong>{" "}
-          (first 5 shown). Blank hides the panel.
+          תגיות הצעה ללחיצה בעמוד הבית של משתמשים מחוברים — <strong>שורה אחת לכל הצעה</strong>{" "}
+          (מוצגות עד 5 הראשונות). השאירו ריק כדי להסתיר את הפאנל.
         </p>
         <SettingEditor
           settingKey="home_prompts"
@@ -73,10 +73,10 @@ export default async function AdminSettingsPage() {
 
       {/* Owner note */}
       <section className="mt-8 border-t pt-6">
-        <h2 className="text-sm font-semibold">Home owner note</h2>
+        <h2 className="text-sm font-semibold">הערת מנהל לעמוד הבית</h2>
         <p className="mb-3 mt-1 text-sm text-muted-foreground">
-          A short markdown note shown at the top of the home hub (announcements, a welcome line).
-          Blank hides it.
+          הערת markdown קצרה שמוצגת בראש עמוד הבית (הודעות, שורת ברוכים הבאים). השאירו ריק כדי
+          להסתיר אותה.
         </p>
         <SettingEditor
           settingKey="home_note"
@@ -89,32 +89,31 @@ export default async function AdminSettingsPage() {
 
       {/* Report categorization rules */}
       <section className="mt-8 border-t pt-6">
-        <h2 className="text-sm font-semibold">Report categorization rules</h2>
+        <h2 className="text-sm font-semibold">כללי סיווג דוחות</h2>
         <p className="mb-3 mt-1 text-sm text-muted-foreground">
-          Free-text guidance the {AGENT} agent applies when it has to <strong>judge a merchant</strong>{" "}
-          the built-in rules and the merchant dictionary couldn&apos;t place — sent in every job&apos;s
-          manifest. It steers the model&apos;s judgment of <em>unresolved</em> merchants; it does{" "}
-          <strong>not</strong> override a category the deterministic pass already assigned. For a hard
-          &ldquo;this merchant always → that category&rdquo; rule, approve a{" "}
-          <strong>merchant-dictionary</strong> mapping instead (below) — those are applied first and win.
-          Blank ⇒ the built-in playbook only. Takes effect on the next report job.
+          הנחיה חופשית שסוכן {AGENT} מיישם כשהוא צריך <strong>לשפוט בית עסק</strong> שהכללים
+          המובנים ומילון בתי העסק לא הצליחו לשבץ — נשלחת במניפסט של כל עבודה. ההנחיה מכוונת את
+          שיקול הדעת של המודל לגבי בתי עסק <em>לא פתורים</em>; היא <strong>לא</strong> דורסת קטגוריה
+          שכבר הוקצתה על ידי המעבר הדטרמיניסטי. לכלל נוקשה מסוג &ldquo;בית עסק כזה תמיד → קטגוריה
+          כזו&rdquo;, אשרו במקום זאת מיפוי ב<strong>מילון בתי העסק</strong> (למטה) — מיפויים כאלה
+          מוחלים ראשונים וגוברים. ריק ⇒ רק ספר הפעולות המובנה. נכנס לתוקף בעבודת הדוח הבאה.
         </p>
         <SettingEditor
           settingKey="report_rules"
           initial={reportRules ?? ""}
           saveToken={saveToken}
-          placeholder={'e.g. "אם מופיע רק שם קניון ללא חנות → un_categorized" · "עסקאות מלונות/נופש → נופש וחופשות"'}
+          placeholder={'לדוגמה: "אם מופיע רק שם קניון ללא חנות → un_categorized" · "עסקאות מלונות/נופש → נופש וחופשות"'}
           heightClass="h-48"
         />
       </section>
 
       {/* Meeting summary method */}
       <section className="mt-8 border-t pt-6">
-        <h2 className="text-sm font-semibold">Meeting summary method</h2>
+        <h2 className="text-sm font-semibold">שיטת סיכום הפגישות</h2>
         <p className="mb-3 mt-1 text-sm text-muted-foreground">
-          The method the agent applies when summarizing a meeting transcript from Drive. Leave blank
-          to use the built-in default. The transcript and the output format (TITLE/DATE + Hebrew) are
-          added automatically — just describe the method/structure here.
+          השיטה שהסוכן מיישם כשהוא מסכם תמלול פגישה מ-Drive. השאירו ריק כדי להשתמש בברירת המחדל
+          המובנית. התמלול ופורמט הפלט (TITLE/DATE + עברית) מתווספים אוטומטית — תארו כאן רק את
+          השיטה/המבנה.
         </p>
         <SettingEditor
           settingKey="summary_instructions"
@@ -127,26 +126,26 @@ export default async function AdminSettingsPage() {
 
       {/* Merchant dictionary (read-only) */}
       <section className="mt-8 border-t pt-6">
-        <h2 className="text-sm font-semibold">Merchant dictionary</h2>
+        <h2 className="text-sm font-semibold">מילון בתי עסק</h2>
         <p className="mb-3 mt-1 text-sm text-muted-foreground">
-          The {mappings.length} approved merchant → category mapping{mappings.length === 1 ? "" : "s"}{" "}
-          the deterministic categorizer applies before the agent judges anything. Add or approve
-          mappings from a{" "}
+          {mappings.length}{" "}
+          {mappings.length === 1 ? "מיפוי בית עסק → קטגוריה מאושר" : "מיפויי בית עסק → קטגוריה מאושרים"}{" "}
+          שהמסווג הדטרמיניסטי מיישם לפני שהסוכן שופט דבר. הוסיפו או אשרו מיפויים דרך{" "}
           <Link href="/admin/reports" className="underline">
-            report job&apos;s detail page
+            עמוד הפרטים של עבודת דוח
           </Link>
           .
         </p>
         {mappings.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No approved mappings yet.</p>
+          <p className="text-sm text-muted-foreground">אין עדיין מיפויים מאושרים.</p>
         ) : (
           <div className="max-h-72 overflow-y-auto rounded-xl border">
             <table className="w-full text-sm" dir="auto">
               <thead className="sticky top-0 bg-muted/60 text-left text-xs text-muted-foreground">
                 <tr>
-                  <th className="px-3 py-2 font-medium">Merchant pattern</th>
-                  <th className="px-3 py-2 font-medium">Category</th>
-                  <th className="px-3 py-2 font-medium">Source</th>
+                  <th className="px-3 py-2 font-medium">תבנית בית עסק</th>
+                  <th className="px-3 py-2 font-medium">קטגוריה</th>
+                  <th className="px-3 py-2 font-medium">מקור</th>
                 </tr>
               </thead>
               <tbody>
@@ -165,13 +164,12 @@ export default async function AdminSettingsPage() {
 
       {/* Agent & skills (static note) */}
       <section className="mt-8 border-t pt-6">
-        <h2 className="text-sm font-semibold">Agent &amp; skills</h2>
+        <h2 className="text-sm font-semibold">הסוכן וה-skills</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          Plusim runs on the AgentGlob agent <code className="rounded bg-muted px-1">{AGENT}</code>.
-          The agent&apos;s persona and its installed skill <em>files</em> (e.g. the statement-parsing
-          skill) live on AgentGlob and are managed there — they can&apos;t be edited from this app.
-          What you tune here are the levers Plusim sends the agent on every request: the chat
-          guidance above, and the report categorization rules that ride along in each job.
+          Plusim פועל על גבי סוכן ה-AgentGlob בשם <code className="rounded bg-muted px-1">{AGENT}</code>.
+          אישיות הסוכן וקובצי ה-<em>skill</em> המותקנים שלו (למשל ה-skill לפענוח דפי חשבון) מנוהלים
+          ב-AgentGlob — אי אפשר לערוך אותם מהאפליקציה הזו. מה שכן ניתן לכוונן כאן הם הפרמטרים
+          ש-Plusim שולח לסוכן בכל בקשה: הנחיות השיחה שלמעלה, וכללי סיווג הדוחות שנשלחים עם כל עבודה.
         </p>
       </section>
     </div>

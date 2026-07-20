@@ -17,7 +17,7 @@ export function FileEditor({
   const [content, setContent] = useState(initialContent);
   const [curEtag, setCurEtag] = useState(etag);
   const [status, setStatus] = useState<string | null>(
-    exists ? null : "This file doesn't exist yet — saving will create it.",
+    exists ? null : "הקובץ הזה עדיין לא קיים — שמירה תיצור אותו.",
   );
   const [conflict, setConflict] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -41,21 +41,21 @@ export function FileEditor({
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
         setCurEtag(typeof data.etag === "string" ? data.etag : curEtag);
-        setStatus("Saved ✓");
+        setStatus("נשמר ✓");
       } else if (res.status === 409) {
         setConflict(true);
         setStatus(
-          "This file changed since you opened it. Reload to get the latest, or force-save to overwrite.",
+          "הקובץ הזה השתנה מאז שפתחתם אותו. טענו מחדש כדי לקבל את הגרסה העדכנית, או בצעו שמירה בכפייה כדי לדרוס אותה.",
         );
       } else if (res.status === 401) {
-        setStatus("Save authorization expired — reload the page, then save again.");
+        setStatus("הרשאת השמירה פגה — טענו מחדש את הדף ונסו לשמור שוב.");
       } else if (res.status === 403) {
-        setStatus("This account isn't on the admin list (ADMIN_EMAILS) — sign in with an admin account.");
+        setStatus("החשבון הזה לא ברשימת המנהלים (ADMIN_EMAILS) — התחברו עם חשבון מנהל.");
       } else {
-        setStatus(`Save failed: ${data.error ?? res.status}`);
+        setStatus(`השמירה נכשלה: ${data.error ?? res.status}`);
       }
     } catch (e) {
-      setStatus(`Save failed: ${String(e)}`);
+      setStatus(`השמירה נכשלה: ${String(e)}`);
     } finally {
       setSaving(false);
     }
@@ -76,7 +76,7 @@ export function FileEditor({
           disabled={saving}
           className="rounded-full bg-neutral-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-neutral-700 disabled:opacity-50"
         >
-          {saving ? "Saving…" : "Save"}
+          {saving ? "שומר…" : "שמירה"}
         </button>
         {conflict && (
           <>
@@ -84,14 +84,14 @@ export function FileEditor({
               onClick={() => window.location.reload()}
               className="rounded-full border px-4 py-2 text-sm transition-colors hover:bg-muted"
             >
-              Reload latest
+              טעינת הגרסה העדכנית
             </button>
             <button
               onClick={() => save(true)}
               disabled={saving}
               className="rounded-full border border-red-300 px-4 py-2 text-sm text-red-600 transition-colors hover:bg-red-50"
             >
-              Force save
+              שמירה בכפייה
             </button>
           </>
         )}
