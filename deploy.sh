@@ -18,5 +18,5 @@ git push origin main
 
 echo ""
 echo "✓ GitHub is up to date."
-echo "  Coolify will auto-deploy → https://app.havaya.me"
+echo "  Coolify will auto-deploy → https://plusim.xyz"
 echo "  Watch progress: http://178.104.184.3:8000"

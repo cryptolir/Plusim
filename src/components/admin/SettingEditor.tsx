@@ -1,18 +1,30 @@
 "use client";
 import { useState } from "react";
 
-export function SummaryInstructionsEditor({
+/**
+ * Generic admin setting editor — a textarea that PUTs to the allowlisted
+ * `/admin/api/settings/[key]` route. Reused for every section on /admin/settings.
+ * Pass `defaultText` for settings that have a built-in default (adds a "Load
+ * default" button and the "using the built-in default" hint); omit it for
+ * free-text settings that are simply blank when unset.
+ */
+export function SettingEditor({
+  settingKey,
   initial,
-  defaultText,
-  usingDefault,
   saveToken,
+  defaultText,
+  placeholder,
+  heightClass = "h-48",
 }: {
+  settingKey: string;
   initial: string;
-  defaultText: string;
-  usingDefault: boolean;
   saveToken: string;
+  defaultText?: string;
+  placeholder?: string;
+  heightClass?: string;
 }) {
   const [text, setText] = useState(initial);
+  const usingDefault = Boolean(defaultText) && !initial.trim();
   const [status, setStatus] = useState<string | null>(
     usingDefault ? "Currently using the built-in default." : null,
   );
@@ -22,14 +34,20 @@ export function SummaryInstructionsEditor({
     setSaving(true);
     setStatus("Saving…");
     try {
-      const res = await fetch("/admin/api/settings/summary-instructions", {
+      const res = await fetch(`/admin/api/settings/${settingKey}`, {
         method: "PUT",
         headers: { "content-type": "application/json", "x-admin-save-token": saveToken },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ value: text }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
-        setStatus(text.trim() ? "Saved ✓" : "Cleared — using the built-in default.");
+        setStatus(
+          text.trim()
+            ? "Saved ✓"
+            : defaultText
+              ? "Cleared — using the built-in default."
+              : "Cleared.",
+        );
       } else {
         setStatus(`Save failed: ${data.error ?? res.status}`);
       }
@@ -46,8 +64,8 @@ export function SummaryInstructionsEditor({
         value={text}
         onChange={(e) => setText(e.target.value)}
         dir="auto"
-        placeholder={defaultText}
-        className="h-[58vh] w-full rounded-xl border p-3 text-sm leading-relaxed"
+        placeholder={placeholder ?? defaultText}
+        className={`${heightClass} w-full rounded-xl border p-3 text-sm leading-relaxed`}
       />
       <div className="flex flex-wrap items-center gap-2">
         <button
@@ -57,20 +75,22 @@ export function SummaryInstructionsEditor({
         >
           {saving ? "Saving…" : "Save"}
         </button>
-        <button
-          onClick={() => setText(defaultText)}
-          disabled={saving}
-          className="rounded-full border px-4 py-2 text-sm transition-colors hover:bg-muted disabled:opacity-50"
-        >
-          Load default
-        </button>
+        {defaultText && (
+          <button
+            onClick={() => setText(defaultText)}
+            disabled={saving}
+            className="rounded-full border px-4 py-2 text-sm transition-colors hover:bg-muted disabled:opacity-50"
+          >
+            Load default
+          </button>
+        )}
         {text.trim() && (
           <button
             onClick={() => setText("")}
             disabled={saving}
             className="text-xs text-red-600 underline disabled:opacity-50"
           >
-            Clear (revert to default)
+            {defaultText ? "Clear (revert to default)" : "Clear"}
           </button>
         )}
         {status && <span className="text-sm text-muted-foreground">{status}</span>}

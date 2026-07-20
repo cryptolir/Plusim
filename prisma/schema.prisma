@@ -89,7 +89,7 @@ model ReportJob {
 }
 
 // Raw statement bytes live in the client's Google Drive folder (never Postgres),
-// reusing the Havaya owner-OAuth routine. We keep only the Drive ids + metadata:
+// reusing the owner-OAuth Drive routine. We keep only the Drive ids + metadata:
 //   driveFileId   — the uploaded file
 //   driveFolderId — the UserDriveFolder it was written into, so a read can be
 //                   re-bound to the job user's folder (not merely the owner root).

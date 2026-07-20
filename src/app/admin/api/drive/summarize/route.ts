@@ -93,7 +93,7 @@ export async function POST(req: NextRequest) {
       console.warn(`[drive/summarize] transcript ${fileId} truncated ${original}→${MAX_TRANSCRIPT_CHARS} chars`);
     }
 
-    const method = await getSummaryInstructions(); // admin-editable, defaults to the TAL method
+    const method = await getSummaryInstructions(); // admin-editable, defaults to the built-in financial-meeting method
     const system =
       "You summarize meeting transcripts by applying the provided method exactly. " +
       "Output ONLY two header lines then the summary, with no preamble: " +

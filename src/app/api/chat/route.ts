@@ -3,7 +3,7 @@ import { getCurrentUser } from "@/lib/auth";
 import { rateLimit } from "@/lib/ratelimit";
 import { db } from "@/lib/db";
 import { callAgent, makeSessionKey } from "@/lib/agentglob";
-import { SECTION_HINTS } from "@/lib/sectionHints";
+import { getSetting } from "@/lib/appSettings";
 import { buildLinkedFolderContext } from "@/lib/pastMeeting";
 
 const MAX_MESSAGE_LENGTH = 3000;
@@ -77,16 +77,21 @@ export async function POST(req: NextRequest) {
     },
   });
 
-  // First-message preamble (invisible to the user). A known static section hint
-  // wins; otherwise — including the "past_meeting" pin and plain conversations —
-  // inject the user's linked-folder meeting context (null when none).
+  // First-message preamble (invisible to the user). Precedence preserves today's
+  // behavior exactly: the "past_meeting" pin and plain conversations always get
+  // the user's linked-folder meeting context (null when none). The admin-set
+  // global `chat_preamble` (if any) is PREPENDED to that context — it augments,
+  // never replaces — so a blank `chat_preamble` is a no-op and never suppresses
+  // the Drive-summary injection.
   let hint: string | null = null;
   if (isFirstMessage) {
-    const ctx = conversation.sectionContext;
-    hint =
-      ctx && ctx !== "past_meeting" && SECTION_HINTS[ctx]
-        ? SECTION_HINTS[ctx]
-        : await buildLinkedFolderContext(userId);
+    const folderContext = await buildLinkedFolderContext(userId);
+    if (conversation.sectionContext === "past_meeting") {
+      hint = folderContext;
+    } else {
+      const preamble = await getSetting("chat_preamble");
+      hint = [preamble, folderContext].filter(Boolean).join("\n\n") || null;
+    }
   }
   const outbound = hint
     ? `<<<context>>>\n${hint}\n<<<end_context>>>\n\nUser said: ${message}`

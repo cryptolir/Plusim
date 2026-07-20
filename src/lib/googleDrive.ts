@@ -256,7 +256,7 @@ export async function createTextFile(opts: {
     mimeType: "text/plain",
     ...(opts.appProperties ? { appProperties: opts.appProperties } : {}),
   };
-  const boundary = `havaya_${crypto.randomUUID()}`;
+  const boundary = `plusim_${crypto.randomUUID()}`;
   const body =
     `--${boundary}\r\n` +
     `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
@@ -397,7 +397,11 @@ export async function trashFile(id: string): Promise<void> {
   if (!res.ok) throw new Error(`drive trash ${res.status}: ${await res.text()}`);
 }
 
-/** Summary files are tagged with appProperties.havayaSummary=true (survives rename). */
+/**
+ * Summary files are tagged with appProperties.havayaSummary=true (survives
+ * rename). NOTE: the tag string is a legacy name kept deliberately — existing
+ * Drive files already carry it, so renaming it would make them undiscoverable.
+ */
 export async function listSummaries(folderId: string): Promise<DriveEntry[]> {
   const params = new URLSearchParams({
     q: `'${folderId}' in parents and trashed=false and appProperties has { key='havayaSummary' and value='true' }`,

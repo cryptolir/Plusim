@@ -3,8 +3,6 @@ import { requireAdmin } from "@/lib/adminClerk";
 import { mintSaveToken } from "@/lib/adminSaveToken";
 import { DRIVE_TOKEN_SCOPE } from "@/lib/driveAuth";
 import { DriveBrowser } from "@/components/admin/DriveBrowser";
-import { SummaryInstructionsEditor } from "@/components/admin/SummaryInstructionsEditor";
-import { DEFAULT_SUMMARY_INSTRUCTIONS, getStoredSummaryInstructions } from "@/lib/summaryInstructions";
 import {
   DRIVE_ROOT_FOLDER_ID,
   getConnectedEmail,
@@ -69,10 +67,7 @@ export default async function AdminDrivePage({
 
   const folderId = sp.folderId || DRIVE_ROOT_FOLDER_ID;
   const driveToken = mintSaveToken(admin.email, DRIVE_TOKEN_SCOPE);
-  const [email, storedInstructions] = await Promise.all([
-    getConnectedEmail(),
-    getStoredSummaryInstructions(),
-  ]);
+  const email = await getConnectedEmail();
 
   let entries: DriveEntry[] = [];
   let crumbs: Crumb[] = [];
@@ -124,18 +119,13 @@ export default async function AdminDrivePage({
 
       <section className="mt-8 border-t pt-6">
         <h2 className="text-sm font-semibold">Summary method (skill)</h2>
-        <p className="mb-3 mt-1 text-sm text-muted-foreground">
-          The method the agent applies when summarizing a transcript from this Drive. Leave blank to
-          use the built-in default (the TAL method). The transcript and output format (TITLE/DATE +
-          Hebrew) are added automatically — just describe the method/structure here. Saved here and
-          on the Settings page interchangeably (same setting).
+        <p className="mt-1 text-sm text-muted-foreground">
+          The method the agent applies when summarizing a transcript is now edited on the{" "}
+          <Link href="/admin/settings" className="underline">
+            Settings
+          </Link>{" "}
+          page.
         </p>
-        <SummaryInstructionsEditor
-          initial={storedInstructions ?? ""}
-          defaultText={DEFAULT_SUMMARY_INSTRUCTIONS}
-          usingDefault={!storedInstructions || !storedInstructions.trim()}
-          saveToken={driveToken}
-        />
       </section>
     </div>
   );

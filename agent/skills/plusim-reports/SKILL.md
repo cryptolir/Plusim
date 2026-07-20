@@ -41,12 +41,17 @@ python3 -m pip install --target {baseDir}/vendor openpyxl pypdf
    `PLUSIM_RUNTIME_TOKEN`), parses every statement, dedups, applies the
    merchant dictionary + deterministic rules, and prints a JSON summary.
 
-2. **Read the shortlist.** `$WD/needs_judgment.json` lists merchants no
-   rule/dictionary entry covers, with sample dates/amounts/notes and MAX's own
-   category hint when present.
+2. **Read the shortlist.** `$WD/needs_judgment.json` is an object with two keys:
+   - `merchants` — the merchants no rule/dictionary entry covers, with sample
+     dates/amounts/notes and MAX's own category hint when present.
+   - `reportRules` — extra admin-authored categorization rules for THIS job (a
+     string; may be empty). Apply them in step 3.
 
 3. **Judge (the only model step).** Following
-   `{baseDir}/reference/categorization-rules.md`, write `$WD/judgments.json`:
+   `{baseDir}/reference/categorization-rules.md` **plus** any `reportRules` from
+   `needs_judgment.json` (admin rules take precedence on conflict; an empty
+   `reportRules` means the static playbook only), assign a category to each
+   merchant in `merchants` and write `$WD/judgments.json`:
 
    ```json
    {

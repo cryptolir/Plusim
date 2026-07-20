@@ -4,6 +4,9 @@ Plusim is the Havaya app pattern re-deployed as a financial-guidance chat app on
 the AgentGlob agent `onlyclaw`. This file is the plan that was executed and the
 as-built record of the live deployment.
 
+> **Historical record.** This documents the one-time Havaya→Plusim migration. For
+> the ongoing deploy protocol and env vars, see [DEPLOY.md](./DEPLOY.md).
+
 ## Plan (template → new app)
 
 1. Clone `cryptolir/Plusim` on the DevAgents server; seed it from the Havaya
