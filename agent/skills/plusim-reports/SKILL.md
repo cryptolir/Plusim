@@ -20,8 +20,14 @@ Everything deterministic (parsing, dedup, arithmetic, workbook build,
 verification) is done by the Python scripts in `{baseDir}/scripts/` — never by
 you reading the files. Your ONLY judgment task is step 3.
 
-Requirements: `python3` with `openpyxl` and `pypdf`
-(`pip install --user openpyxl pypdf` once if missing).
+Requirements: bare `python3` only — `openpyxl` and `pypdf` are **vendored** in
+`{baseDir}/vendor/` (the sandbox wipes `~/.local` between exec calls, so
+`pip install --user` does not survive; `run_job.py` adds `vendor/` to
+`sys.path` itself). If `vendor/` is ever missing, rebuild it once:
+
+```
+python3 -m pip install --target {baseDir}/vendor openpyxl pypdf
+```
 
 ## Pipeline
 

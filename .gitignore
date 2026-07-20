@@ -44,3 +44,5 @@ next-env.d.ts
 # python (agent skill scripts)
 __pycache__/
 *.pyc
+# vendored deps live only in the agent workspace (see AGENT_SETUP.md §4)
+agent/skills/plusim-reports/vendor/

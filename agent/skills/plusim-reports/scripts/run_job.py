@@ -27,7 +27,15 @@ import sys
 import unicodedata
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Third-party deps (openpyxl, pypdf) are vendored into <skill>/vendor/ because
+# the exec sandbox wipes ~/.local between calls, so `pip install --user` does
+# not survive. Rebuild if vendor/ is ever missing:
+#   python3 -m pip install --target <skill>/vendor openpyxl pypdf
+# Must be on sys.path BEFORE the sibling imports below (they import openpyxl/
+# pypdf at module level).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "vendor"))
+sys.path.insert(0, _HERE)
 from build_report_xlsx import build_workbook  # noqa: E402
 from parse_isracard_xlsx import parse_isracard_xlsx  # noqa: E402
 from parse_max_pdf import parse_max_pdf  # noqa: E402
