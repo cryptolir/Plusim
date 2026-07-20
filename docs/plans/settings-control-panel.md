@@ -1,15 +1,18 @@
 # Plusim — settings control panel + Havaya→Plusim migration cleanup
 
-> **Status:** plan — Rev 2 (ponytail pass folded in; awaiting Codex review).
-> Feeds the `/admin/settings` rebuild and the finish of the Havaya→Plusim
-> migration. Author changes on the designated branch, merge to `main`, Coolify
-> auto-deploys.
+> **Status:** plan — Rev 3 (Codex round 1 folded in). Feeds the `/admin/settings`
+> rebuild and the finish of the Havaya→Plusim migration. Author changes on the
+> designated branch, merge to `main`, Coolify auto-deploys.
 >
 > **Review log:** Rev 1 — initial plan. Rev 2 — ponytail minimalism pass folded
 > in (§ *Ponytail cuts* below): cut the standalone merchant-dictionary CRUD UI,
 > the read-only taxonomy render, the skill-status panel + smoke-test button;
 > `delete` `SECTION_HINTS`; left the `havayaSummary` Drive tag string untouched
-> (correctness). `net: -~300 lines` vs. Rev 1.
+> (correctness). `net: -~300 lines` vs. Rev 1. Rev 3 — Codex round 1: **P1** —
+> `report_rules` needs an agent-side consumer (`run_job.py`/SKILL.md), a manifest
+> field alone is a no-op (A4 now three-part); **P2** — blank `chat_preamble` must
+> preserve the `buildLinkedFolderContext` Drive-summary injection, not suppress it
+> (A1 precedence made explicit).
 
 ## Context
 
@@ -79,14 +82,22 @@ per-setting route; the existing `summary-instructions` route is removed once the
 editor points at the generic one. Reuse `authorizeDriveRequest` for auth
 verbatim (it is the app's admin-save gate, not Drive-specific).
 
-**A1. Chat guidance** (`chat_preamble`). Admin textarea. Injected as the
-first-message preamble for plain conversations. `chat/route.ts:86` reads the
-setting; blank → no preamble (today's behavior for unknown contexts). The
-linked-folder meeting context path (`buildLinkedFolderContext`) is unchanged.
+**A1. Chat guidance** (`chat_preamble`). Admin textarea, injected on the first
+message. **Precedence must preserve today's behavior (Codex P2)** — today
+`chat/route.ts:83` sends `buildLinkedFolderContext(userId)` (the hidden
+meeting-summary context) for *every* plain chat and the `past_meeting` pin,
+because `SECTION_HINTS` is always empty in Plusim. So the rewrite is:
+- `past_meeting` pin → `buildLinkedFolderContext` (unchanged).
+- otherwise → `chat_preamble` (if set) **prepended to** `buildLinkedFolderContext`
+  (if any). `chat_preamble` **augments**, never replaces, the per-user Drive
+  context.
+- **blank `chat_preamble` ⇒ exactly today's output** (`buildLinkedFolderContext`
+  or nothing) — it must NOT suppress the Drive-summary injection.
+
+`chat_preamble` replaces only the dead `SECTION_HINTS` branch.
 **`delete:` the `SECTION_HINTS` map** (`src/lib/sectionHints.ts`) — dead config
 whose keys (pricing/features/onboarding) reference pages that do not exist in
-Plusim; its single live reference in `chat/route.ts` becomes the `chat_preamble`
-read.
+Plusim.
 
 **A2. Home prompts** (`home_prompts`, newline-separated) **+ owner note**
 (`home_note`, markdown). `page.tsx` reads these two from the DB instead of the two
@@ -100,11 +111,25 @@ section of the page. Its default becomes the financial method (Phase B). Remove
 the **duplicate** editor block from `/admin/drive` and link to `/admin/settings`
 instead (single source of truth; same setting key).
 
-**A4. Report categorization rules** (`report_rules`). Admin textarea whose text
-is served in the job manifest `constraints` block (`manifest/route.ts:47`), so
-categorization tuning happens in-app and takes effect on the next job. **Blank →
-the current hardcoded constraints object is used as the fallback** (no regression,
-never ship an empty rules block to the agent).
+**A4. Report categorization rules** (`report_rules`). Admin textarea. **A manifest
+field alone is a no-op — it needs an agent-side consumer (Codex P1).** Verified:
+`run_job.py prepare` reads the manifest's `files`/`taxonomy`/`merchantDictionary`
+but **never `constraints`**, and SKILL.md step 2 applies only the bundled
+`reference/categorization-rules.md`. So this item is **three parts**:
+1. **App** — serve `report_rules` as a manifest field (`manifest/route.ts`).
+   Blank ⇒ omit it and keep the current hardcoded `constraints` block (never ship
+   an empty rules block).
+2. **Skill** — `run_job.py prepare` writes any manifest `report_rules` into
+   `$WD/needs_judgment.json`; SKILL.md step 2 tells the model to apply the bundled
+   `reference/categorization-rules.md` **plus** these admin rules (admin rules win
+   on conflict). The proven static playbook is never discarded — `report_rules`
+   **augments** it, so blank ⇒ today's categorization exactly.
+3. **Ops (one-time)** — re-install the updated skill into onlyclaw's workspace
+   (skills are not auto-synced from the repo). After that single install, future
+   `report_rules` edits take effect per-job through the manifest, no re-install.
+
+Without part 2 the setting would silently do nothing — the point of the lever is
+that it actually reaches the model's judgment step.
 
 **A5. Merchant dictionary (read-only list).** A section listing the approved
 `MerchantMapping` rows (pattern → category) so the admin can *see* what the
@@ -184,8 +209,13 @@ security — never cut):
   string is invisible to users.)
 - **Dropping `SECTION_HINTS`/`getUserSection`** — grep for every reference first;
   keep `getUserSection` for `app_profile` (the greeting name still uses it).
-- **`report_rules` in the manifest** — always fall back to the hardcoded
-  constraints when the setting is blank; never send the agent an empty rules block.
+- **`report_rules` must reach the model, not just the manifest (Codex P1)** —
+  the skill (`run_job.py` + SKILL.md) must consume the field or the setting is a
+  no-op; the updated skill needs a one-time workspace re-install. Blank ⇒ omit
+  the field and keep the hardcoded constraints (never an empty rules block).
+- **Blank `chat_preamble` must not drop the Drive-summary context (Codex P2)** —
+  the linked-folder injection is today's behavior for plain chats; the precedence
+  augments it, never replaces it.
 - **Generic settings route** — the key allowlist is the security boundary; a PUT
   to an unlisted key must 400, not write arbitrary `AppSetting` rows.
 
@@ -197,4 +227,11 @@ security — never cut):
 - Manual E2E: set each field in `/admin/settings` → observe it surface — chat
   preamble in an outbound message, prompts/note on the home hub, `report_rules`
   in the manifest JSON, summary default in the editor's "using default" state.
+- **`report_rules` reaches the model (Codex P1):** `run_job.py --selftest` /
+  a fixture manifest carrying `report_rules` → the value lands in
+  `needs_judgment.json` and the SKILL.md judgment step references it (not just the
+  manifest round-trips).
+- **Chat preamble precedence (Codex P2):** a user with a linked Drive folder +
+  blank `chat_preamble` still gets `buildLinkedFolderContext` on the first message;
+  a set `chat_preamble` is prepended, not substituted.
 - Regression: blank settings reproduce today's behavior on every surface.
