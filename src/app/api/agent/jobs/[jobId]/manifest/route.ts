@@ -6,6 +6,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeAgentJobRequest, appBaseUrl } from "@/lib/agentRuntimeAuth";
+import { getSetting } from "@/lib/appSettings";
 import { REPORT_TAXONOMY } from "@/config/reportTaxonomy";
 
 export const dynamic = "force-dynamic";
@@ -27,6 +28,10 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     orderBy: { updatedAt: "desc" },
     take: 2000,
   });
+  // Admin-authored extra categorization rules (edited in /admin/settings). The
+  // skill applies these ON TOP of its bundled reference/categorization-rules.md
+  // during the judgment step; blank ⇒ "" ⇒ only the static playbook (unchanged).
+  const reportRules = await getSetting("report_rules");
 
   const base = appBaseUrl();
   const q = `?t=${encodeURIComponent(t)}`;
@@ -43,6 +48,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     })),
     taxonomy: REPORT_TAXONOMY,
     merchantDictionary: dictionary,
+    reportRules: reportRules ?? "",
     callback: { resultUrl: `${base}/api/agent/jobs/${jobId}/result${q}` },
     constraints: {
       monthAssignment: "calendar month of the transaction date, never the billing month",

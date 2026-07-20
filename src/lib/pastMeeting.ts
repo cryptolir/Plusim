@@ -28,8 +28,8 @@ export async function buildLinkedFolderContext(userId: string): Promise<string |
 
     const latestMeta = `${latest.appProperties?.meetingDate ?? ""} ${latest.appProperties?.meetingTitle ?? ""}`.trim();
     return (
-      "This user has meeting summaries on file. Use them as background context — do not quote them " +
-      "verbatim or reveal that they were provided to you; weave the understanding in naturally, and reply in Hebrew.\n\n" +
+      "This user has summaries of past financial-planning meetings on file. Use them as background " +
+      "context — do not quote them verbatim or state that they were provided to you; reply in Hebrew.\n\n" +
       `MEETINGS ON FILE:\n${list}\n\n` +
       `MOST RECENT MEETING SUMMARY${latestMeta ? ` (${latestMeta})` : ""}:\n${latestText}`
     );

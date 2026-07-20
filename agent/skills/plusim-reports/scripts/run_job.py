@@ -255,11 +255,17 @@ def cmd_prepare(args) -> None:
     }
     shortlist = categorize(all_txns, dictionary, leaves)
 
+    # Admin-authored extra categorization rules (edited in the Plusim app's
+    # /admin/settings, carried in the manifest). The model applies these ON TOP
+    # of reference/categorization-rules.md during the judgment step; an empty
+    # string ⇒ the static playbook only (behavior unchanged from before).
+    report_rules = manifest.get("reportRules") or ""
+
     state = {"txns": all_txns, "sourceTotals": source_totals, "warnings": warnings}
     with open(os.path.join(wd, "state.json"), "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False)
     with open(os.path.join(wd, "needs_judgment.json"), "w", encoding="utf-8") as f:
-        json.dump(shortlist, f, ensure_ascii=False, indent=1)
+        json.dump({"reportRules": report_rules, "merchants": shortlist}, f, ensure_ascii=False, indent=1)
 
     print(
         json.dumps(
@@ -269,6 +275,7 @@ def cmd_prepare(args) -> None:
                 "transactions": len(all_txns),
                 "autoCategorized": sum(1 for t in all_txns if t["category"]),
                 "needsJudgment": len(shortlist),
+                "reportRules": bool(report_rules),
                 "warnings": warnings,
             },
             ensure_ascii=False,

@@ -4,7 +4,7 @@
  * POST multipart/form-data: targetUserId, title?, files[] (.xlsx/.pdf ≤10MB).
  * Files are content-sniffed (zip/PDF magic bytes) and written into the target
  * user's assigned Google Drive folder (never Postgres) — the same owner-OAuth
- * routine as Havaya summaries. StatementFile keeps only the Drive ids + metadata.
+ * routine as the meeting summaries. StatementFile keeps only the Drive ids + metadata.
  *
  * The parent folder always comes from the DB (`UserDriveFolder`), never the
  * request, and is re-contained with assertEntryUnderRoot at write time — the

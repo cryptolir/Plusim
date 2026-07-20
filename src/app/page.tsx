@@ -3,6 +3,7 @@ import { auth, currentUser } from "@clerk/nextjs/server";
 import { SproutIcon } from "lucide-react";
 import { HomeHub } from "@/components/home/HomeHub";
 import { getUserSection, seedAppProfileNameIfMissing } from "@/lib/agentglob";
+import { getSetting } from "@/lib/appSettings";
 import { parsePrompts, parseAppProfileName } from "@/lib/agentContent";
 import { db } from "@/lib/db";
 import { isDriveConnected, listSummaries } from "@/lib/googleDrive";
@@ -37,14 +38,14 @@ export default async function Home() {
     );
   }
 
-  // Signed-in: the hub. Content fetched server-side. The per-user sections
-  // (User_D_Prompt, app_note) come from the user's agent-workspace file via an
-  // app-key-scoped read; they return null until the AgentGlob user-file API
-  // ships (Phase 2) → graceful empty states. See AGENTGLOB_USER_FILE_API.md.
+  // Signed-in: the hub. Content fetched server-side. The home prompts + owner
+  // note are admin-managed in /admin/settings (AppSetting DB), global to all
+  // users; blank → the panels render empty. The greeting name still comes from
+  // the per-user agent-workspace file (app_profile).
   const [user, promptSection, noteSection, appProfileSection, recentRows] = await Promise.all([
     currentUser(),
-    getUserSection(userId, "User_D_Prompt"),
-    getUserSection(userId, "app_note"),
+    getSetting("home_prompts"),
+    getSetting("home_note"),
     // Read uncached: the seed below writes the name server-side and we want the
     // next load to read it immediately, not after the 60s section cache.
     getUserSection(userId, "app_profile", { noStore: true, timeoutMs: 2500 }),
