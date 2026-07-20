@@ -8,6 +8,18 @@
 import { useEffect, useState } from "react";
 import { TAXONOMY_LEAVES } from "@/config/reportTaxonomy";
 
+// Hebrew display labels for job.status (keys stay English — they are the status
+// enum used in logic; only the rendered badge text is translated).
+const STATUS_LABEL: Record<string, string> = {
+  uploaded: "הועלה",
+  dispatched: "נשלח לסוכן",
+  processing: "בעיבוד",
+  needs_review: "ממתין לבדיקה",
+  completed: "הושלם",
+  published: "פורסם",
+  failed: "נכשל",
+};
+
 interface Txn {
   id: string;
   month: string;
@@ -71,7 +83,7 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
       const data = await res.json().catch(() => ({}));
       if (cancelled) return;
       if (!res.ok) {
-        setError(data?.error ?? `load failed (${res.status})`);
+        setError(data?.error ?? `הטעינה נכשלה (${res.status})`);
         return;
       }
       setJob(data.job);
@@ -93,7 +105,7 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
     try {
       const res = await fetch(path, { ...init, headers: { ...headers, ...(init?.headers ?? {}) } });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error ?? `${label} failed (${res.status})`);
+      if (!res.ok) throw new Error(data?.error ?? `${label} נכשל (${res.status})`);
       load();
       return data;
     } catch (e) {
@@ -113,7 +125,7 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
   }
 
   if (error && !job) return <p className="text-red-600">{error}</p>;
-  if (!job) return <p className="text-muted-foreground">Loading…</p>;
+  if (!job) return <p className="text-muted-foreground">טוען…</p>;
 
   const uncategorized = job.transactions.filter((t) => t.uncategorized);
   const v = job.verification;
@@ -122,9 +134,9 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
-        <h1 className="text-xl font-semibold">{job.title || `Job ${job.id.slice(0, 10)}`}</h1>
-        <span className="rounded-full border px-2 py-0.5 text-xs">{job.status}</span>
-        {running && <span className="text-xs text-muted-foreground">agent working… (auto-refreshing)</span>}
+        <h1 className="text-xl font-semibold">{job.title || `עבודה ${job.id.slice(0, 10)}`}</h1>
+        <span className="rounded-full border px-2 py-0.5 text-xs">{STATUS_LABEL[job.status] ?? job.status}</span>
+        {running && <span className="text-xs text-muted-foreground">הסוכן עובד… (מתרענן אוטומטית)</span>}
       </div>
 
       {error && <p className="text-sm text-red-600">{error}</p>}
@@ -136,25 +148,25 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
           disabled={busy !== null || job.status === "published"}
           className="min-h-11 rounded-lg border px-4 disabled:opacity-50"
         >
-          {busy === "run" ? "Dispatching…" : job.status === "uploaded" ? "Send to agent" : "Re-run agent"}
+          {busy === "run" ? "שולח…" : job.status === "uploaded" ? "שליחה לסוכן" : "הרצה מחדש של הסוכן"}
         </button>
         <button
           onClick={() => action("publish", `/admin/api/reports/${jobId}/publish`, { method: "POST" })}
           disabled={busy !== null || !["completed", "needs_review", "published"].includes(job.status)}
           className="min-h-11 rounded-lg border bg-foreground px-4 text-background disabled:opacity-50"
-          title={uncategorized.length > 0 ? `${uncategorized.length} rows still uncategorized` : undefined}
+          title={uncategorized.length > 0 ? `${uncategorized.length} שורות עדיין ללא סיווג` : undefined}
         >
-          {busy === "publish" ? "Publishing…" : job.status === "published" ? "Re-publish" : "Publish to user"}
+          {busy === "publish" ? "מפרסם…" : job.status === "published" ? "פרסום מחדש" : "פרסום למשתמש"}
         </button>
         {job.sheetUrl && (
           <a href={job.sheetUrl} target="_blank" rel="noreferrer" className="min-h-11 rounded-lg border px-4 py-2 text-blue-600 underline">
-            Open Google Sheet
+            פתיחת Google Sheet
           </a>
         )}
       </div>
 
       <section className="rounded-xl border p-4">
-        <h2 className="mb-2 font-medium">Statement files</h2>
+        <h2 className="mb-2 font-medium">קובצי דפי חשבון</h2>
         <ul className="space-y-1 text-sm">
           {job.files.map((f) => (
             <li key={f.id} dir="auto">
@@ -166,18 +178,18 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
 
       {v && (
         <section className="rounded-xl border p-4">
-          <h2 className="mb-2 font-medium">Verification</h2>
+          <h2 className="mb-2 font-medium">אימות</h2>
           <p className="text-sm text-muted-foreground">
-            {v.txCount ?? 0} transactions · {v.uncategorizedCount ?? 0} uncategorized
+            {v.txCount ?? 0} עסקאות · {v.uncategorizedCount ?? 0} ללא סיווג
           </p>
           {v.perSource && v.perSource.length > 0 && (
             <table className="mt-2 w-full text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
-                  <th className="py-1 pr-3 font-medium">Source</th>
-                  <th className="py-1 pr-3 font-medium">Statement total</th>
-                  <th className="py-1 pr-3 font-medium">Recomputed</th>
-                  <th className="py-1 font-medium">Match</th>
+                  <th className="py-1 pr-3 font-medium">מקור</th>
+                  <th className="py-1 pr-3 font-medium">סה&quot;כ בדף החשבון</th>
+                  <th className="py-1 pr-3 font-medium">סה&quot;כ מחושב</th>
+                  <th className="py-1 font-medium">התאמה</th>
                 </tr>
               </thead>
               <tbody>
@@ -205,16 +217,16 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
 
       {uncategorized.length > 0 && (
         <section className="rounded-xl border p-4">
-          <h2 className="mb-2 font-medium">Uncategorized — assign categories ({uncategorized.length})</h2>
+          <h2 className="mb-2 font-medium">ללא סיווג — הקצאת קטגוריות ({uncategorized.length})</h2>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
-                  <th className="py-1 pr-3 font-medium">Date</th>
-                  <th className="py-1 pr-3 font-medium">Merchant</th>
-                  <th className="py-1 pr-3 font-medium">Amount</th>
-                  <th className="py-1 pr-3 font-medium">Note</th>
-                  <th className="py-1 font-medium">Category</th>
+                  <th className="py-1 pr-3 font-medium">תאריך</th>
+                  <th className="py-1 pr-3 font-medium">בית עסק</th>
+                  <th className="py-1 pr-3 font-medium">סכום</th>
+                  <th className="py-1 pr-3 font-medium">הערה</th>
+                  <th className="py-1 font-medium">קטגוריה</th>
                 </tr>
               </thead>
               <tbody>
@@ -229,7 +241,7 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
 
       {mappings.length > 0 && (
         <section className="rounded-xl border p-4">
-          <h2 className="mb-2 font-medium">Proposed merchant mappings ({mappings.length})</h2>
+          <h2 className="mb-2 font-medium">מיפויי בתי עסק מוצעים ({mappings.length})</h2>
           <ul className="space-y-2 text-sm">
             {mappings.map((m) => (
               <li key={m.id} className="flex flex-wrap items-center gap-2">
@@ -247,13 +259,13 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
                   }
                   className="rounded border px-2 py-0.5 text-xs"
                 >
-                  Approve
+                  אישור
                 </button>
                 <button
                   onClick={() => action("mapping", `/admin/api/report-mappings/${m.id}`, { method: "DELETE" })}
                   className="rounded border px-2 py-0.5 text-xs text-red-600"
                 >
-                  Reject
+                  דחייה
                 </button>
               </li>
             ))}
@@ -262,17 +274,17 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
       )}
 
       <section className="rounded-xl border p-4">
-        <h2 className="mb-2 font-medium">All transactions ({job.transactions.length})</h2>
+        <h2 className="mb-2 font-medium">כל העסקאות ({job.transactions.length})</h2>
         <div className="max-h-[32rem] overflow-auto">
           <table className="w-full text-sm">
             <thead className="sticky top-0 bg-background text-left text-muted-foreground">
               <tr>
-                <th className="py-1 pr-3 font-medium">Month</th>
-                <th className="py-1 pr-3 font-medium">Date</th>
-                <th className="py-1 pr-3 font-medium">Merchant</th>
-                <th className="py-1 pr-3 font-medium">Amount</th>
-                <th className="py-1 pr-3 font-medium">Category</th>
-                <th className="py-1 font-medium">Source</th>
+                <th className="py-1 pr-3 font-medium">חודש</th>
+                <th className="py-1 pr-3 font-medium">תאריך</th>
+                <th className="py-1 pr-3 font-medium">בית עסק</th>
+                <th className="py-1 pr-3 font-medium">סכום</th>
+                <th className="py-1 pr-3 font-medium">קטגוריה</th>
+                <th className="py-1 font-medium">מקור</th>
               </tr>
             </thead>
             <tbody>
@@ -326,14 +338,14 @@ function UncatRow({
           </select>
           <label className="flex items-center gap-1 text-xs text-muted-foreground">
             <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
-            remember
+            לזכור
           </label>
           <button
             onClick={() => void onAssign(txn.id, category, remember)}
             disabled={!category}
             className="rounded border px-2 py-0.5 text-xs disabled:opacity-50"
           >
-            Assign
+            הקצאה
           </button>
         </span>
       </td>

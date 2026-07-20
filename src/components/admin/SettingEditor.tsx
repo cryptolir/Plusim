@@ -26,13 +26,13 @@ export function SettingEditor({
   const [text, setText] = useState(initial);
   const usingDefault = Boolean(defaultText) && !initial.trim();
   const [status, setStatus] = useState<string | null>(
-    usingDefault ? "Currently using the built-in default." : null,
+    usingDefault ? "כרגע נעשה שימוש בברירת המחדל המובנית." : null,
   );
   const [saving, setSaving] = useState(false);
 
   async function save() {
     setSaving(true);
-    setStatus("Saving…");
+    setStatus("שומר…");
     try {
       const res = await fetch(`/admin/api/settings/${settingKey}`, {
         method: "PUT",
@@ -43,16 +43,16 @@ export function SettingEditor({
       if (res.ok) {
         setStatus(
           text.trim()
-            ? "Saved ✓"
+            ? "נשמר ✓"
             : defaultText
-              ? "Cleared — using the built-in default."
-              : "Cleared.",
+              ? "נוקה — נעשה שימוש בברירת המחדל המובנית."
+              : "נוקה.",
         );
       } else {
-        setStatus(`Save failed: ${data.error ?? res.status}`);
+        setStatus(`השמירה נכשלה: ${data.error ?? res.status}`);
       }
     } catch (e) {
-      setStatus(`Save failed: ${String(e)}`);
+      setStatus(`השמירה נכשלה: ${String(e)}`);
     } finally {
       setSaving(false);
     }
@@ -73,7 +73,7 @@ export function SettingEditor({
           disabled={saving}
           className="rounded-full bg-neutral-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-neutral-700 disabled:opacity-50"
         >
-          {saving ? "Saving…" : "Save"}
+          {saving ? "שומר…" : "שמירה"}
         </button>
         {defaultText && (
           <button
@@ -81,7 +81,7 @@ export function SettingEditor({
             disabled={saving}
             className="rounded-full border px-4 py-2 text-sm transition-colors hover:bg-muted disabled:opacity-50"
           >
-            Load default
+            טעינת ברירת המחדל
           </button>
         )}
         {text.trim() && (
@@ -90,7 +90,7 @@ export function SettingEditor({
             disabled={saving}
             className="text-xs text-red-600 underline disabled:opacity-50"
           >
-            {defaultText ? "Clear (revert to default)" : "Clear"}
+            {defaultText ? "ניקוי (חזרה לברירת המחדל)" : "ניקוי"}
           </button>
         )}
         {status && <span className="text-sm text-muted-foreground">{status}</span>}

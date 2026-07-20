@@ -24,7 +24,7 @@ export function DriveBrowser({ entries, driveToken }: { entries: DriveEntry[]; d
     <div className="space-y-4">
       {folders.length > 0 && (
         <div>
-          <h2 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Folders</h2>
+          <h2 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">תיקיות</h2>
           <ul className="divide-y rounded-xl border">
             {folders.map((f) => (
               <li key={f.id}>
@@ -42,9 +42,9 @@ export function DriveBrowser({ entries, driveToken }: { entries: DriveEntry[]; d
       )}
 
       <div>
-        <h2 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Files</h2>
+        <h2 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">קבצים</h2>
         {files.length === 0 ? (
-          <p className="rounded-xl border p-3 text-sm text-muted-foreground">No files in this folder.</p>
+          <p className="rounded-xl border p-3 text-sm text-muted-foreground">אין קבצים בתיקייה הזו.</p>
         ) : (
           <ul className="divide-y rounded-xl border">
             {files.map((f) => (
@@ -83,9 +83,9 @@ function FileRow({ file, driveToken }: { file: DriveEntry; driveToken: string })
       const res = await fetch(`/admin/api/drive/file-text?fileId=${encodeURIComponent(file.id)}`, { headers: auth });
       const data = await res.json().catch(() => ({}));
       if (res.ok) setText(typeof data.text === "string" ? data.text : "");
-      else setStatus(`Could not load: ${data.error ?? res.status}`);
+      else setStatus(`לא ניתן היה לטעון: ${data.error ?? res.status}`);
     } catch (e) {
-      setStatus(`Could not load: ${String(e)}`);
+      setStatus(`לא ניתן היה לטעון: ${String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -94,7 +94,7 @@ function FileRow({ file, driveToken }: { file: DriveEntry; driveToken: string })
   async function saveText() {
     if (text === null) return;
     setBusy(true);
-    setStatus("Saving changes…");
+    setStatus("שומר שינויים…");
     try {
       const res = await fetch(`/admin/api/drive/file-text`, {
         method: "PUT",
@@ -102,18 +102,18 @@ function FileRow({ file, driveToken }: { file: DriveEntry; driveToken: string })
         body: JSON.stringify({ fileId: file.id, text }),
       });
       const data = await res.json().catch(() => ({}));
-      setStatus(res.ok ? "Saved ✓" : `Save failed: ${data.error ?? res.status}`);
+      setStatus(res.ok ? "נשמר ✓" : `השמירה נכשלה: ${data.error ?? res.status}`);
     } catch (e) {
-      setStatus(`Save failed: ${String(e)}`);
+      setStatus(`השמירה נכשלה: ${String(e)}`);
     } finally {
       setBusy(false);
     }
   }
 
   async function remove() {
-    if (!window.confirm(`Move "${file.name}" to Google Drive trash?`)) return;
+    if (!window.confirm(`להעביר את "${file.name}" לאשפה של Google Drive?`)) return;
     setBusy(true);
-    setStatus("Deleting…");
+    setStatus("מוחק…");
     try {
       const res = await fetch(`/admin/api/drive/file?fileId=${encodeURIComponent(file.id)}`, {
         method: "DELETE",
@@ -121,9 +121,9 @@ function FileRow({ file, driveToken }: { file: DriveEntry; driveToken: string })
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok) router.refresh();
-      else setStatus(`Delete failed: ${data.error ?? res.status}`);
+      else setStatus(`המחיקה נכשלה: ${data.error ?? res.status}`);
     } catch (e) {
-      setStatus(`Delete failed: ${String(e)}`);
+      setStatus(`המחיקה נכשלה: ${String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -131,7 +131,7 @@ function FileRow({ file, driveToken }: { file: DriveEntry; driveToken: string })
 
   async function summarize() {
     setBusy(true);
-    setStatus("Summarizing… this can take 1–3 minutes.");
+    setStatus("מסכם… זה עשוי לקחת 1–3 דקות.");
     setPreview(null);
     try {
       const res = await fetch(`/admin/api/drive/summarize`, {
@@ -150,10 +150,10 @@ function FileRow({ file, driveToken }: { file: DriveEntry; driveToken: string })
           alreadyExists: data.alreadyExists ? { name: data.alreadyExists.name } : null,
         });
       } else {
-        setStatus(`Failed: ${data.error ?? res.status}`);
+        setStatus(`נכשל: ${data.error ?? res.status}`);
       }
     } catch (e) {
-      setStatus(`Failed: ${String(e)}`);
+      setStatus(`נכשל: ${String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -162,7 +162,7 @@ function FileRow({ file, driveToken }: { file: DriveEntry; driveToken: string })
   async function save() {
     if (!preview) return;
     setBusy(true);
-    setStatus("Saving…");
+    setStatus("שומר…");
     try {
       const res = await fetch(`/admin/api/drive/save-summary`, {
         method: "POST",
@@ -172,13 +172,13 @@ function FileRow({ file, driveToken }: { file: DriveEntry; driveToken: string })
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
         setPreview(null);
-        setStatus(`Saved: ${data.file?.name ?? "summary"}`);
+        setStatus(`נשמר: ${data.file?.name ?? "סיכום"}`);
         router.refresh();
       } else {
-        setStatus(`Save failed: ${data.error ?? res.status}`);
+        setStatus(`השמירה נכשלה: ${data.error ?? res.status}`);
       }
     } catch (e) {
-      setStatus(`Save failed: ${String(e)}`);
+      setStatus(`השמירה נכשלה: ${String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -192,7 +192,7 @@ function FileRow({ file, driveToken }: { file: DriveEntry; driveToken: string })
           {file.name}
         </span>
         {summary && (
-          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700">summary</span>
+          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700">סיכום</span>
         )}
         <span className="ml-auto flex items-center gap-2">
           {isTranscriptLike(file) && (
@@ -201,7 +201,7 @@ function FileRow({ file, driveToken }: { file: DriveEntry; driveToken: string })
               disabled={busy}
               className="rounded-full border px-3 py-1 text-xs transition-colors hover:bg-muted disabled:opacity-50"
             >
-              View / edit
+              צפייה / עריכה
             </button>
           )}
           {canSummarize && (
@@ -210,7 +210,7 @@ function FileRow({ file, driveToken }: { file: DriveEntry; driveToken: string })
               disabled={busy}
               className="rounded-full bg-neutral-900 px-3 py-1 text-xs text-white transition-colors hover:bg-neutral-700 disabled:opacity-50"
             >
-              {preview ? "Re-summarize" : "Summarize"}
+              {preview ? "סיכום מחדש" : "סיכום"}
             </button>
           )}
           <button
@@ -218,7 +218,7 @@ function FileRow({ file, driveToken }: { file: DriveEntry; driveToken: string })
             disabled={busy}
             className="rounded-full border border-red-200 px-3 py-1 text-xs text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50"
           >
-            Delete
+            מחיקה
           </button>
         </span>
       </div>
@@ -229,15 +229,15 @@ function FileRow({ file, driveToken }: { file: DriveEntry; driveToken: string })
         <div className="mt-2 space-y-2 rounded-lg border bg-muted/20 p-3">
           {preview.alreadyExists && (
             <p className="text-xs text-amber-700">
-              A summary already exists for this file ({preview.alreadyExists.name}). Saving creates another.
+              כבר קיים סיכום לקובץ הזה ({preview.alreadyExists.name}). שמירה תיצור סיכום נוסף.
             </p>
           )}
           {preview.truncated && (
-            <p className="text-xs text-amber-700">Transcript was long and got truncated before summarizing.</p>
+            <p className="text-xs text-amber-700">התמלול היה ארוך מדי ונחתך לפני הסיכום.</p>
           )}
           <div className="flex flex-wrap gap-2">
             <label className="flex-1 text-xs text-muted-foreground">
-              Title
+              כותרת
               <input
                 value={preview.title}
                 onChange={(e) => setPreview({ ...preview, title: e.target.value })}
@@ -246,7 +246,7 @@ function FileRow({ file, driveToken }: { file: DriveEntry; driveToken: string })
               />
             </label>
             <label className="w-40 text-xs text-muted-foreground">
-              Date
+              תאריך
               <input
                 value={preview.date}
                 onChange={(e) => setPreview({ ...preview, date: e.target.value })}
@@ -266,7 +266,7 @@ function FileRow({ file, driveToken }: { file: DriveEntry; driveToken: string })
               disabled={busy}
               className="rounded-full bg-emerald-600 px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-emerald-700 disabled:opacity-50"
             >
-              Save to folder
+              שמירה לתיקייה
             </button>
             <button
               onClick={() => {
@@ -276,7 +276,7 @@ function FileRow({ file, driveToken }: { file: DriveEntry; driveToken: string })
               disabled={busy}
               className="rounded-full border px-4 py-1.5 text-xs transition-colors hover:bg-muted disabled:opacity-50"
             >
-              Discard
+              ביטול
             </button>
           </div>
         </div>
@@ -298,7 +298,7 @@ function FileRow({ file, driveToken }: { file: DriveEntry; driveToken: string })
                 disabled={busy}
                 className="rounded-full bg-emerald-600 px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-emerald-700 disabled:opacity-50"
               >
-                Save changes
+                שמירת שינויים
               </button>
             )}
             <button
@@ -309,9 +309,9 @@ function FileRow({ file, driveToken }: { file: DriveEntry; driveToken: string })
               disabled={busy}
               className="rounded-full border px-4 py-1.5 text-xs transition-colors hover:bg-muted disabled:opacity-50"
             >
-              Close
+              סגירה
             </button>
-            {!isEditable(file) && <span className="text-xs text-muted-foreground">(read-only — Google Doc)</span>}
+            {!isEditable(file) && <span className="text-xs text-muted-foreground">(לקריאה בלבד — Google Doc)</span>}
           </div>
         </div>
       )}

@@ -29,17 +29,17 @@ export function DriveFolderPicker({
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
-        setStatus(folderId ? "Assigned ✓" : "Unassigned ✓");
+        setStatus(folderId ? "שויך ✓" : "בוטל שיוך ✓");
         router.refresh();
       } else if (res.status === 401) {
-        setStatus("Authorization expired — reload the page and try again.");
+        setStatus("ההרשאה פגה — טענו מחדש את הדף ונסו שוב.");
       } else if (res.status === 403) {
-        setStatus("Not allowed — the folder must be under the transcripts root.");
+        setStatus("לא מורשה — התיקייה חייבת להיות תחת שורש התמלולים.");
       } else {
-        setStatus(`Failed: ${data.error ?? res.status}`);
+        setStatus(`נכשל: ${data.error ?? res.status}`);
       }
     } catch (e) {
-      setStatus(`Failed: ${String(e)}`);
+      setStatus(`נכשל: ${String(e)}`);
     } finally {
       setSaving(false);
     }
@@ -48,7 +48,7 @@ export function DriveFolderPicker({
   return (
     <div className="space-y-3">
       {folders.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No subfolders found under the transcripts root.</p>
+        <p className="text-sm text-muted-foreground">לא נמצאו תת-תיקיות תחת שורש התמלולים.</p>
       ) : (
         <ul className="divide-y rounded-xl border">
           {folders.map((f) => (
@@ -59,7 +59,7 @@ export function DriveFolderPicker({
                   {f.name}
                 </span>
                 {currentFolderId === f.id && (
-                  <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700">current</span>
+                  <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700">נוכחי</span>
                 )}
               </span>
               <button
@@ -67,7 +67,7 @@ export function DriveFolderPicker({
                 disabled={saving || currentFolderId === f.id}
                 className="rounded-full bg-neutral-900 px-3 py-1 text-xs text-white transition-colors hover:bg-neutral-700 disabled:opacity-50"
               >
-                {currentFolderId === f.id ? "Assigned" : "Assign"}
+                {currentFolderId === f.id ? "משויך" : "שיוך"}
               </button>
             </li>
           ))}
@@ -79,7 +79,7 @@ export function DriveFolderPicker({
           disabled={saving}
           className="text-xs text-red-600 underline disabled:opacity-50"
         >
-          Unassign folder
+          ביטול שיוך התיקייה
         </button>
       )}
       {status && <p className="text-sm text-muted-foreground">{status}</p>}

@@ -18,7 +18,7 @@ export default async function AdminReportJobPage({
   return (
     <div className="space-y-4">
       <Link href="/admin/reports" className="text-sm text-blue-600 underline">
-        ← All report jobs
+        ← כל עבודות הדוח
       </Link>
       <ReportJobDetail jobId={jobId} saveToken={token} />
     </div>

@@ -5,29 +5,29 @@ export default async function DashLayout({ children }: { children: React.ReactNo
   const admin = await requireAdmin();
 
   return (
-    <div className="min-h-[100dvh]" dir="ltr">
+    <div className="min-h-[100dvh]" dir="rtl">
       <header className="flex items-center justify-between border-b px-4 py-3">
         <div className="flex items-center gap-4">
-          <span className="font-semibold">Plusim Admin</span>
+          <span className="font-semibold">ניהול Plusim</span>
           <nav className="flex items-center gap-3 text-sm">
             <Link href="/admin" className="text-muted-foreground transition-colors hover:text-foreground">
-              Users
+              משתמשים
             </Link>
             <Link href="/admin/drive" className="text-muted-foreground transition-colors hover:text-foreground">
               Drive
             </Link>
             <Link href="/admin/reports" className="text-muted-foreground transition-colors hover:text-foreground">
-              Reports
+              דוחות
             </Link>
             <Link href="/admin/settings" className="text-muted-foreground transition-colors hover:text-foreground">
-              Settings
+              הגדרות
             </Link>
           </nav>
         </div>
         <div className="flex items-center gap-3 text-sm">
           <span className="text-muted-foreground">{admin.email}</span>
           <a href="/" className="rounded-full border px-3 py-1 transition-colors hover:bg-muted">
-            ← App
+            ← האפליקציה
           </a>
         </div>
       </header>

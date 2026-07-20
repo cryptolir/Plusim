@@ -35,7 +35,7 @@ export default async function UserDrivePage({ params }: { params: Promise<{ user
         .filter((e) => e.isFolder)
         .map((e) => ({ id: e.id, name: e.name }));
     } catch (e) {
-      loadError = e instanceof Error ? e.message : "Failed to load folders";
+      loadError = e instanceof Error ? e.message : "טעינת התיקיות נכשלה";
     }
   }
 
@@ -44,22 +44,22 @@ export default async function UserDrivePage({ params }: { params: Promise<{ user
   return (
     <div className="mx-auto max-w-2xl">
       <Link href="/admin" className="text-sm text-blue-600 underline">
-        ← Back to users
+        ← חזרה למשתמשים
       </Link>
-      <h1 className="mt-2 text-xl font-semibold">Drive folder — {label}</h1>
+      <h1 className="mt-2 text-xl font-semibold">תיקיית Drive — {label}</h1>
       <p className="break-all text-xs text-muted-foreground">{userId}</p>
       <p className="mb-4 mt-1 text-sm text-muted-foreground">
-        Link a folder of meeting transcripts/summaries to this user. Its summaries become background
-        context for the agent in this user&apos;s chats (in addition to their workspace files).
+        קשרו תיקייה של תמלולי/סיכומי פגישות למשתמש הזה. הסיכומים הופכים להקשר רקע עבור הסוכן
+        בשיחות של המשתמש הזה (בנוסף לקובצי סביבת העבודה שלו).
       </p>
 
       {!connected ? (
         <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-          Google Drive isn&apos;t connected yet.{" "}
+          Google Drive עדיין לא מחובר.{" "}
           <Link href="/admin/drive" className="underline">
-            Connect it first
+            חברו אותו קודם
           </Link>
-          , then assign a folder.
+          , ולאחר מכן שייכו תיקייה.
         </p>
       ) : loadError ? (
         <p className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{loadError}</p>

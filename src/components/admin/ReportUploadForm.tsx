@@ -25,8 +25,8 @@ export function ReportUploadForm({
     e.preventDefault();
     setError(null);
     const files = fileInput.current?.files;
-    if (!targetUserId) return setError("Pick a user.");
-    if (!files || files.length === 0) return setError("Pick at least one statement file.");
+    if (!targetUserId) return setError("בחרו משתמש.");
+    if (!files || files.length === 0) return setError("בחרו לפחות דף חשבון אחד.");
 
     const form = new FormData();
     form.set("targetUserId", targetUserId);
@@ -41,7 +41,7 @@ export function ReportUploadForm({
         body: form,
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error ?? `upload failed (${res.status})`);
+      if (!res.ok) throw new Error(data?.error ?? `ההעלאה נכשלה (${res.status})`);
       setTitle("");
       if (fileInput.current) fileInput.current.value = "";
       router.push(`/admin/reports/${data.jobId}`);
@@ -54,10 +54,10 @@ export function ReportUploadForm({
 
   return (
     <form onSubmit={submit} className="space-y-3 rounded-xl border p-4">
-      <h2 className="font-medium">New report job</h2>
+      <h2 className="font-medium">עבודת דוח חדשה</h2>
       <div className="flex flex-wrap items-end gap-3">
         <label className="flex flex-col gap-1 text-sm">
-          <span className="text-muted-foreground">Target user</span>
+          <span className="text-muted-foreground">משתמש יעד</span>
           <select
             value={targetUserId}
             onChange={(e) => setTargetUserId(e.target.value)}
@@ -71,17 +71,17 @@ export function ReportUploadForm({
           </select>
         </label>
         <label className="flex flex-col gap-1 text-sm">
-          <span className="text-muted-foreground">Title (optional)</span>
+          <span className="text-muted-foreground">כותרת (אופציונלי)</span>
           <input
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            placeholder="e.g. דוח יוני 2026"
+            placeholder="לדוגמה: דוח יוני 2026"
             className="min-h-11 rounded-lg border bg-background px-2"
             dir="auto"
           />
         </label>
         <label className="flex flex-col gap-1 text-sm">
-          <span className="text-muted-foreground">Statements (.xlsx / .pdf)</span>
+          <span className="text-muted-foreground">דפי חשבון (.xlsx / .pdf)</span>
           <input
             ref={fileInput}
             type="file"
@@ -95,7 +95,7 @@ export function ReportUploadForm({
           disabled={busy}
           className="min-h-11 rounded-lg border bg-foreground px-4 text-background disabled:opacity-50"
         >
-          {busy ? "Uploading…" : "Create job"}
+          {busy ? "מעלה…" : "יצירת עבודה"}
         </button>
       </div>
       {error && <p className="text-sm text-red-600">{error}</p>}

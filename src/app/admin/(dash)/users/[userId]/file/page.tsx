@@ -33,15 +33,15 @@ export default async function UserFilePage({
   return (
     <div className="mx-auto max-w-3xl">
       <Link href="/admin" className="text-sm text-blue-600 underline">
-        ← Back to users
+        ← חזרה למשתמשים
       </Link>
-      <h1 className="mt-2 text-xl font-semibold">User file — {label}</h1>
+      <h1 className="mt-2 text-xl font-semibold">קובץ משתמש — {label}</h1>
       <p className="mb-4 break-all text-xs text-muted-foreground">{userId}</p>
 
       {raw === null ? (
         <p className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-          Could not load the user file. The raw endpoint may be unavailable or the read key is not
-          configured.
+          לא ניתן היה לטעון את קובץ המשתמש. ייתכן שנקודת הקצה הגולמית אינה זמינה או שמפתח הקריאה
+          אינו מוגדר.
         </p>
       ) : (
         <FileEditor

@@ -18,6 +18,18 @@ const STATUS_BADGE: Record<string, string> = {
   failed: "bg-red-100 text-red-900",
 };
 
+// Hebrew display labels for the status values (keys stay English — they are the
+// job.status enum used in logic/queries; only the rendered badge text changes).
+const STATUS_LABEL: Record<string, string> = {
+  uploaded: "הועלה",
+  dispatched: "נשלח לסוכן",
+  processing: "בעיבוד",
+  needs_review: "ממתין לבדיקה",
+  completed: "הושלם",
+  published: "פורסם",
+  failed: "נכשל",
+};
+
 export default async function AdminReportsPage() {
   const admin = await requireAdmin();
   const token = mintSaveToken(admin.email, REPORTS_TOKEN_SCOPE);
@@ -50,10 +62,10 @@ export default async function AdminReportsPage() {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="mb-1 text-xl font-semibold">Statement reports</h1>
+        <h1 className="mb-1 text-xl font-semibold">דוחות מדפי חשבון</h1>
         <p className="text-sm text-muted-foreground">
-          Upload card statements (.xlsx / .pdf), send them to the onlyclaw agent for
-          categorization, review, then publish to the user&apos;s report section.
+          העלו דפי חשבון של כרטיסי אשראי (.xlsx / .pdf), שלחו אותם לסוכן onlyclaw לסיווג, בדקו
+          אותם, ולאחר מכן פרסמו אותם לאזור הדוחות של המשתמש.
         </p>
       </div>
 
@@ -63,12 +75,12 @@ export default async function AdminReportsPage() {
         <table className="w-full text-sm">
           <thead className="bg-muted/50 text-left">
             <tr>
-              <th className="px-3 py-2 font-medium">Job</th>
-              <th className="px-3 py-2 font-medium">User</th>
-              <th className="px-3 py-2 font-medium">Status</th>
-              <th className="px-3 py-2 font-medium">Files</th>
-              <th className="px-3 py-2 font-medium">Transactions</th>
-              <th className="px-3 py-2 font-medium">Created</th>
+              <th className="px-3 py-2 font-medium">עבודה</th>
+              <th className="px-3 py-2 font-medium">משתמש</th>
+              <th className="px-3 py-2 font-medium">סטטוס</th>
+              <th className="px-3 py-2 font-medium">קבצים</th>
+              <th className="px-3 py-2 font-medium">עסקאות</th>
+              <th className="px-3 py-2 font-medium">נוצר</th>
             </tr>
           </thead>
           <tbody>
@@ -82,7 +94,7 @@ export default async function AdminReportsPage() {
                 <td className="px-3 py-2">{nameByUser.get(j.targetUserId) ?? j.targetUserId}</td>
                 <td className="px-3 py-2">
                   <span className={`rounded-full px-2 py-0.5 text-xs ${STATUS_BADGE[j.status] ?? "bg-muted"}`}>
-                    {j.status}
+                    {STATUS_LABEL[j.status] ?? j.status}
                   </span>
                 </td>
                 <td className="px-3 py-2">{j._count.files}</td>
@@ -93,7 +105,7 @@ export default async function AdminReportsPage() {
             {jobs.length === 0 && (
               <tr>
                 <td colSpan={6} className="px-3 py-6 text-center text-muted-foreground">
-                  No report jobs yet — upload statements above.
+                  אין עדיין עבודות דוח — העלו דפי חשבון למעלה.
                 </td>
               </tr>
             )}
