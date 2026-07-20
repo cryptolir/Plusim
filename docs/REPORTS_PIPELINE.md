@@ -17,10 +17,11 @@ the processed report in `/report`. Agent-side skill + ops runbook:
         mints per-job token → callAgent() on session app:plusim:report-job:<id>
         message: "PLUSIM_REPORT_JOB v1 / manifest: <url?t=token>"  (≤3000 chars)
    → onlyclaw (plusim-reports skill):
-        GET  /api/agent/jobs/:id/manifest   (files, taxonomy, approved dictionary, callback)
+        GET  /api/agent/jobs/:id/manifest   (files, taxonomy, dictionary, report_rules, callback)
         GET  /api/agent/jobs/:id/files/:fid
         python: parse (Isracard xlsx / MAX pdf) → dedup → deterministic categorize
-        model: judge the unknown-merchant shortlist (never guesses → un_categorized)
+        model: judge the unknown-merchant shortlist (never guesses → un_categorized),
+               applying the admin report_rules carried in the manifest
         python: build month-sheet xlsx → verify to the agora
         POST /api/agent/jobs/:id/result     (transactions, totals, xlsx, proposed mappings)
    → app re-verifies INDEPENDENTLY (lib/reportResult.ts) → completed | needs_review
@@ -40,6 +41,12 @@ the processed report in `/report`. Agent-side skill + ops runbook:
 - **Learning loop**: agent-proposed mappings land unapproved; admin approval
   (or "remember" during review) adds them to every future manifest, shrinking
   the judgment tail over time.
+- **Admin categorization rules** (`report_rules`, set in `/admin/settings`) ride
+  in every job manifest and steer the model's judgment of the **unresolved**
+  shortlist only — they do NOT override a category the deterministic pass already
+  assigned. Hard per-merchant overrides go through the merchant dictionary (which
+  runs first and wins). Blank ⇒ the built-in playbook only. The skill consumes the
+  field in `run_job.py prepare` (into `needs_judgment.json`) and `SKILL.md` step 3.
 - **Auth**: `/api/agent/*` is middleware-public but demands the static runtime
   bearer (`PLUSIM_AGENT_RUNTIME_TOKEN` ≡ agent-side `PLUSIM_RUNTIME_TOKEN`)
   AND a sha256-stored, 24h per-job token minted at dispatch. Published jobs
@@ -87,7 +94,7 @@ agent/skills/plusim-reports/              the onlyclaw skill (source of truth)
 
 ## Tests
 
-`pnpm test` (vitest, 43 tests) — one per trust-boundary invariant:
+`pnpm test` (vitest) — one per trust-boundary invariant:
 
 ```
 src/lib/reportResult.test.ts              verifyAgentResult fatal-vs-reviewable per class;
@@ -97,6 +104,7 @@ src/app/api/agent/agentRoutes.test.ts     each public route invokes the guard; f
 src/app/api/agent/resultRace.test.ts      conditional write: 0 rows ⇒ 409, nothing persisted
 src/app/admin/api/reports/publishGuard.test.ts    every fatal class ⇒ publish 409; non-fatal ⇒ publishes
 src/app/admin/api/reports/uploadContainment.test.ts   no folder / not connected / moved-or-deleted ⇒ 409
+src/app/api/agent/reportRulesManifest.test.ts     manifest carries report_rules (set ⇒ value; blank ⇒ "")
 ```
 
 Test files are excluded from the production TypeScript build (`tsconfig` +
