@@ -37,15 +37,20 @@ Required tools (openclaw `tools` policy): `exec` (+`process`), `read`, `write`
 (`group:runtime`, `group:fs`). `web_fetch` optional (scripts use python
 urllib). NOT needed: `browser`, `canvas`, `nodes`, `cron`.
 
-## 4. Python runtime deps (one-time, where exec runs)
+## 4. Python runtime deps — VENDORED into the skill (one-time)
+
+Do NOT rely on `pip install --user`: the exec sandbox wipes `~/.local`
+between calls, so user-site installs silently vanish. Instead, vendor the deps
+into the skill folder itself (which persists in the workspace):
 
 ```
-python3 -m pip install --user openpyxl pypdf
+python3 -m pip install --target <onlyclaw workspace>/skills/plusim-reports/vendor openpyxl pypdf
 ```
 
-If exec runs sandboxed, install into the sandbox image
-(openclaw `Dockerfile.sandbox-common`) or run the pip step inside the sandbox
-once and persist it.
+`run_job.py` self-bootstraps `vendor/` onto `sys.path`, so a bare `python3`
+runs the whole pipeline — no PYTHONPATH, no pip at job time. The `vendor/`
+folder is workspace-only (gitignored here); rebuild it with the command above
+after any fresh install of the skill from this repo.
 
 ## 5. App-side env (Coolify)
 
