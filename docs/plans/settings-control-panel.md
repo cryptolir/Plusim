@@ -1,8 +1,8 @@
 # Plusim — settings control panel + Havaya→Plusim migration cleanup
 
-> **Status:** plan — Rev 3 (Codex round 1 folded in). Feeds the `/admin/settings`
-> rebuild and the finish of the Havaya→Plusim migration. Author changes on the
-> designated branch, merge to `main`, Coolify auto-deploys.
+> **Status:** plan — Rev 4 (Codex rounds 1–2 folded in; implemented). Feeds the
+> `/admin/settings` rebuild and the finish of the Havaya→Plusim migration. Author
+> changes on the designated branch, merge to `main`, Coolify auto-deploys.
 >
 > **Review log:** Rev 1 — initial plan. Rev 2 — ponytail minimalism pass folded
 > in (§ *Ponytail cuts* below): cut the standalone merchant-dictionary CRUD UI,
@@ -12,7 +12,11 @@
 > `report_rules` needs an agent-side consumer (`run_job.py`/SKILL.md), a manifest
 > field alone is a no-op (A4 now three-part); **P2** — blank `chat_preamble` must
 > preserve the `buildLinkedFolderContext` Drive-summary injection, not suppress it
-> (A1 precedence made explicit).
+> (A1 precedence made explicit). Rev 4 — Codex round 2 (code-level): `report_rules`
+> reaches only the model's judgment of the *unresolved* shortlist, so it can't
+> override a category the deterministic pass already assigned; scoped the promise
+> honestly (UI + SKILL.md) and pointed hard per-merchant overrides at the merchant
+> dictionary (which runs first and wins).
 
 ## Context
 
@@ -130,6 +134,16 @@ but **never `constraints`**, and SKILL.md step 2 applies only the bundled
 
 Without part 2 the setting would silently do nothing — the point of the lever is
 that it actually reaches the model's judgment step.
+
+**Scope (Codex round 2).** `report_rules` steers the model's judgment of the
+**unresolved** merchant shortlist only — it does **not** override a category the
+deterministic pass already assigned. In `categorize()` the merchant dictionary is
+checked **first** (it beats the built-in rules), so the dictionary is the hard
+per-merchant override path; `report_rules` is natural-language guidance the model
+applies to what's left. The UI and SKILL.md say exactly this, and point admins to
+the dictionary for "this merchant always → that category" rules. (Forcing the
+model to re-judge proven deterministic results would be slower and less reliable —
+this scoping is intentional, not a limitation to fix.)
 
 **A5. Merchant dictionary (read-only list).** A section listing the approved
 `MerchantMapping` rows (pattern → category) so the admin can *see* what the

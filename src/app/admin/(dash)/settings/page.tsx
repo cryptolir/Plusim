@@ -91,16 +91,19 @@ export default async function AdminSettingsPage() {
       <section className="mt-8 border-t pt-6">
         <h2 className="text-sm font-semibold">Report categorization rules</h2>
         <p className="mb-3 mt-1 text-sm text-muted-foreground">
-          Extra rules the {AGENT} agent applies <strong>on top of</strong> its built-in
-          categorization playbook when processing statement jobs — sent in every job&apos;s manifest.
-          Use it to steer ambiguous merchants (&ldquo;X always goes to category Y&rdquo;). Blank ⇒
-          the built-in playbook only. Takes effect on the next report job.
+          Free-text guidance the {AGENT} agent applies when it has to <strong>judge a merchant</strong>{" "}
+          the built-in rules and the merchant dictionary couldn&apos;t place — sent in every job&apos;s
+          manifest. It steers the model&apos;s judgment of <em>unresolved</em> merchants; it does{" "}
+          <strong>not</strong> override a category the deterministic pass already assigned. For a hard
+          &ldquo;this merchant always → that category&rdquo; rule, approve a{" "}
+          <strong>merchant-dictionary</strong> mapping instead (below) — those are applied first and win.
+          Blank ⇒ the built-in playbook only. Takes effect on the next report job.
         </p>
         <SettingEditor
           settingKey="report_rules"
           initial={reportRules ?? ""}
           saveToken={saveToken}
-          placeholder={'e.g. "כל עסקה מ-“רמי לוי” → מזון ומכולת" · "חניון → תחבורה"'}
+          placeholder={'e.g. "אם מופיע רק שם קניון ללא חנות → un_categorized" · "עסקאות מלונות/נופש → נופש וחופשות"'}
           heightClass="h-48"
         />
       </section>
