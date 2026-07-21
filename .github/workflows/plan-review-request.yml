@@ -1,0 +1,61 @@
+# Plan-review handoff (docs/PLAN_REVIEW_PROTOCOL.md §5):
+# a PR that adds/changes a plan doc gets labeled and auto-requests a Codex review.
+# The comment deliberately contains NO "@claude" mention (loop safety) — Claude is
+# triggered by the Codex app's submitted review itself (claude.yml trigger 2), not by
+# a verdict line, which the app doesn't emit. Findings ride as inline review comments.
+#
+# The @codex mention MUST be posted by a GitHub identity connected to a Codex/ChatGPT
+# account. github-actions[bot] never is (confirmed on PRs #170/#172/#173/#174 — every
+# bot-authored mention gets bounced with "create a Codex account and connect to
+# github"), so this uses a human PAT (secret CODEX_REVIEW_PAT) when set. Without that
+# secret it falls back to github.token and the comment is a no-op that just labels the
+# PR — see the fallback note baked into the comment body below.
+name: Request Codex plan review
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+    paths:
+      - "docs/plans/**"
+
+jobs:
+  request-review:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Label + request Codex review
+        env:
+          # Label ops run as the default Actions token — a classic PAT lacks the
+          # read:org scope that `gh pr edit --add-label` needs (caught on PR #177).
+          GH_TOKEN: ${{ github.token }}
+          # The @codex mention MUST come from a Codex-connected human account, so
+          # the comment is posted with the PAT. REST issues/comments (not `gh pr
+          # comment`) avoids the same read:org GraphQL path the PAT can't satisfy.
+          PAT: ${{ secrets.CODEX_REVIEW_PAT }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Bootstrap the label on first use (create is idempotent — fails
+          # harmlessly if it already exists), THEN apply it. Without this, a
+          # missing label made the add silently no-op (caught on PR #167).
+          gh label create "plan-review" --repo "$REPO" --color 5319e7 \
+            --description "Plan doc PR under docs/plans/ — Codex adversarial review per docs/PLAN_REVIEW_PROTOCOL.md" \
+            2>/dev/null || true
+          gh pr edit "$PR" --repo "$REPO" --add-label "plan-review"
+
+          if [ -n "$PAT" ]; then
+            BODY="@codex review
+
+          This PR is a **plan document** under \`docs/plans/\` — review it per \`docs/PLAN_REVIEW_PROTOCOL.md\` (adversarial pass on the §4 trust-boundary checklist + the PR body's review asks).
+
+          Leave each finding as an **inline review comment** on the line it concerns and submit the review. Claude acts on the submitted review automatically — any actionable inline finding is treated as changes-requested; a review with none (approval / 👍) as approved. No verdict line needed."
+            GH_TOKEN="$PAT" gh api "repos/$REPO/issues/$PR/comments" -f body="$BODY" >/dev/null
+          else
+            BODY="**plan-review** label applied — Codex review NOT auto-requested.
+
+          \`CODEX_REVIEW_PAT\` repo secret isn't set, so this workflow can't post an \`@codex review\` mention that Codex will honor (a bot-authored mention is always bounced — see \`docs/PLAN_REVIEW_PROTOCOL.md\` §5). Post \`@codex review\` yourself from a Codex-connected account to request the review."
+            gh pr comment "$PR" --repo "$REPO" --body "$BODY"
+          fi
