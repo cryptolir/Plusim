@@ -10,6 +10,16 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 These rules apply to any agent (human or AI) working on this codebase. They override convenience.
 
+## Plan-review protocol
+
+Trust-boundary changes (the `/api/agent/**` and `/api/chat` surfaces, admin auth / Drive-OAuth
+gates, Prisma schema/data migrations, infra/deploy config) go through a **plan PR** before code:
+draft the plan under `docs/plans/`, run a `/ponytail` minimalism pass, open the PR with explicit
+review asks, get an adversarial Codex review, revise as Rev N until approved, then implement exactly
+the plan. Full process, act-vs-ask policy, and the GitHub Actions automation
+(`.github/workflows/plan-review-request.yml` + `claude.yml`) are in
+[docs/PLAN_REVIEW_PROTOCOL.md](./docs/PLAN_REVIEW_PROTOCOL.md).
+
 ## 0. Hard boundary: stay inside this project
 
 **Only ever read or edit files that belong to Plusim** — the repo working copy at `/root/projects/Plusim` on the dev server, and this project's own config (e.g. its `CLAUDE.md` / `AGENTS.md`).

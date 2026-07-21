@@ -1,0 +1,67 @@
+# Claude agent (docs/PLAN_REVIEW_PROTOCOL.md §5). Triggers:
+#   1. Any @claude mention in a comment or review body (manual, or a human/CLI
+#      Codex session ending with "@claude verdict: ...").
+#   2. A review submitted by the Codex GitHub app (chatgpt-codex-connector[bot])
+#      on a plan PR (carries the `plan-review` label that plan-review-request.yml
+#      stamps on PRs touching docs/plans/**) — the app writes findings as inline
+#      review comments and does NOT emit a verdict line, so we trigger on authorship
+#      and read the findings from the PR. pull_request_review has no paths filter, so
+#      the label is how we scope to plan PRs; code-PR reviews use the @claude fallback.
+# Claude then acts under the §3 act-vs-ask policy (revise plan / implement approved
+# plan / stop and ask the owner). Billed to a Claude subscription via repo secret
+# CLAUDE_CODE_OAUTH_TOKEN (generate with `claude setup-token`), NOT the API key.
+# The `prompt` input runs the action in automation mode so it acts whenever the job
+# `if` fires — without it the action waits for a literal "@claude" in the event and
+# silently no-ops on a Codex app review (which has none). concurrency serializes runs
+# per PR so a fold→re-review→fold cycle can't race; the prompt's round cap is the
+# loop circuit-breaker. Manual path (any logged-in session) needs none of this.
+name: Claude
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+
+concurrency:
+  group: claude-pr-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  claude:
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && github.event.review.user.login == 'chatgpt-codex-connector[bot]' && contains(github.event.pull_request.labels.*.name, 'plan-review'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # This workflow is DESIGNED to act on Codex's bot-authored reviews
+          # (the job `if` above triggers on chatgpt-codex-connector[bot]), but
+          # claude-code-action refuses non-human actors unless they're allowlisted
+          # here — so a plain trigger fails with "Workflow initiated by non-human
+          # actor". Allow exactly the Codex connector (matched WITH the [bot]
+          # suffix); the job `if` remains the real gate (Codex on a plan-review
+          # PR, or a human @claude mention).
+          allowed_bots: "chatgpt-codex-connector[bot]"
+          prompt: |
+            You are acting under docs/PLAN_REVIEW_PROTOCOL.md — read it first. Determine what triggered you and what the review said: if the trigger is a Codex GitHub-app review (author chatgpt-codex-connector[bot]), its body is boilerplate and the ACTUAL findings are the inline PR review comments — fetch them (gh api repos/OWNER/REPO/pulls/PR/comments) and treat any actionable finding as 'changes-requested'; a review with no actionable inline findings (approval / 👍 / boilerplate only) is 'approved'. A human/CLI '@claude verdict: approved|changes-requested' line means exactly that, and any other explicit instruction in a human @claude comment (e.g. 'act on the codex review above') should be followed. Then act: CHANGES-REQUESTED → revise the plan doc on this PR's branch as a new Rev (fold every point, add caught holes as named test cases, add a resolution table, reply on the PR summarizing the fold, and re-request review with '@codex review'). APPROVED → merge the plan PR and implement it EXACTLY as written via the release pipeline (fresh branch off main, `pnpm typecheck` + `pnpm test` + `pnpm build` must pass, PR); do NOT re-request review. NOTE Plusim ships via Coolify auto-deploy on merge to main (AGENTS.md rule 2) — never edit prod out of band, and never push directly to main. STOP AND ASK the owner instead of acting for the §3 cases: deviation from the approved plan, production risk beyond the standard pipeline (manual data mutations, Prisma migrations, secrets, infra/DNS, rollbacks), or a major user-flow change the plan does not explicitly specify. LOOP CIRCUIT-BREAKER: if this is already the 4th or later review round on this PR (count prior Rev headers / your own fold comments), do NOT fold again — stop and ask the owner; repeated non-convergence needs a human. Conventional Commits with the Co-Authored-By trailer.
+          claude_args: |
+            --model claude-opus-4-8
