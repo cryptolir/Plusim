@@ -1,6 +1,6 @@
 # Plusim — Update a ready report (append statements + re-run the same job)
 
-> **Status:** Draft — **Rev 2**, Codex round-1 findings folded; awaiting re-review.
+> **Status:** Draft — **Rev 3**, Codex round-2 findings folded; awaiting re-review.
 > Nothing implemented yet.
 >
 > **Process** (self-contained, per protocol): plan PR → adversarial review → each
@@ -33,6 +33,22 @@
 >   result route's proven pattern), so every interleaving degrades to a 409 +
 >   re-run, never a silently partial report; banked as
 >   `publish_with_unprocessed_files_409` + `publish_append_race_conditional_409`.
+> - Rev 3 — Codex review round 2 (PR #23): **P1 (new)** — the *reverse*
+>   publish/result race: a publish that pre-checked a clean `completed` job can
+>   still land its conditional write AFTER a concurrent re-run's callback wrote
+>   a **fatal** `needs_review` result — `needs_review` is publishable and no file
+>   is newer than the (new) `dispatchedAt`, so the predicate matched and a fatal
+>   result got published without re-running the fatal guard. Resolved: the
+>   conditional write now also pins **`completedAt` to the value read in the
+>   pre-check** — any newly landed result moves it, so the stale publish matches
+>   0 rows ⇒ 409. Banked as `publish_reverse_result_race_409`. **P1 (carried
+>   over from round 1, thread `3632830672`)** — its text argues against the
+>   `completedAt` watermark that Rev 2 already replaced with `dispatchedAt`;
+>   re-examined rather than re-patched, and the full interleaving matrix (C,
+>   below) shows every append/run/publish ordering ends at a processed report or
+>   an explicit 409. No lock added — a mutual-exclusion mechanism would be
+>   machinery the watermark already makes unnecessary. Banked as
+>   `publish_partial_append_during_dispatch_409`.
 
 ## Problem
 
@@ -154,11 +170,13 @@ Rollback on mid-loop Drive failure: trash only the **newly** uploaded Drive
 files and delete only the **newly** created rows — never the job, never
 pre-existing files (unlike create's job-delete at `route.ts:131-137`).
 
-**Race posture (Rev 2):** append takes no lock against a concurrent run or
-publish. Instead every bad interleaving is made harmless downstream: any row
-whose `createdAt` postdates the run's `dispatchedAt` trips the publish guard
-(C) — worst case is an explicit 409 + re-run, never a published report that
-silently omits files it lists.
+**Race posture (Rev 2, matrix in C):** append takes no lock against a
+concurrent run or publish. Instead every bad interleaving is made harmless
+downstream: any row whose `createdAt` postdates the run's `dispatchedAt` trips
+the publish guard (C) — worst case is an explicit 409 + re-run, never a
+published report that silently omits files it lists. A *partially* completed
+append is covered the same way, row by row: each row is independently either
+pre-dispatch (in the manifest, processed) or post-dispatch (409).
 
 ### B. Run gate — allow a deliberate update of a published job
 
@@ -228,6 +246,44 @@ processed — the remedy is the same visible re-run). Enforced twice:
    nothing published — closing the pre-check→update TOCTOU the same way the
    result route closes the publish/result race (`result/route.ts:39-43`).
 
+**Conditional predicate, exactly (Rev 3):**
+
+```
+updateMany({ where: {
+  id: jobId,
+  status: { in: ["completed", "needs_review", "published"] },
+  completedAt: preChecked.completedAt,                        // result watermark
+  files: { none: { createdAt: { gt: preChecked.dispatchedAt } } },
+}, data: { status: "published", publishedAt, sheetUrl, agentTokenHash: null, … } })
+```
+
+Both watermarks are the **values read in the pre-check**, not field references —
+Prisma cannot compare two columns of the same row in a `where`, so a plan that
+says "createdAt > dispatchedAt" must be implemented with the pre-read value or
+it will not compile. A re-run between pre-check and write moves `dispatchedAt`,
+but that job is then `dispatched|processing` (status predicate fails) or has a
+new `completedAt` (watermark fails) — 0 rows either way ⇒ 409.
+
+**Interleaving matrix (answers the round-1 append/run/publish thread):**
+
+| when appended rows land | in the agent's manifest? | `createdAt > dispatchedAt`? | outcome |
+|---|---|---|---|
+| before `dispatchedAt` | yes (manifest is fetched after dispatch) | no | processed → publishable ✓ |
+| between dispatch and manifest fetch | yes | yes | 409 → visible re-run (conservative false positive) |
+| after the manifest fetch | no | yes | 409 → re-run ✓ |
+| while no run is in flight | n/a | yes | 409 at pre-check, and again at the conditional write ✓ |
+| append still mid-loop when run starts | per row, as above | per row | any post-dispatch row ⇒ 409 ✓ |
+
+No ordering yields a published report that omits a file the job lists.
+
+**Accepted leftover:** export runs before the conditional write (as today), so a
+publish that 409s on the race may already have refreshed the Google Sheet with
+the **pre-checked** artifact. That artifact is itself verified and non-fatal —
+no fatal data reaches the client — and the admin's remedy is the ordinary
+re-publish after review. Reordering export after the claim was rejected: it
+would leave a window where a published job still links the old sheet, which is
+the failure round 1 asked us to close.
+
 Fatal-verification 409 (`:34-44`) and token-clearing (`:92-94`) are unchanged.
 
 ### D. UI — `ReportJobDetail.tsx` only
@@ -254,6 +310,9 @@ the same shapes as today.
 
 ## Invariants (what review should attack)
 
+0. **A publish only ever publishes the exact result it verified** — status,
+   result watermark (`completedAt`) and file set are all re-asserted in the
+   write, so a result landing mid-publish can never be published unverified.
 1. **No stale callback ever mutates a report the client can see.** Published ⇒
    token null ⇒ 404. Updated-then-republished ⇒ old tokens fail the hash check;
    only the current run's token passes auth AND the conditional write.
@@ -315,6 +374,12 @@ New `runUpdateGuard.test.ts`:
 - `publish_append_race_conditional_409` — the conditional `updateMany`
   (status + no-newer-files predicate) matches 0 rows ⇒ 409, job not published
   (the `resultRace.test.ts` pattern).
+- `publish_reverse_result_race_409` — a fatal `needs_review` result lands
+  between pre-check and the conditional write (moving `completedAt`) ⇒ 0 rows ⇒
+  409; the job is NOT published and the fatal result stays reviewable.
+- `publish_partial_append_during_dispatch_409` — a file row created after
+  `dispatchedAt` while the agent run is in flight ⇒ 409, regardless of whether
+  the row predates the callback's `completedAt`.
 - `republish_updates_sheet_in_place` — `sheetUrl` set ⇒ update helper called
   with the parsed id only after `assertEntryUnderFolder` against the user's
   CURRENT folder; no new spreadsheet created.
