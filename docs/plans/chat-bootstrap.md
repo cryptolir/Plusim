@@ -1,12 +1,17 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 15 — RE-REVIEW REQUESTED** (plan PR). Codex round 12
-> exposed a *fundamental* limit on the fallback path: when `new-session` is down,
-> the id is minted server-side by `/api/chat` and unknown to the client until
-> its 2–90s response, so a refresh *during* the first fallback send can't have a
-> `cid`. Unclosable under constraint #1 (no client-minted ids) — resolved by
-> **accepting it as a documented degraded-mode (outage-only) limitation**, not
-> another patch. This terminates the fallback thread. Scope: `/chat` bootstrap.
+> **Status:** 🔍 **Rev 16 — RE-REVIEW REQUESTED** (plan PR). Codex round 13
+> caught a Next 16 gotcha (distinct area): `router.replace` commits the URL in a
+> React transition, so "strip the seed params before the send" wasn't
+> synchronous — a refresh in the gap could replay the seed. Fixed by committing
+> the `?cid` URL synchronously via `window.history.replaceState` (Next-16-synced,
+> confirmed in vendored docs) before the send. Scope: `/chat` bootstrap only.
+>
+> **Rev 16 — Codex round 13 resolution (2026-07-22, PR #22):**
+>
+> | # | Codex P2 | Resolution |
+> |---|---|---|
+> | 18 | **`router.replace` before the seed send isn't a synchronous URL commit** — Next 16 App Router writes the history entry on a later transition commit, so a refresh after the send starts but before the commit still shows `?p=…&autosend=1` → replays the seed into a new session (normal-path double-send window). | The seeded path commits the `?cid` URL **synchronously** with native `window.history.replaceState` (Next 16 supports it and keeps the router in sync — vendored `linking-and-navigating.md`) *before* `sendMessage(seed)`. T3 exercises the send-started-just-before-refresh timing. |
 >
 > **Rev 15 — Codex round 12 resolution (2026-07-22, PR #22):**
 >
@@ -267,13 +272,22 @@ long request recoverable; upstream work makes the answer arrive sooner.**
 
 ```ts
 hydrate([], data.conversationId);          // runtime now owns the cid  ← the fix
-router.replace(`/chat?cid=${data.conversationId}`, { scroll: false }); // strips p/ctx/autosend
+// SYNCHRONOUS URL commit (Rev 16, Codex round 13) — strips p/ctx/autosend and
+// sets ?cid BEFORE the send. `router.replace` schedules the nav in a React
+// transition (Next 16 App Router), so the history entry may not be written
+// until a later commit; a refresh after the send starts but before that commit
+// would still see ?p=…&autosend=1 and REPLAY the seed into a new session. The
+// native history method commits immediately and Next 16 keeps its router in
+// sync (vendored docs: 01-app/.../linking-and-navigating.md — window.history).
+window.history.replaceState(null, "", `/chat?cid=${data.conversationId}`);
 if (seed && autosend) void sendMessage(seed);
 ```
 
 The seeded send now posts `conversationId: <minted id>` → `/api/chat` appends
-to the **same** conversation (no duplicate); the URL `cid` is the real thread;
-reload hydrates the messages. `sectionContext` still lands: `new-session`
+to the **same** conversation (no duplicate); the URL `cid` is committed
+**synchronously before the send**, so a refresh at any point after this line
+resumes the real thread and never replays the seed (closing T3's normal-path
+double-send window). `sectionContext` still lands: `new-session`
 already stores `ctx` on the created conversation (`new-session/route.ts:23`),
 and the first-turn preamble reads the **conversation row's** stored
 `sectionContext` on the lookup branch (`route.ts:131`) — `past_meeting`
@@ -567,9 +581,12 @@ phantom component tests.
   one** conversation; after the reply, reload of `/chat?cid` hydrates the
   thread that holds the messages. (Today: two conversations, and the reload
   shows an empty placeholder.)
-- **T3** (carried; manual E2E): a refresh during the in-flight wait does
-  **not** re-send the seed (`p`/`autosend` stripped by the `replace` that
-  precedes the send); `ctx` still lands (stored by `new-session`).
+- **T3** (carried; manual E2E; **Rev 16**): a refresh during the in-flight wait
+  does **not** re-send the seed — the `?cid` URL is committed **synchronously**
+  (`window.history.replaceState`) *before* the send, so even a refresh in the
+  gap right after the send starts sees `?cid` (not `?p=…&autosend=1`); `ctx`
+  still lands (stored by `new-session`). Explicitly exercise the
+  send-started-but-just-before-refresh timing.
 - **T9** (carried, transformed; automated route test): `/api/chat` stays
   **lookup-only** — a supplied unknown `conversationId` still 404s; no
   create-if-missing crept in. (Records constraint #1 as satisfied by design;
