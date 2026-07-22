@@ -5,6 +5,7 @@ import {
   WebSpeechDictationAdapter,
   type AppendMessage,
 } from "@assistant-ui/react";
+import { CHAT_CLIENT_TIMEOUT_MS } from "@/lib/chatTimeouts";
 
 const dictationAdapter = new WebSpeechDictationAdapter();
 
@@ -62,7 +63,10 @@ export function usePlusimRuntime(opts: UsePlusimRuntimeOptions = {}) {
 
     const controller = new AbortController();
     abortRef.current = controller;
-    const timeoutId = setTimeout(() => controller.abort(), 90_000);
+    // Client abort must outlast the server's agent ceiling + un-abortable
+    // pre/post-agent work (A2), or a reply produced near the ceiling is
+    // discarded before its JSON arrives. Shared constant so the two can't drift.
+    const timeoutId = setTimeout(() => controller.abort(), CHAT_CLIENT_TIMEOUT_MS);
 
     try {
       const res = await fetch("/api/chat", {
@@ -117,8 +121,11 @@ export function usePlusimRuntime(opts: UsePlusimRuntimeOptions = {}) {
         {
           id: crypto.randomUUID(),
           role: "assistant",
+          // A3 (replaces the cut refetch): the reply is saved server-side even
+          // when we stop waiting, so point the user at the conversation rather
+          // than implying the answer was lost.
           content: isAbort
-            ? "הפסקנו להמתין לתשובה. אפשר לנסות לשאול שוב."
+            ? "הפסקנו להמתין לתשובה. אם היא כבר מוכנה, היא תופיע בשיחה ברשימת השיחות האחרונות."
             : "שגיאת תקשורת. נסו שוב.",
           createdAt: new Date(),
         },

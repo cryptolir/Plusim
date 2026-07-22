@@ -5,6 +5,7 @@ import { db } from "@/lib/db";
 import { callAgent, makeSessionKey } from "@/lib/agentglob";
 import { getSetting } from "@/lib/appSettings";
 import { buildLinkedFolderContext } from "@/lib/pastMeeting";
+import { AGENT_TIMEOUT_MS, CONTEXT_TIMEOUT_MS } from "@/lib/chatTimeouts";
 
 const MAX_MESSAGE_LENGTH = 3000;
 
@@ -95,14 +96,26 @@ export async function POST(req: NextRequest) {
   // never replaces — so a blank `chat_preamble` is a no-op and never suppresses
   // the Drive-summary injection.
   let hint: string | null = null;
+  let contextTimedOut = false;
   if (isFirstMessage) {
-    const folderContext = await buildLinkedFolderContext(userId);
-    if (conversation.sectionContext === "past_meeting") {
-      hint = folderContext;
-    } else {
-      const preamble = await getSetting("chat_preamble");
-      hint = [preamble, folderContext].filter(Boolean).join("\n\n") || null;
-    }
+    const isPastMeeting = conversation.sectionContext === "past_meeting";
+    // B1: the folder context is bounded (returns null past the deadline).
+    // B2: read it in parallel with the preamble — but `getSetting` must NOT run
+    // on `past_meeting` turns (precedence + chatPreamble.test.ts:85), so the
+    // preamble slot resolves to null there. Precedence output is byte-identical
+    // to the prior sequential form.
+    const [folderContext, preamble] = await Promise.all([
+      buildLinkedFolderContext(userId, {
+        timeoutMs: CONTEXT_TIMEOUT_MS,
+        onTimedOut: () => {
+          contextTimedOut = true;
+        },
+      }),
+      isPastMeeting ? Promise.resolve(null) : getSetting("chat_preamble"),
+    ]);
+    hint = isPastMeeting
+      ? folderContext
+      : [preamble, folderContext].filter(Boolean).join("\n\n") || null;
   }
   const outbound = hint
     ? `<<<context>>>\n${hint}\n<<<end_context>>>\n\nUser said: ${message}`
@@ -115,7 +128,7 @@ export async function POST(req: NextRequest) {
   let agentReply: string;
   let agentMessageId: string | undefined;
   try {
-    const result = await callAgent({ sessionKey: conversation.sessionKey, message: outbound, appUserId: userId, timeoutMs: 90_000 });
+    const result = await callAgent({ sessionKey: conversation.sessionKey, message: outbound, appUserId: userId, timeoutMs: AGENT_TIMEOUT_MS });
     agentReply = result.reply;
     agentMessageId = result.messageId;
   } catch (err) {
@@ -126,7 +139,7 @@ export async function POST(req: NextRequest) {
         conversationId: conversation.id,
         isFirstMessage,
         hasContext: Boolean(hint),
-        contextTimedOut: false,
+        contextTimedOut,
         dbBeforeAgentMs,
         contextMs,
         agentMs: Math.round(performance.now() - tPreAgent),
@@ -178,7 +191,7 @@ export async function POST(req: NextRequest) {
       conversationId: conversation.id,
       isFirstMessage,
       hasContext: Boolean(hint),
-      contextTimedOut: false,
+      contextTimedOut,
       dbBeforeAgentMs,
       contextMs,
       agentMs: Math.round(tPostAgent - tPreAgent),

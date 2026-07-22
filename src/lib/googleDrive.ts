@@ -13,6 +13,28 @@
 import { OAuth2Client } from "google-auth-library";
 import { db } from "@/lib/db";
 import { decryptJson, encryptJson } from "@/lib/driveCrypto";
+import { TOKEN_REFRESH_TIMEOUT_MS } from "@/lib/chatTimeouts";
+
+/**
+ * Reject `p` if it doesn't settle within `ms`. Guarantees the returned promise
+ * always settles, so a caller can never be pinned by a hung upstream call.
+ * Exported for tests.
+ */
+export function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const id = setTimeout(() => reject(new Error(message)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(id);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(id);
+        reject(e);
+      },
+    );
+  });
+}
 
 const CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
@@ -161,7 +183,15 @@ async function getAccessToken(): Promise<string> {
   const client = oauthClient();
   client.setCredentials({ refresh_token: auth.refreshToken });
   try {
-    const res = await client.getAccessToken();
+    // Hard-bound the refresh so this promise ALWAYS settles. google-auth-library
+    // does not time out getAccessToken(), so a hung Google token endpoint would
+    // otherwise block every Drive caller (chat, admin, reports) unbounded until
+    // the process restarts. On timeout we reject; callers degrade gracefully.
+    const res = await withTimeout(
+      client.getAccessToken(),
+      TOKEN_REFRESH_TIMEOUT_MS,
+      "getAccessToken timed out",
+    );
     if (!res.token) throw new Error("no access token returned");
     accessCache = { token: res.token, exp: client.credentials.expiry_date ?? Date.now() + 50 * 60_000 };
     return res.token;
@@ -230,7 +260,7 @@ export async function getEntry(id: string): Promise<DriveEntry> {
   return toEntry((await res.json()) as DriveApiFile);
 }
 
-export async function getFileText(entry: DriveEntry): Promise<string> {
+export async function getFileText(entry: DriveEntry, signal?: AbortSignal): Promise<string> {
   let url: string;
   if (entry.mimeType === GOOGLE_DOC_MIME) {
     url = `${DRIVE_API}/files/${encodeURIComponent(entry.id)}/export?mimeType=text/plain&supportsAllDrives=true`;
@@ -239,7 +269,7 @@ export async function getFileText(entry: DriveEntry): Promise<string> {
   } else {
     throw new UnsupportedTranscriptTypeError(`Unsupported transcript type: ${entry.mimeType}`);
   }
-  const res = await driveFetch(url);
+  const res = await driveFetch(url, signal ? { signal } : undefined);
   if (!res.ok) throw new Error(`drive read ${res.status}: ${await res.text()}`);
   return res.text();
 }
@@ -402,7 +432,7 @@ export async function trashFile(id: string): Promise<void> {
  * rename). NOTE: the tag string is a legacy name kept deliberately — existing
  * Drive files already carry it, so renaming it would make them undiscoverable.
  */
-export async function listSummaries(folderId: string): Promise<DriveEntry[]> {
+export async function listSummaries(folderId: string, signal?: AbortSignal): Promise<DriveEntry[]> {
   const params = new URLSearchParams({
     q: `'${folderId}' in parents and trashed=false and appProperties has { key='havayaSummary' and value='true' }`,
     fields: `files(${FIELDS})`,
@@ -411,7 +441,7 @@ export async function listSummaries(folderId: string): Promise<DriveEntry[]> {
     supportsAllDrives: "true",
     includeItemsFromAllDrives: "true",
   });
-  const res = await driveFetch(`${DRIVE_API}/files?${params.toString()}`);
+  const res = await driveFetch(`${DRIVE_API}/files?${params.toString()}`, signal ? { signal } : undefined);
   if (!res.ok) throw new Error(`drive summaries ${res.status}: ${await res.text()}`);
   const data = (await res.json()) as { files?: DriveApiFile[] };
   return (data.files ?? []).map(toEntry);

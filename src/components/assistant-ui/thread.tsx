@@ -51,7 +51,7 @@ import {
   RefreshCwIcon,
   SquareIcon,
 } from "lucide-react";
-import type { FC } from "react";
+import { useEffect, useState, type FC } from "react";
 
 export const Thread: FC<{ firstName?: string | null }> = ({ firstName }) => {
   return (
@@ -104,9 +104,22 @@ const ThreadMessage: FC = () => {
   return <AssistantMessage />;
 };
 
+// Show a reassuring caption once a reply has been in flight this long (ms).
+// Self-contained: the indicator mounts/unmounts with `isRunning`, so the timer
+// restarts each send. Perceived-latency affordance (Phase A1) — remove once the
+// agent streams (progressive tokens make the wait self-evident).
+const STILL_THINKING_MS = 15_000;
+
 // Telegram-style "the agent is typing" indicator: agent avatar + three
-// bouncing dots, shown while a reply is being prepared.
+// bouncing dots, shown while a reply is being prepared. After
+// STILL_THINKING_MS it appends a quiet "still thinking" caption so a long
+// synchronous wait reads as working, not stuck.
 const ThinkingIndicator: FC = () => {
+  const [stillThinking, setStillThinking] = useState(false);
+  useEffect(() => {
+    const id = setTimeout(() => setStillThinking(true), STILL_THINKING_MS);
+    return () => clearTimeout(id);
+  }, []);
   return (
     <div
       role="status"
@@ -114,10 +127,17 @@ const ThinkingIndicator: FC = () => {
       className="fade-in slide-in-from-bottom-1 animate-in flex items-start gap-2 px-2 duration-150"
     >
       <AgentAvatar className="mt-0.5" />
-      <div className="flex items-center gap-1.5 rounded-2xl rounded-ss-md border border-emerald-100 bg-emerald-50/60 px-4 py-3.5">
-        <span className="typing-dot size-2 rounded-full bg-emerald-600/80" />
-        <span className="typing-dot size-2 rounded-full bg-emerald-600/80" style={{ animationDelay: "0.18s" }} />
-        <span className="typing-dot size-2 rounded-full bg-emerald-600/80" style={{ animationDelay: "0.36s" }} />
+      <div className="flex flex-col gap-1.5">
+        <div className="flex items-center gap-1.5 rounded-2xl rounded-ss-md border border-emerald-100 bg-emerald-50/60 px-4 py-3.5 self-start">
+          <span className="typing-dot size-2 rounded-full bg-emerald-600/80" />
+          <span className="typing-dot size-2 rounded-full bg-emerald-600/80" style={{ animationDelay: "0.18s" }} />
+          <span className="typing-dot size-2 rounded-full bg-emerald-600/80" style={{ animationDelay: "0.36s" }} />
+        </div>
+        {stillThinking && (
+          <span className="fade-in animate-in px-1 text-xs text-muted-foreground duration-300">
+            עדיין חושב… תשובה מורכבת בדרך
+          </span>
+        )}
       </div>
     </div>
   );
