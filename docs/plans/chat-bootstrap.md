@@ -1,11 +1,16 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 6 — RE-REVIEW REQUESTED** (plan PR). Codex round 4
-> landed 1 P2 — in a **different** area (P1b title write), i.e. the multi-tab
-> pickup thread **terminated** at Rev 5 (all 5 prior threads outdated). Round 4
-> is the circuit-breaker threshold; folded with the owner flagged, since the
-> churning thread converged and this was a distinct, trivial atomic-update fix
-> (not the non-convergence the breaker guards). Scope: `/chat` bootstrap only.
+> **Status:** 🔍 **Rev 7 — RE-REVIEW REQUESTED** (plan PR). Codex round 5
+> landed 1 P2 — again a **distinct** area (P1 bare-load send race), confirming
+> convergence (findings 2→2→1→1→1, each a different real edge, not the same
+> one). Owner reviewed the round-4 threshold and directed **keep going**; this
+> is folded under that authorization. Scope: `/chat` bootstrap only.
+>
+> **Rev 7 — Codex round 5 resolution (2026-07-22, PR #22):**
+>
+> | # | Codex P2 | Resolution |
+> |---|---|---|
+> | 7 | **Bare-load fast manual send races the bootstrap** — the composer renders while `new-session` is in flight, so a send with `conversationIdRef` still null creates a *separate* conversation and the callback's `hydrate([], id)` then clobbers it (URL/thread diverge). | **P1c:** `sendMessage` **awaits the pending bootstrap id** when the ref is null and posts with it (single conversation, no composer disabling); the callback also skips `hydrate`/`replace` if a send already started. TB5 guards it. |
 >
 > **Rev 6 — Codex round 4 resolution (2026-07-22, PR #22):**
 >
@@ -155,6 +160,22 @@ the second request's filter matches zero rows). The in-memory
 `!conversation.title` stays only as a cheap early-out. `bookkeeping.test.ts`
 T4/T4b stay green (mocks move `update` → `updateMany`); TB4 adds the stale-null
 race (two overlapping fills → exactly one title, never overwritten).
+
+**P1c — gate manual sends on the pending bootstrap id (Rev 7, Codex round 5).**
+On a **bare** `/chat` load (no `cid`, no autosend), the composer renders while
+`new-session` is still in flight; a fast manual send today enters `sendMessage`
+with `conversationIdRef.current === null` → `/api/chat` creates a **separate**
+conversation, and the new-session callback's `hydrate([], id)` then clobbers
+the optimistic message while the send returns for the *other* conversation
+(URL/thread diverge). Fix: the bootstrap exposes its minted-id **promise** to
+the runtime, and `sendMessage`, when `conversationIdRef.current` is null,
+**awaits that pending id and posts with it** — a send during the window joins
+the minted conversation (single conversation), with no composer disabling and
+no clobbering. The seeded autosend path is unaffected (it already fires
+`sendMessage(seed)` *after* `hydrate` installs the id). The new-session
+callback additionally **skips its `hydrate`/`replace` if a send already
+started** (defense in depth: once the runtime owns a conversation, the
+placeholder is abandoned and pruned). Guards TB5.
 
 **P2 — bounded pending-reply pickup (constraint #2), implemented INSIDE
 `usePlusimRuntime` (Rev 2).** The hook exports exactly
@@ -343,6 +364,11 @@ phantom component tests.
   stale null row updates zero rows (stale-null race → exactly one title,
   never clobbered). (`bookkeeping.test.ts` T4/T4b stay green with `update` →
   `updateMany`.)
+- **TB5** (new, automated — guards P1c): a bare-load `sendMessage` fired while
+  the bootstrap id is still pending **awaits** it and posts with the minted id
+  (one conversation, no null-id create); a send after the id is installed is
+  unaffected; the new-session callback does not clobber a runtime that a send
+  already claimed.
 - Manual E2E (dev tunnel): home-hub prompt click → exactly one conversation,
   URL `cid` correct after reload; refresh mid-wait → typing indicator
   reappears, **Stop button actually stops it**, and the reply surfaces when
