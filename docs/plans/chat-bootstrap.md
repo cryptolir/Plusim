@@ -1,10 +1,15 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 7 — RE-REVIEW REQUESTED** (plan PR). Codex round 5
-> landed 1 P2 — again a **distinct** area (P1 bare-load send race), confirming
-> convergence (findings 2→2→1→1→1, each a different real edge, not the same
-> one). Owner reviewed the round-4 threshold and directed **keep going**; this
-> is folded under that authorization. Scope: `/chat` bootstrap only.
+> **Status:** 🔍 **Rev 8 — RE-REVIEW REQUESTED** (plan PR). Codex round 6
+> refined Rev 7's own P1c fix (the callback's skip was too broad — it dropped
+> the URL sync). Folded under the owner's standing "keep going". Findings
+> 2→2→1→1→1→1; still one small edge per round. Scope: `/chat` bootstrap only.
+>
+> **Rev 8 — Codex round 6 resolution (2026-07-22, PR #22):**
+>
+> | # | Codex P2 | Resolution |
+> |---|---|---|
+> | 8 | **Rev 7's callback skip drops the URL sync** — skipping `hydrate`/`replace` when a send started leaves no path writing the minted `cid` to the URL, so a fast-send refresh loses the thread / replays the seed. | The callback skips **only** the clobbering `hydrate([], id)`; it **always** runs `router.replace` to the minted `cid`. Since P1c's awaited send posts to that same minted id, there's one conversation and the URL now matches it. TB5 updated. |
 >
 > **Rev 7 — Codex round 5 resolution (2026-07-22, PR #22):**
 >
@@ -172,10 +177,15 @@ the runtime, and `sendMessage`, when `conversationIdRef.current` is null,
 **awaits that pending id and posts with it** — a send during the window joins
 the minted conversation (single conversation), with no composer disabling and
 no clobbering. The seeded autosend path is unaffected (it already fires
-`sendMessage(seed)` *after* `hydrate` installs the id). The new-session
-callback additionally **skips its `hydrate`/`replace` if a send already
-started** (defense in depth: once the runtime owns a conversation, the
-placeholder is abandoned and pruned). Guards TB5.
+`sendMessage(seed)` *after* `hydrate` installs the id). Because P1c makes the
+awaited send post to the **minted** id, there is only ever **one** conversation
+— so the new-session callback still runs, but (Rev 8, Codex round 6) it skips
+**only** the clobbering `hydrate([], id)` when a send has already started
+(that `hydrate` would wipe the optimistic user message), and **always keeps the
+`router.replace` URL sync** to the minted `cid`. Skipping the `replace` too
+would leave the address bar on `/chat` (or with `p`/`autosend`) while the
+message sits in the minted conversation — a refresh would lose the thread /
+replay the seed, reintroducing the very divergence this closes. Guards TB5.
 
 **P2 — bounded pending-reply pickup (constraint #2), implemented INSIDE
 `usePlusimRuntime` (Rev 2).** The hook exports exactly
@@ -364,11 +374,12 @@ phantom component tests.
   stale null row updates zero rows (stale-null race → exactly one title,
   never clobbered). (`bookkeeping.test.ts` T4/T4b stay green with `update` →
   `updateMany`.)
-- **TB5** (new, automated — guards P1c): a bare-load `sendMessage` fired while
-  the bootstrap id is still pending **awaits** it and posts with the minted id
-  (one conversation, no null-id create); a send after the id is installed is
-  unaffected; the new-session callback does not clobber a runtime that a send
-  already claimed.
+- **TB5** (new, automated — guards P1c/Rev 8): a bare-load `sendMessage` fired
+  while the bootstrap id is still pending **awaits** it and posts with the
+  minted id (one conversation, no null-id create); the new-session callback
+  **skips only `hydrate`** (does not wipe the optimistic message) but **still
+  runs `replace`** so the URL carries the minted `cid` (a refresh keeps the
+  thread); a send after the id is installed is unaffected.
 - Manual E2E (dev tunnel): home-hub prompt click → exactly one conversation,
   URL `cid` correct after reload; refresh mid-wait → typing indicator
   reappears, **Stop button actually stops it**, and the reply surfaces when
