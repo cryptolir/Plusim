@@ -1,18 +1,22 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 22 — RE-REVIEW REQUESTED** (plan PR). Codex round 19
-> surfaced the **failed-first-turn orphan row** in two places, both folded:
-> (1) **P1d (new):** the first-turn Drive/`past_meeting` context was gated on
-> "zero messages", so a first turn that 502s after persisting its user row made
-> the retry look non-first → the first *successful* agent call lost the meeting
-> context. Now gated on **"no assistant reply yet"** (a role-filtered count), the
-> exact analog of P1b's title fix, so the retry re-injects context — making
-> "`past_meeting` unchanged" actually true. (2) The Rev 21 predecessor guard also
-> backs off on a *single-tab* failed-retry orphan (`U1` dead, `U2` pending); that
-> is **accepted** — it's positionally indistinguishable from the multi-tab case
-> without schema reply-linkage, reverting would reintroduce the multi-tab
-> wrong-reply, and the reply is never lost (shows on reopen; P1d still gives the
-> retry correct context). Scope: `/chat` bootstrap only.
+> **Status:** 🔍 **Rev 23 — RE-REVIEW REQUESTED** (plan PR). Codex round 20
+> closed the last transcript-clobber path: a `/chat?cid` open renders immediately
+> (Rev 17), but its **initial** `/api/chat/history` hydrate is still in flight,
+> and Rev 20's cancel token only covered *pickup* polls. A slow history load +
+> a fast manual send let the stale initial response wholesale-`hydrate` over the
+> just-started turn. Fixed without regressing Rev 17's immediate render: the
+> **send action** on the `?cid` path is inert until the initial hydrate settles
+> (fast list query; error → sends enable, never strands), **and** the initial
+> fetch joins the same abort/generation token as the pickup fetches — so no
+> history fetch (initial, interval, or final) can clobber a started turn. Scope:
+> `/chat` bootstrap only.
+>
+> **Rev 23 — Codex round 20 resolution (2026-07-22, PR #22):**
+>
+> | # | Codex | Resolution |
+> |---|---|---|
+> | 28 | **Initial `?cid` history hydrate can clobber a fast new turn** — making the `?cid` path interactive immediately (Rev 17) lets a send fire before the initial `/api/chat/history` fetch resolves; that fetch's wholesale `hydrate(data.messages, cidParam)` then replaces the optimistic transcript and drops the just-started turn. Rev 20's cancel covered only pickup polls. | Render stays immediate; the **send action** (composer + suggestions) is inert until the initial hydrate settles (resolves/errors — error still enables, never strands), **and** the initial fetch joins the **same abort/generation token** as pickup fetches, so a late response is ignored. Prior history *and* the new turn both survive (send appends onto loaded history). TB6 covers send-before-initial-hydrate. |
 >
 > **Rev 22 — Codex round 19 resolution (2026-07-22, PR #22):**
 >
@@ -415,6 +419,24 @@ optimistic-append send path. The redesign removes that entire class:
   until the id is minted. Gating the `?cid` path would strand every existing
   conversation behind the placeholder forever — the render gate must not touch
   it.
+- **But the `?cid` path still guards SENDS against its own initial hydrate
+  (Rev 23, Codex round 20).** Rendering `?cid` immediately is correct, but the
+  initial `/api/chat/history` fetch that runs `hydrate(data.messages, cidParam)`
+  (`chat/page.tsx:29-32`) is still in flight, and it is a **wholesale**
+  `hydrate`. If a slow history load lets the user submit a new turn *before* it
+  resolves, that stale response would replace the optimistic transcript and drop
+  the just-started turn. The Rev 20 cancel token only covered **pickup** polls,
+  not this **initial** load. Fix (render stays immediate — no regression to
+  Rev 17): (i) the **send action** on the `?cid` path (composer submit + the
+  welcome suggestions) is **inert until the initial history hydrate settles**
+  (resolves or errors) — the view renders the loading conversation, only the
+  *send* briefly waits for its own data (a fast `list` query; on error, sends
+  enable anyway so the page never strands); and (ii) the initial history fetch
+  **joins the same abort/generation token** as the pickup fetches, so even a
+  response that lands the instant a send starts is ignored rather than
+  clobbering the new turn (belt-and-suspenders, same rule as Rev 20). This keeps
+  prior history *and* the new turn — the send appends onto loaded history, never
+  races it. TB6 covers send-before-initial-hydrate.
 - **Invariant (bare load only):** on a bare `/chat` load, **no send can be
   initiated from ANY entry point until the server-minted `cid` is installed in
   the runtime and the URL.** `bootstrapReady` flips true once `new-session`
@@ -629,8 +651,11 @@ turn**:
   turn. So every pickup fetch is tagged with a shared cancellation token (one
   `AbortController` + a generation check): `cancelPickup()` aborts the in-flight
   request and any later-resolving response is ignored by generation, so no poll
-  — interval or final — can `hydrate` after the pickup is cancelled. A new send
-  owns the transcript now. Stops are therefore:
+  — interval or final — can `hydrate` after the pickup is cancelled. **The
+  `?cid` initial history hydrate (`chat/page.tsx:29-32`) is tagged with the same
+  token (Rev 23, Codex round 20)**, so it too is ignored if it resolves after a
+  send starts — no history fetch of any kind (initial, interval, or final) can
+  clobber a started turn. A new send owns the transcript now. Stops are therefore:
   (a) assistant row after the pending turn arrives; (b) deadline — spinner
   stops but the bounded final fetch may still hydrate a last-interval reply;
   no speculative error copy for a failure we didn't observe; (c) user cancels
@@ -815,6 +840,13 @@ phantom component tests.
   **HomeHub's runtime is unchanged** (posts `null`, lazy-creates as today).
   (Render-gate + suggestion coverage are manual E2E; the
   ready/error/fallback-URL-sync transitions are unit-tested.)
+- **TB6** (P1e — `?cid` initial-hydrate send guard, Rev 23): a send fired on a
+  `/chat?cid` load **before** the initial `/api/chat/history` hydrate resolves
+  does **not** get clobbered — the send stays inert until the initial hydrate
+  settles, and a stale initial response that lands after the send starts is
+  ignored by the shared abort/generation token; prior history and the new turn
+  both survive. (Send-gate timing is manual E2E; the generation-guard drop of a
+  late response is unit-tested alongside the pickup decision fn.)
 - Manual E2E (dev tunnel): home-hub prompt click → exactly one conversation,
   URL `cid` correct after reload; refresh mid-wait → typing indicator
   reappears, **Stop button actually stops it**, and the reply surfaces when
