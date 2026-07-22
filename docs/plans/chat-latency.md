@@ -1,14 +1,25 @@
 # Plusim — chat latency: instrument, trim, and mask the wait
 
-> **Status:** 🔍 **Rev 6 — RE-REVIEW REQUESTED** (plan PR). Codex round 4
-> landed 1 new P2 — in a **different** area (C1 bootstrap), i.e. the
-> OAuth-refresh thread terminated at Rev 5 (all 4 earlier threads now
-> `is_outdated`). This hit the protocol's **4-round circuit-breaker**; per §3
-> it was escalated to the owner, who directed to continue with the recommended
-> fix (client-mint the `cid`). Folded as Rev 6 with that explicit
-> authorization — not an unsupervised loop. No implementation yet.
+> **Status:** 🔍 **Rev 7 — RE-REVIEW REQUESTED, DESCOPED** (plan PR). Codex
+> round 5 landed 2 new P2s, both consequences of Rev 6's `create-if-missing`
+> change — i.e. rounds 4–5 both churned in the same Phase C bootstrap area
+> while everything else stayed converged. Past the 4-round circuit-breaker,
+> this was escalated to the owner per §3, who chose **descope**: the C1/C2
+> `/chat` bootstrap rework leaves this plan for a dedicated follow-up plan
+> (`docs/plans/chat-bootstrap.md`, to be drafted — ideally sequenced with
+> Phase D streaming, which removes the long synchronous wait that makes
+> reload-resilience hard). **Shippable scope of THIS plan: Phases 0, A, B,
+> and C3.** No implementation yet.
 >
-> **Rev 6 — Codex round 4 resolution (2026-07-22, PR #12):**
+> **Rev 7 — Codex round 5 resolution (2026-07-22, PR #12, owner-directed):**
+>
+> | # | Codex P2 | Resolution |
+> |---|---|---|
+> | 6 | **Create-if-missing accepts arbitrary client IDs** — any non-existing string POSTs into `Conversation.id` (unconstrained `TEXT`) and into the AgentGlob `sessionKey`; the API widens from lookup-only to storing/forwarding client-controlled ids without shape validation. | **Descoped with C1/C2 (Rev 7).** The `create-if-missing` contract change leaves this plan entirely; `/api/chat` stays lookup-only for supplied ids. The finding is **banked as a hard requirement** in the follow-up plan's constraints: any client-minted-id design MUST validate UUID shape/length before any create (else 400). |
+> | 7 | **No pending-reply pickup after a mid-wait reload** — a refresh after the user message is written but before the reply lands does one history fetch and (params stripped) never re-fetches, so the reply stays invisible until a manual reopen. Rev 6's "self-heals on next hydrate" claim was wrong. | **Descoped with C1/C2 (Rev 7)** — banked as the second hard requirement for the follow-up plan: a reload that lands on a conversation whose **last row is a user turn** needs a bounded pending-reply pickup (or the whole problem dissolves under Phase D streaming, the preferred sequencing). |
+>
+> **Rev 6 — Codex round 4 resolution (2026-07-22, PR #12) — section since
+> DESCOPED to the follow-up plan (Rev 7):**
 >
 > | # | Codex P2 | Resolution |
 > |---|---|---|
@@ -88,13 +99,19 @@ once at mount; only `sectionContextRef` is re-synced at `:49`). The seeded
 send therefore posts `conversationId: null`, `/api/chat` creates a **second**
 conversation (`route.ts:51-65`), the URL's `cid` points at the empty
 placeholder, and a reload hydrates the placeholder — the real thread is only
-findable from home. Placeholders accumulate on every autosend visit. Phase C1
-fixes this.
+findable from home. Placeholders accumulate on every autosend visit.
+**Rev 7:** fixing this bootstrap bug is **descoped to the follow-up plan**
+(`docs/plans/chat-bootstrap.md`) — review rounds 4–5 showed every quick fix
+here spawns a new edge (cid-orphan → hydrate-gap + id-validation), and the
+problem largely dissolves once Phase D streaming removes the 2–90s
+synchronous wait. The bug is real but non-destructive: the reply is always
+persisted and reachable from the recent-chats list.
 
 The dominant latency term is AgentGlob's synchronous, non-streaming endpoint —
 that fix is external (backlog: "Streaming responses — depends on AgentGlob
 SSE"). This plan (a) measures, (b) deletes the app-side overhead we control,
-(c) fixes the bootstrap bug, and (d) makes the residual wait honest.
+and (c) makes the residual wait honest. (The bootstrap fix — previously goal
+(c) — moved to the follow-up plan.)
 
 ## Hard boundary
 
@@ -108,10 +125,10 @@ pre-staged in §6). Phase D delivers that ask; no cross-project edits.
 | Existing | Reuse for |
 |---|---|
 | Bounded-fetch pattern: `AbortSignal.timeout(2500)` aborting the fetch itself (`getUserSection` `agentglob.ts:108`, `seedAppProfileNameIfMissing` `:158`) | B1 threads a signal the same way (abort, not abandon) |
-| Lazy-chat pattern: `HomeHub` creates no conversation until first send; `/api/chat` already creates the conversation when `conversationId` is absent (`route.ts:51-65`), consuming `sectionContext` on the create branch (`route.ts:61`) | Blank `/chat` goes lazy the same way (C1) — no new mechanism |
+| Lazy-chat pattern: `HomeHub` creates no conversation until first send; `/api/chat` already creates the conversation when `conversationId` is absent (`route.ts:51-65`), consuming `sectionContext` on the create branch (`route.ts:61`) | *(follow-up plan)* the `/chat` bootstrap rework builds on this — descoped from this plan (Rev 7) |
 | `chatPreamble.test.ts` — precedence guard incl. `getSetting` **never called** on `past_meeting` (`:85`) | Regression gate for B1/B2; must merge green **untouched** (named test T1) |
 | `/api/chat/agent-info` route (used by `chat-avatars.tsx:20`) | Already serves agent metadata — `new-session`'s awaited `getAgentInfo()` is discarded by its only caller |
-| Existing `bootstrapped` ref (`chat/page.tsx:22`) | Survives strict-mode double-effects; C1 keeps it |
+| Existing `bootstrapped` ref (`chat/page.tsx:22`) | *(follow-up plan)* strict-mode double-effect safety for the bootstrap rework |
 | History hydrate on conversation open (`chat/page.tsx:29-34`) + the server's reply write | Already surfaces late-landed replies on revisit — what made A3 redundant |
 | Coolify log stream | Consumes Phase 0's one-line JSON logs — no APM dependency |
 | Shared-`now` invariant comment block (`route.ts:111-130`) | Semantics preserved with the C3 ordering fix below |
@@ -270,59 +287,26 @@ PUT); null builds are not cached; the cache lives inside `pastMeeting.ts`
 with a test-visible reset export (the preamble test mocks the module
 wholesale, `chatPreamble.test.ts:26`).
 
-### Phase C — fix the bootstrap, drop the dead weight
+### Phase C — DB consolidation (bootstrap rework DESCOPED, Rev 7)
 
-**C1. Blank `/chat` goes lazy** (align with `HomeHub.tsx:33`) — **and fixes
-the double-conversation bug** described in Context. Drop the
-`/api/chat/new-session` call from the no-`cid` mount path; render immediately.
-**The conversation id is minted client-side *before* the send (Rev 6, Codex
-P2#5)** — not synced back from the response — which is what closes the
-orphaned-reply window:
-- **At send time (seed autosend or first composer send):** the client
-  generates the conversation UUID, `router.replace`s the URL to `?cid=<id>`
-  **before** firing the fetch (stripping `p`/`autosend`, preserving `ctx`),
-  then posts to `/api/chat` **with** that `conversationId`. So the `cid` is in
-  the URL for the entire 2–90s wait.
-- **A refresh/navigation mid-wait now lands on `?cid=<id>`** → the normal
-  `cid` bootstrap runs (`history` fetch → hydrate) and, crucially, does
-  **not** re-send (params already stripped). The reply — which `/api/chat`
-  persists server-side regardless — is reachable directly by that `cid`, not
-  orphaned. This resolves the Rev 2 conflict: T3 (strip params so no
-  re-send) and "reload must hydrate the right thread" (T2) are both satisfied
-  because the id exists up front instead of only after the response.
-- Rev 2's "sync `cid` after the response" step is **removed** (it was the
-  source of the gap). The `bootstrapped` ref is kept (strict-mode
-  double-effect safety); `sectionContextRef` is assigned during render
-  (`plusimRuntime.ts:49`) before effects run, so `ctx` still lands on the
-  created conversation.
-
-**`/api/chat` contract change (create-if-missing).** Today the route 404s a
-`conversationId` it can't find (`route.ts:46-50`). Rev 6: a supplied id that
-**doesn't exist yet** is **created** (userId, `sessionKey =
-makeSessionKey(userId, id)`, `sectionContext`, first-message title) — the same
-create the no-id branch does, just on the client's id. Guards (T9): a supplied
-id that **exists but belongs to another user** still 404s (unchanged ownership
-check — never fall through to create, and `sessionKey`'s `@unique` +
-per-user namespacing means a guessed id can't hijack or collide). The no-id
-branch stays as a fallback. This keeps C2's `new-session` deletion (the id is
-minted in the browser, not via a server round trip) — laziness preserved, one
-fewer route, and a `cid` in the URL before the long call.
-
-`?cid` deep-link + `mark-viewed` behavior unchanged. Residual: a sub-second
-window between the client setting `?cid` and `/api/chat` persisting the row —
-a refresh *there* 404s the history fetch and shows an empty thread until the
-send completes; vastly smaller than the 2–90s agent wait it replaces, and
-self-heals on the next hydrate.
-
-**C2. Delete `/api/chat/new-session`.** Caller inventory verified complete:
-the chat page (`chat/page.tsx:44`) is the sole fetch caller and discards
-`agentInfo` (avatars use `/api/chat/agent-info`); signed-out `/chat` is
-Clerk-gated (`proxy.ts:22-23`). The prune `deleteMany` exists only to mop up
-the placeholders this route itself creates — it dies with the route. Legacy
-placeholder rows stay (harmless; no cleanup migration). **Keep** the
-`messages: { some: {} }` filter in the home recent-chats query and update its
-now-stale comment (`page.tsx:54-56`) so a future "simplification" doesn't
-drop the filter and resurface blank "שיחה חדשה" rows.
+**C1 + C2 — ~~`/chat` bootstrap rework~~ → follow-up plan.** The lazy-`/chat`
++ `new-session`-deletion rework (with its Rev 6 client-minted-id variant) is
+**out of this plan** by owner decision after the round-4 circuit-breaker:
+review rounds 4–5 both churned here (cid-orphan → hydrate-gap +
+id-validation), each fix spawning the next edge, while every other phase
+stayed converged. The whole difficulty comes from making a 2–90s synchronous
+send survive reloads — which Phase D streaming eliminates — so the rework
+moves to a dedicated plan (`docs/plans/chat-bootstrap.md`, to be drafted,
+sequenced with/after streaming). `/api/chat` keeps today's contract in this
+plan: supplied ids are **lookup-only** (unknown id → 404), no
+create-if-missing. The follow-up plan inherits three **banked constraints**
+from the review rounds: (1) client-minted ids must be UUID-shape-validated
+before any create (Codex #6); (2) a reload landing on a conversation whose
+last row is a user turn needs a bounded pending-reply pickup (Codex #7);
+(3) a refresh mid-wait must neither re-send nor orphan the reply
+(Codex #5 / T2+T3). The known double-conversation bug (Context) ships
+unfixed in this plan — real but non-destructive (reply always persisted,
+reachable via recent-chats).
 
 **C3. Consolidate `/api/chat` DB round trips.**
 - Fold `message.count` into the conversation fetch (`_count` select —
@@ -330,9 +314,11 @@ drop the filter and resurface blank "שיחה חדשה" rows.
   `isFirstMessage` implicitly. Semantics identical to today, including the
   documented concurrent-send race (unchanged, harmless). (−1 query/turn)
 - Title: set at creation by `/api/chat` (`route.ts:62`); post-agent update
-  only `if (isFirstMessage && !conversation.title)` (legacy new-session rows
-  are title-null; title-writer inventory verified: `route.ts:62` and `:115`
-  only). Kills the duplicate write on the common path.
+  only `if (isFirstMessage && !conversation.title)`. With the bootstrap
+  rework descoped, `new-session` **stays alive** and keeps creating
+  title-null rows — the conditional covers them (title-writer inventory
+  verified: `route.ts:62` and `:115` only). Kills the duplicate write on the
+  `/api/chat`-created path (home hub / no-id sends).
 - Post-agent ordering (Rev 2 fix): create the assistant message **first**;
   then the **conditional title update** (its `@updatedAt` side-effect bumps
   `updatedAt` with Prisma's own timestamp — the very behavior the in-repo
@@ -385,6 +371,9 @@ then deleted). No Plusim code in this iteration; tracked in ROADMAP backlog.
 ## Non-goals
 
 - Implementing streaming before AgentGlob exposes SSE (external dependency).
+- **The `/chat` bootstrap rework (ex-C1/C2)** — descoped to
+  `docs/plans/chat-bootstrap.md` (Rev 7, owner decision); this plan changes
+  nothing about how `/chat` starts up, and `new-session` stays as-is.
 - Background-job delivery, the B3 cache (both deferred — see above).
 - Changing what context the agent receives (precedence, injection semantics,
   summary size) — Phase B changes *when/whether we wait*, never what a
@@ -408,17 +397,19 @@ preprocessing timeout invariant, reply-write-before-bookkeeping order.
 - **Added** (simpler than what Rev 1 proposed): B1 rider bounding the home
   page's identical unbounded Drive chain (`page.tsx:91-99`).
 - **Kept:** everything else — one log line, one caption timer, one paired
-  constant, one signal-threaded timeout, one route deletion, one query
-  consolidation. No new tables/routes/deps; net −1 route.
+  constant, one signal-threaded timeout, one query consolidation. No new
+  tables/routes/deps. *(Rev 7: the route deletion left with the descoped
+  bootstrap rework.)*
 
-Net ≈ −120 lines vs Rev 1 as specced.
+Net ≈ −120 lines vs Rev 1 as specced (before the Rev 7 descope, which
+shrinks it further).
 
 ## Risks / contingencies
 
-- **Next 16 API drift** (AGENTS.md warning): C1's `router.replace` URL-sync
-  behavior verified against the vendored docs
-  (`node_modules/next/dist/docs/`) before coding. (The `after()` half of
-  this risk is gone with the `after()` cut.)
+- **Next 16 API drift** (AGENTS.md warning): still read the vendored docs
+  (`node_modules/next/dist/docs/`) before coding any route/client change.
+  (The `after()` half of this risk left with the `after()` cut; the
+  `router.replace` half left with the Rev 7 bootstrap descope.)
 - **B1 touches shared `driveFetch` + `getAccessToken`:** the `driveFetch`
   signal parameter is optional and unthreaded callers (admin routes) are
   behavior-identical; verified by typecheck + admin Drive smoke test. The
@@ -436,8 +427,6 @@ Net ≈ −120 lines vs Rev 1 as specced.
   refresh) and the client margin is sized from Phase 0's measured non-Drive
   preprocessing tail (Rev 3); A2 and B1 ship in the same PR, all three
   constants in one shared module (T6/T8 guard the margin).
-- **C1 param matrix:** `p`/`ctx`/`autosend`/`cid` × reload-mid-wait ×
-  strict-mode double-effects — covered by T2/T3 and the E2E matrix below.
 - **`isFirstMessage` race** (two concurrent first sends → both get the
   hint): pre-existing, unchanged by `_count`; documented, not fixed.
 - **B1 constant too tight** → context absent more often than today;
@@ -451,14 +440,10 @@ implementation PR must contain these):**
 - **T1** (pre-review P1): `chatPreamble.test.ts` merges green **untouched** —
   incl. `:85` (`getSetting` never called on `past_meeting`); B2's conditional
   form is what makes this hold.
-- **T2** (bootstrap bug, found by both passes; **updated Rev 6**): seeded
-  autosend visit creates **exactly one** conversation; the URL carries
-  `?cid=<id>` **before** the response (client-minted), and a reload
-  *during* or after the wait hydrates the thread that holds the messages
-  (today it hydrates an empty placeholder / an orphaned reply).
-- **T3** (pre-review P2; **updated Rev 6**): refresh during the in-flight
-  autosend wait does **not** re-send the seed (params stripped at send time)
-  **and** does not orphan the reply (URL already has `cid`); `ctx` preserved.
+- **T2 / T3 — moved to the follow-up plan (Rev 7 descope).** They test the
+  C1/C2 bootstrap rework (exactly-one-conversation autosend; refresh
+  mid-wait neither re-sends nor orphans the reply). They ride along with the
+  descoped scope and are **mandatory** in `docs/plans/chat-bootstrap.md`.
 - **T4** (pre-review P2): first message on a legacy null-title conversation →
   final `updatedAt == lastViewedAt` (no spurious "unread" on home) — guards
   the C3 write ordering against the `@updatedAt` race.
@@ -484,26 +469,23 @@ implementation PR must contain these):**
   also gets a bounded rejection, not an infinite await. Plus: the client
   timeout margin ≥ measured preprocessing high-percentile (asserted against
   the const module).
-- **T9** (Codex round 4 P2#5): `/api/chat` create-if-missing — a supplied
-  `conversationId` that **doesn't exist** is created for the caller (correct
-  `userId` + `sessionKey` + `sectionContext`) and replies; a supplied id
-  **owned by another user** 404s and creates nothing (no fall-through, no
-  `sessionKey` collision); a supplied id owned by the caller appends as a
-  normal follow-up turn (`isFirstMessage` false). Client-side: the URL holds
-  `?cid=<minted id>` before the fetch resolves, and a mid-wait reload hydrates
-  by that id without re-sending.
+- **T9 — moved to the follow-up plan (Rev 7 descope).** It tested the
+  create-if-missing contract, which leaves this plan; `/api/chat` stays
+  lookup-only for supplied ids here. In the follow-up plan T9 is mandatory
+  and **extended by Codex #6**: malformed / non-UUID / oversized supplied ids
+  400 before any create.
 
 **Also:**
 - Unit: context deadline fallback; `isFirstMessage` via `_count`;
   conditional-title logic.
 - Route: `/api/chat` with no `conversationId` creates conversation (title +
   namespaced sessionKey + `sectionContext`) and replies; 401/429 unchanged.
-- Manual E2E (dev tunnel): blank `/chat` first send → URL gains `cid`;
-  home-hub prompt click sends exactly once; `past_meeting` pin still injects
-  folder context; simulated slow Drive → message proceeds context-less
-  within ~2.5s overhead; home page renders within the bound for linked-folder
-  users (B1 rider); 15s hint appears; admin Drive pages unaffected (B1
-  optional-signal check).
+- Manual E2E (dev tunnel): home-hub prompt click sends and replies;
+  `past_meeting` pin still injects folder context; simulated slow Drive →
+  message proceeds context-less within ~2.5s overhead; home page renders
+  within the bound for linked-folder users (B1 rider); 15s hint appears;
+  admin Drive pages unaffected (B1 optional-signal check); `/chat` bootstrap
+  behaves **exactly as today** (unchanged in this plan — Rev 7 descope).
 - Prod, post-deploy: `chat_latency` grep — `dbBeforeAgentMs` +
   `dbAfterAgentMs` shrink vs Phase 0 baseline; `contextMs` bounded;
   first-vs-later `agentMs` recorded for the Phase D ask.
@@ -511,20 +493,24 @@ implementation PR must contain these):**
 
 ## Delivery & order
 
-1. **This plan** → plan PR #12 from `claude/agent-response-latency-vt4z4m`
-   with explicit review asks + the ponytail-ran line, per protocol. Codex
-   round 1 landed 2 P2s → folded as Rev 3 on the same branch → re-request
-   review. (The `plan-review-request.yml` / `claude.yml` automation +
-   `CODEX_REVIEW_PAT` merged in PR #13 after #12 opened, so #12 itself is
-   driven manually; future plan PRs auto-request.) Approved ⇒ merge plan PR,
-   then implement **exactly** the plan.
+1. **This plan** → plan PR #12 from `claude/agent-response-latency-vt4z4m`,
+   per protocol. History: rounds 1–3 folded as Revs 3–5; round 4 hit the
+   circuit-breaker → owner said continue → Rev 6; round 5 (2 P2s in the same
+   bootstrap area) → owner chose **descope** → Rev 7 (this). Approved ⇒ merge
+   plan PR, then implement **exactly** the descoped plan.
 2. **Phase 0** alone → deploy → ≥3–5 days of `chat_latency` baseline.
 3. **Phases A + B in one PR** (A2 depends on B1's bound — see Risks).
-4. **Phase C** — separate PR carrying T2/T3/T4 and the full E2E matrix.
+4. **Phase C3** — small separate PR carrying T4 + T7.
 5. **Phase D** ask goes to AgentGlob in parallel; streaming implementation is
    a new plan when SSE exists.
+6. **Follow-up plan** (`docs/plans/chat-bootstrap.md`) — the C1/C2 bootstrap
+   rework, drafted fresh per protocol (ponytail → plan PR → Codex), carrying
+   the three banked constraints + T2/T3/T9. Preferably sequenced with/after
+   streaming.
 
-## Review asks (for the Codex round — invariants to attack)
+## Review asks (Rev 7 re-review — descoped scope only)
+
+The C1/C2 bootstrap asks are gone with the descope; attack what remains:
 
 1. **T1 invariant:** does any part of B1/B2 as specified still reach
    `getSetting` on a `past_meeting` first turn, or otherwise change the
@@ -532,17 +518,13 @@ implementation PR must contain these):**
    preamble-state) combination?
 2. **A2 anchors:** with B1's bound in place, is there any path where
    preprocessing exceeds the budget and the client still aborts before the
-   server resolves (e.g. Clerk latency, DB stalls, `isDriveConnected` token
-   refresh outside the fetch signal)?
-3. **C1 sequencing:** attack the param matrix (`p`/`ctx`/`autosend`/`cid` ×
-   reload timing × strict-mode double-effects) for any remaining double-send
-   or lost-`ctx` window; is stripping params at send time sufficient, or is
-   there a race between `router.replace` and the effect re-run?
-4. **C3 ordering:** any interleaving of {assistant create, conditional title
+   server resolves (e.g. Clerk latency, DB stalls, token refresh)?
+3. **C3 ordering:** any interleaving of {assistant create, conditional title
    update, raw bump + view upsert batch} that violates
    `updatedAt == lastViewedAt` or loses the reply on a bookkeeping failure?
-5. **B1 signal threading:** any `driveFetch` caller whose behavior changes
-   with the optional signal; any leak of an aborted fetch's error past the
-   never-throws contract.
-6. **C2 completeness:** any caller of `new-session` or creator of empty
-   placeholder conversations the inventory missed.
+4. **B1 blast radius:** any `driveFetch` / `getAccessToken` caller (admin,
+   reports) whose behavior changes with the optional signal or the ~4s
+   refresh timeout; any leak past the never-throws contract.
+5. **Descope completeness:** does the Rev 7 scope still depend on anything
+   from the removed C1/C2 (a hidden coupling that breaks with the bootstrap
+   left as-is)?
