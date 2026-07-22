@@ -6,7 +6,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeReportsRequest } from "@/lib/reportsAdminAuth";
-import { isTaxonomyLeaf } from "@/config/reportTaxonomy";
+import { getValidLeafSet } from "@/lib/reportCategories";
 
 export const dynamic = "force-dynamic";
 
@@ -25,7 +25,7 @@ export async function PATCH(
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
   const category = typeof body.category === "string" ? body.category : "";
-  if (!isTaxonomyLeaf(category)) {
+  if (!(await getValidLeafSet()).has(category)) {
     return NextResponse.json({ error: "unknown category" }, { status: 400 });
   }
 

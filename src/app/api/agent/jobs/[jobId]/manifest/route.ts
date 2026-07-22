@@ -7,7 +7,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeAgentJobRequest, appBaseUrl } from "@/lib/agentRuntimeAuth";
 import { getSetting } from "@/lib/appSettings";
-import { REPORT_TAXONOMY } from "@/config/reportTaxonomy";
+import { getMergedTaxonomy } from "@/lib/reportCategories";
 
 export const dynamic = "force-dynamic";
 
@@ -46,7 +46,9 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
       sourceLabel: f.sourceLabel,
       url: `${base}/api/agent/jobs/${jobId}/files/${f.id}${q}`,
     })),
-    taxonomy: REPORT_TAXONOMY,
+    // Base ∪ admin-added ReportCategory leaves — the same filtered merge the
+    // result callback validates against, so app and agent can never disagree.
+    taxonomy: await getMergedTaxonomy(),
     merchantDictionary: dictionary,
     reportRules: reportRules ?? "",
     callback: { resultUrl: `${base}/api/agent/jobs/${jobId}/result${q}` },

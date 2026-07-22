@@ -10,6 +10,7 @@ vi.mock("@/lib/db", () => ({
   db: {
     statementFile: { findMany: vi.fn(async () => []) },
     merchantMapping: { findMany: vi.fn(async () => []) },
+    reportCategory: { findMany: vi.fn(async () => []) },
   },
 }));
 vi.mock("@/lib/agentRuntimeAuth", () => ({

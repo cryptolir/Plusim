@@ -2,6 +2,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeReportsRequest } from "@/lib/reportsAdminAuth";
+import { getMergedTaxonomy } from "@/lib/reportCategories";
 
 export const dynamic = "force-dynamic";
 
@@ -52,5 +53,9 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     select: { id: true, merchantPattern: true, category: true, source: true },
   });
 
-  return NextResponse.json({ job, pendingMappings });
+  // Merged (base ∪ ReportCategory) leaves in section order — the assign
+  // picker renders from this, never from the static base constant.
+  const categoryLeaves = (await getMergedTaxonomy()).flatMap((s) => s.leaves);
+
+  return NextResponse.json({ job, pendingMappings, categoryLeaves });
 }

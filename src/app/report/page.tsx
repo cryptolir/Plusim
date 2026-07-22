@@ -2,7 +2,7 @@ import { FileTextIcon, DownloadIcon, ExternalLinkIcon } from "lucide-react";
 import { auth } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
 import { db } from "@/lib/db";
-import { REPORT_TAXONOMY } from "@/config/reportTaxonomy";
+import { getMergedTaxonomy } from "@/lib/reportCategories";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +33,10 @@ function monthTitle(month: string): string {
 export default async function ReportPage() {
   const { userId } = await auth();
   if (!userId) redirect("/sign-in");
+
+  // Merged (base ∪ admin-added) taxonomy, so DB-category spend renders under
+  // its section instead of being dropped by the by-leaf bucketing below.
+  const taxonomy = await getMergedTaxonomy();
 
   const jobs = await db.reportJob.findMany({
     where: { targetUserId: userId, status: "published" },
@@ -129,7 +133,7 @@ export default async function ReportPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {REPORT_TAXONOMY.map((section) => {
+                      {taxonomy.map((section) => {
                         const rows = section.leaves
                           .map((leaf) => ({ leaf, sum: byLeaf.get(leaf) ?? 0 }))
                           .filter((r) => r.sum !== 0);

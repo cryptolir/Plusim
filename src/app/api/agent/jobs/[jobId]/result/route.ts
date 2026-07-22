@@ -16,6 +16,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeAgentJobRequest } from "@/lib/agentRuntimeAuth";
 import { parseAgentResult, verifyAgentResult, decodeXlsx } from "@/lib/reportResult";
+import { getValidLeafSet } from "@/lib/reportCategories";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -42,8 +43,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
   };
 
   try {
-    const result = parseAgentResult(body);
-    const verification = verifyAgentResult(result);
+    // The merged (base ∪ ReportCategory) leaf set — read at callback time, so a
+    // superset of whatever taxonomy the manifest served earlier (add-only).
+    const validLeaves = await getValidLeafSet();
+    const result = parseAgentResult(body, validLeaves);
+    const verification = verifyAgentResult(result, validLeaves);
     const xlsx = decodeXlsx(result.xlsxBase64);
 
     const completedOk = result.status === "ok" && !verification.fatal;
