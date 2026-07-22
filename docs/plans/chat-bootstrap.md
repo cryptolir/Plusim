@@ -1,10 +1,17 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 12 — RE-REVIEW REQUESTED** (plan PR). Codex round 9
-> landed 1 P2 on **P2** (the pickup window's clock-skew handling — a *different*
-> area, confirming the Rev 11 P1c redesign held). Folded: the pickup age is now
-> **server-anchored** (no browser clock in the age). Scope: `/chat` bootstrap
-> only.
+> **Status:** 🔍 **Rev 13 — RE-REVIEW REQUESTED** (plan PR). Codex round 10
+> landed 2 P2s: the P1c render gate missed the welcome-suggestion send path
+> (now a render gate covering **all** entry points), and P2's positional
+> completion needed a deterministic order + tie-is-ambiguous rule
+> (`createdAt` ms ties). Both folded. Scope: `/chat` bootstrap only.
+>
+> **Rev 13 — Codex round 10 resolution (2026-07-22, PR #22):**
+>
+> | # | Codex P2 | Resolution |
+> |---|---|---|
+> | 13 | **Gate misses suggestion sends** — the empty thread renders welcome suggestions (`SuggestionPrimitive.Trigger`) that also call `onNew`; disabling only the composer lets a pre-`bootstrapReady` suggestion click fire a null-id send. | The gate is now a **render gate**: while `!bootstrapReady` neither the composer nor the welcome suggestions render — structural coverage of every send entry point. TB5 exercises suggestions. |
+> | 14 | **Timestamp ties break the positional completion rule** — history orders by `createdAt` (ms precision); concurrent tabs can tie, making "row immediately after" nondeterministic → wrong reply. | History orders by `(createdAt ASC, id ASC)` (deterministic); a `createdAt` tie adjacent to the captured pending turn is **ambiguous → stop silently** (same conservative fallback). Equal-timestamp TB1 case added. |
 >
 > **Rev 12 — Codex round 9 resolution (2026-07-22, PR #22):**
 >
@@ -234,7 +241,7 @@ long request recoverable; upstream work makes the answer arrive sooner.**
 | `bootstrapped` ref (`chat/page.tsx:22-26`) | Strict-mode double-effect safety — kept as-is |
 | `ThinkingIndicator` + 15s caption (`thread.tsx`, latency A1), driven by `isRunning` | P2's pickup sets `isRunning` → the wait **UI** is free (the hook surface to set it is new — see P2) |
 | `AGENT_TIMEOUT_MS` / `CHAT_CLIENT_TIMEOUT_MS` (`chatTimeouts.ts`) | P2's pickup bound derives from the same constants — no new magic numbers |
-| `/api/chat/history` (returns rows with `role` + `createdAt`) | P2 polls it; the pending state is "last row is a user turn". **Rev 12:** add a `serverNow` field to the response so the pickup age is server-anchored (skew-free) |
+| `/api/chat/history` (returns rows with `role` + `createdAt`) | P2 polls it; the pending state is "last row is a user turn". **Rev 12:** add a `serverNow` field (server-anchored pickup age). **Rev 13:** order by `(createdAt ASC, id ASC)` for a deterministic sequence under ms-tie |
 | Placeholder prune in `new-session` (`route.ts:32-43`) | Kept — placeholders still exist (bare visits), and P1 stops the *seeded-visit* accumulation |
 | Abort copy (`plusimRuntime.ts`, latency A3) | P2's bound-stop can reuse the same honest wording if we choose to say anything (see P2) |
 
@@ -299,16 +306,26 @@ choice spawned four consecutive review rounds — it leaked into the URL sync
 optimistic-append/cancel window (round 8) — because the guard lived on a shared,
 optimistic-append send path. The redesign removes that entire class:
 
-- **Invariant:** on a bare `/chat` load, **no send can be initiated until the
-  server-minted `cid` is installed in the runtime and the URL.** The `/chat`
-  page tracks `bootstrapReady` (false until `new-session` resolves,
-  `hydrate([], id)` installs the id, and `router.replace(?cid=id)` runs); while
-  not ready the composer is **disabled** (page-level busy state on `<Thread>`;
-  or render a placeholder until ready). Because nothing can send before the id
-  exists, there is no null-id send and nothing to clobber — the callback simply
-  does its normal `hydrate([], id)` + `replace`. The await, the "skip
-  hydrate/replace if a send started", the cancel-during-wait state, and the
-  optimistic-append orphan (rounds 5–8) **all dissolve**.
+- **Invariant:** on a bare `/chat` load, **no send can be initiated from ANY
+  entry point until the server-minted `cid` is installed in the runtime and the
+  URL.** The `/chat` page tracks `bootstrapReady` (false until `new-session`
+  resolves, `hydrate([], id)` installs the id, and `router.replace(?cid=id)`
+  runs). Because nothing can send before the id exists, there is no null-id send
+  and nothing to clobber — the callback simply does its normal `hydrate([], id)`
+  + `replace`. The await, the "skip hydrate/replace if a send started", the
+  cancel-during-wait state, and the optimistic-append orphan (rounds 5–8) **all
+  dissolve**.
+- **The gate covers EVERY send entry point, not just the composer (Rev 13,
+  Codex round 10).** The empty thread renders welcome **suggestions**
+  (`ThreadWelcome` → `ThreadSuggestions` → `SuggestionPrimitive.Trigger send`,
+  `thread.tsx:168-187`) — a second send path that also calls `onNew`. Disabling
+  only the composer would let a suggestion click before `bootstrapReady` fire a
+  null-id send. So the gate is a **render gate**: while `!bootstrapReady` the
+  `/chat` page does not render the interactive send surface at all — **neither
+  the composer nor the welcome suggestions** (a brief placeholder in their
+  place). This is structural (no active affordance exists), so it covers the
+  two known entry points *and* any future one, with no per-component
+  whack-a-mole. TB5 exercises the suggestion path too.
 - **HomeHub is untouched.** The gate is page-level; `usePlusimRuntime` gains
   **no** await and no bootstrap-promise option, so HomeHub's lazy chat
   (`usePlusimRuntime({})`, first send posts `conversationId: null`) is exactly
@@ -371,12 +388,23 @@ turn**:
   immediately after it is a **user** row (a concurrent tab intervened), the
   captured turn's reply cannot be identified from the transcript → **stop the
   pickup silently** and fall back to normal reopen (never hydrate a wrong
-  reply; the real reply shows on the next `?cid` load, exactly as today). On
-  completion → wholesale `hydrate(allRows, cid)` replace (idempotent — no
+  reply; the real reply shows on the next `?cid` load, exactly as today).
+  **Adjacency needs a deterministic order, and a timestamp tie is ambiguous
+  (Rev 13, Codex round 10):** `/api/chat/history` orders solely by
+  `createdAt`, which is millisecond precision, so concurrent tabs can produce
+  two rows with the **same** `createdAt` and the "row immediately after" is
+  nondeterministic (could be another tab's assistant). Fix: (i) history orders
+  by `(createdAt ASC, id ASC)` for a stable, deterministic sequence; (ii) but a
+  stable order still doesn't reveal true insertion order under a tie, so if the
+  captured pending turn's `createdAt` is **tied** with an adjacent row (the
+  candidate successor or any row sharing its timestamp), treat adjacency as
+  **ambiguous → stop silently** (same conservative fallback as the intervening
+  user row). Only an unambiguous, strictly-later adjacent assistant completes.
+  On completion → wholesale `hydrate(allRows, cid)` replace (idempotent — no
   append/dedupe), `isRunning = false`. This ends the multi-tab ambiguity
   instead of chasing it: single-tab (the overwhelming case) is exact; the rare
-  concurrent-multi-tab case degrades to today's reopen behavior, never to a
-  wrong or hung state.
+  concurrent-multi-tab case (including timestamp ties) degrades to today's
+  reopen behavior, never to a wrong or hung state.
 - **While in the window:** `isRunning = true` (the typing indicator + 15s
   caption render for free, `thread.tsx:83-85`), re-fetch `/api/chat/history`
   every ~5s and apply the completion check above.
@@ -508,6 +536,9 @@ phantom component tests.
   ⇒ **not** complete — the immediate successor is a user row ⇒ **stop silently**
   (fall back to reopen, never hydrate `laterAssistant`); only an assistant row
   immediately following the captured pending turn completes (Codex rounds 1–3).
+  **Equal-timestamp case (Rev 13):** a row sharing the pending turn's exact
+  `createdAt` (concurrent-tab tie) ⇒ adjacency ambiguous ⇒ **stop silently**,
+  never hydrate on a tie.
   TB2 — **server-anchored age (Rev 12):** `age = serverNow − createdAt` from the
   history response, so a fresh turn gets its full window under **either**
   browser-clock skew direction (ahead-skew no longer collapses to one fetch);
@@ -523,15 +554,17 @@ phantom component tests.
   stale null row updates zero rows (stale-null race → exactly one title,
   never clobbered). (`bookkeeping.test.ts` T4/T4b stay green with `update` →
   `updateMany`.)
-- **TB5** (P1c — page-level gate, Rev 11): while `bootstrapReady` is false the
-  composer is disabled, so **no send fires without a `cid`** (one conversation,
-  no null-id create, no clobber); once `new-session` resolves + `hydrate` +
-  `replace` run, `bootstrapReady` flips true and sends proceed normally; a
-  `new-session` **error** enables the composer and the first send lazy-creates
-  (`conversationId: null`), never a permanently-disabled composer; **HomeHub's
-  runtime is unchanged** (posts `null`, lazy-creates as today). (Page-gate
-  behavior is manual E2E where it depends on the composer's disabled prop; the
-  ready/error state transition is unit-tested.)
+- **TB5** (P1c — page-level render gate, Rev 11 → Rev 13): while
+  `bootstrapReady` is false **no send entry point is active — neither the
+  composer NOR the welcome suggestions** (`SuggestionPrimitive.Trigger`), so no
+  send fires without a `cid` (one conversation, no null-id create, no clobber)
+  **whether the user uses the composer or clicks a suggestion**; once
+  `new-session` resolves + `hydrate` + `replace` run, `bootstrapReady` flips
+  true and both paths proceed; a `new-session` **error** re-enables the surface
+  and the first send lazy-creates (`conversationId: null`), never a permanently
+  inert surface; **HomeHub's runtime is unchanged** (posts `null`, lazy-creates
+  as today). (Render-gate + suggestion coverage are manual E2E where they
+  depend on rendering; the ready/error state transition is unit-tested.)
 - Manual E2E (dev tunnel): home-hub prompt click → exactly one conversation,
   URL `cid` correct after reload; refresh mid-wait → typing indicator
   reappears, **Stop button actually stops it**, and the reply surfaces when
