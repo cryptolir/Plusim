@@ -1,14 +1,21 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 19 — RE-REVIEW REQUESTED** (plan PR). Codex round 16
-> closed the **seeded × fallback** case: on a seeded URL (`/chat?p=…&autosend=1`)
-> that fails `new-session` into fallback mode, the plan did no `hydrate`/`replace`,
-> so the seed params lingered in the address bar through the 2–90s lazy-create
-> send — a mid-send refresh would replay the seed, or (if the fallback didn't
-> autosend) the original click would be dropped. Fixed: on the seeded fallback
-> path the page **captures the seed at mount, synchronously strips the seed
-> params with `window.history.replaceState('/chat')` even without a `cid`, then
-> still autosends** the seed via lazy-create. Scope: `/chat` bootstrap only.
+> **Status:** 🔍 **Rev 20 — RE-REVIEW REQUESTED** (plan PR). Codex round 17
+> folded two distinct P2s on the current head: (1) **cancel must invalidate every
+> in-flight pickup fetch**, not just the final one — a regular 5s poll already in
+> flight can resolve *after* a new send appended its optimistic row and `hydrate`
+> older history over it, dropping the new turn; now a shared cancel token
+> aborts/ignores **every** poll (interval + final). (2) **the seeded fallback must
+> preserve `ctx`** — since `new-session` failed there, the lazy `/api/chat` create
+> is the only path that can persist `sectionContext`, so `ctx` is captured with
+> the seed and passed to the fallback send. Scope: `/chat` bootstrap only.
+>
+> **Rev 20 — Codex round 17 resolution (2026-07-22, PR #22):**
+>
+> | # | Codex | Resolution |
+> |---|---|---|
+> | 23 | **Cancel only bounds the *final* pickup fetch** — a regular 5s `/api/chat/history` poll already in flight when the user cancels / starts a new send can resolve after `sendMessage` appended the new optimistic row and run `hydrate(allRows, cid)`, replacing the live transcript with older history and dropping the just-sent turn. | `cancelPickup()` now aborts/ignores **EVERY** in-flight pickup fetch (each interval poll **and** the final fetch) via one shared `AbortController` + generation check — no poll can `hydrate` after cancel. TB updated. |
+> | 24 | **Seeded fallback drops `ctx`** — Rev 19 captured only the seed before stripping the URL; on the fallback path `new-session` didn't run, so unless the lazy `/api/chat` send carries `sectionContext`, a `?ctx=past_meeting` conversation is created with `sectionContext: null`. | Capture **`ctx` alongside the seed at mount** (before the URL strip) and pass it as `sendMessage(seed, ctx)` — the runtime already forwards a `sectionContextOverride` into the `/api/chat` body and the route accepts it. TB5/T3 assert `ctx` reaches the create. |
 >
 > **Rev 19 — Codex round 16 resolution (2026-07-22, PR #22):**
 >
@@ -399,14 +406,23 @@ optimistic-append send path. The redesign removes that entire class:
   it is a programmatic send, so the brief disabled state never blocks it. On the
   **fallback** path (`new-session` failed → there is no `cid` to write) the seed
   must neither be dropped nor left in the URL: the page **captures the seed text
-  at mount, before any URL edit**, then on entering fallback mode **synchronously
-  strips the seed params with `window.history.replaceState('/chat')` even without
-  a `cid`** — so a refresh during the 2–90s fallback send cannot re-enter the
-  autosend bootstrap and replay the seed — and **still fires `sendMessage(seed)`
-  with `conversationId: null`** (lazy-create) so the original click is not lost.
-  The `conversationId` effect then syncs `?cid` once `/api/chat` returns. TB5/T3
-  cover the seeded-fallback path (no seed replay on mid-send refresh; the seed
-  click is not dropped).
+  AND `ctx` at mount, before any URL edit**, then on entering fallback mode
+  **synchronously strips the seed params with `window.history.replaceState('/chat')`
+  even without a `cid`** — so a refresh during the 2–90s fallback send cannot
+  re-enter the autosend bootstrap and replay the seed — and **still fires the
+  seeded send with `conversationId: null`** (lazy-create) so the original click
+  is not lost. **The captured `ctx` is passed to that fallback send (Rev 20,
+  Codex round 17):** normally `new-session` stores `sectionContext` on the
+  created row, but on the fallback path `new-session` failed, so the only creator
+  is `/api/chat` — the send must carry the section context explicitly or the
+  conversation is created with `sectionContext: null` (a lost `past_meeting`
+  pin). `sendMessage(seed, ctx)` already forwards a `sectionContextOverride` into
+  the `/api/chat` body (`plusimRuntime.ts:52,78`; the route accepts
+  `sectionContext`, `route.ts:33,104`), and `ctx` is captured **before** the URL
+  strip removes it. The `conversationId` effect then syncs `?cid` once
+  `/api/chat` returns. TB5/T3 cover the seeded-fallback path (no seed replay on
+  mid-send refresh; the seed click is not dropped; **`ctx` reaches the
+  lazy-create body**).
 - **Failure fallback covers ALL non-success outcomes (Rev 14, Codex round 11;
   Rev 18, Codex round 15).**
   The render gate hides every send affordance until `bootstrapReady`, so
@@ -534,9 +550,18 @@ turn**:
   pickup ⇒ dead button, user locked into an unstoppable 95s thinking state.
   The pickup registers a `cancelPickup()` that `onCancel` **and** the top of
   `sendMessage` both call (Enter-key submits can reach `onNew` even while
-  Send is hidden): stop the poll, `isRunning = false`, **and abort/ignore any
-  in-flight final fetch** (a new send owns the transcript now — this is the
-  only path that discards the final fetch's result). Stops are therefore:
+  Send is hidden): stop the poll, `isRunning = false`, **and abort/ignore
+  EVERY in-flight pickup fetch — each regular 5s `/api/chat/history` poll AND
+  the final deadline fetch, not just the final one (Rev 20, Codex round 17).**
+  This is the subtle part: a regular interval poll already in flight when the
+  user cancels or starts a new send can otherwise resolve *after* `sendMessage`
+  has appended the new optimistic user row and call `hydrate(allRows, cid)`,
+  replacing the live transcript with older history and dropping the just-sent
+  turn. So every pickup fetch is tagged with a shared cancellation token (one
+  `AbortController` + a generation check): `cancelPickup()` aborts the in-flight
+  request and any later-resolving response is ignored by generation, so no poll
+  — interval or final — can `hydrate` after the pickup is cancelled. A new send
+  owns the transcript now. Stops are therefore:
   (a) assistant row after the pending turn arrives; (b) deadline — spinner
   stops but the bounded final fetch may still hydrate a last-interval reply;
   no speculative error copy for a failure we didn't observe; (c) user cancels
@@ -668,7 +693,11 @@ phantom component tests.
   (`isRunning`) cleared even if the final fetch never settles, **but a final
   fetch resolving just after the deadline with the reply still hydrates the
   transcript** (Codex round 2). TB3 — cancel (user cancel or new send) ⇒ poll
-  stops, `isRunning` false, in-flight final fetch discarded.
+  stops, `isRunning` false, **every in-flight pickup fetch discarded — a regular
+  interval poll AND the final fetch (Rev 20):** a poll that resolves after
+  `cancelPickup()` (e.g. after a new send appended its optimistic row) is
+  ignored by the shared abort/generation token and does **not** `hydrate` older
+  history over the new turn.
 - **TB4** (new, automated — guards P1b): a null-title conversation is titled
   by **any** successful turn (not just the first); an existing title is never
   overwritten; and the write is **atomic** — the `updateMany` carries
@@ -688,12 +717,15 @@ phantom component tests.
   (rejected fetch, non-`res.ok`, missing `conversationId`, or a **hung request
   that aborts on `AbortSignal.timeout`** — Rev 18) re-enables the
   surface in fallback mode and the first send lazy-creates
-  (`conversationId: null`), never a permanently inert surface; **the fallback
-  send's returned id is synced to the URL** via the page's `conversationId`
-  effect (a refresh after a fallback send resumes the thread); **HomeHub's
-  runtime is unchanged** (posts `null`, lazy-creates as today). (Render-gate +
-  suggestion coverage are manual E2E; the ready/error/fallback-URL-sync
-  transitions are unit-tested.)
+  (`conversationId: null`), never a permanently inert surface; on a **seeded**
+  fallback the captured seed **and `ctx`** are carried into the lazy-create
+  (`sendMessage(seed, ctx)`), so a `?ctx=past_meeting` conversation is created
+  with the right `sectionContext` even though `new-session` never ran (Rev 20);
+  **the fallback send's returned id is synced to the URL** via the page's
+  `conversationId` effect (a refresh after a fallback send resumes the thread);
+  **HomeHub's runtime is unchanged** (posts `null`, lazy-creates as today).
+  (Render-gate + suggestion coverage are manual E2E; the
+  ready/error/fallback-URL-sync transitions are unit-tested.)
 - Manual E2E (dev tunnel): home-hub prompt click → exactly one conversation,
   URL `cid` correct after reload; refresh mid-wait → typing indicator
   reappears, **Stop button actually stops it**, and the reply surfaces when
