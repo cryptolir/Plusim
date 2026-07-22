@@ -1,6 +1,6 @@
 # Plusim — Admin-defined report categories (DB-backed, global taxonomy extension)
 
-> **Status:** Draft — **Rev 3** (Codex round-2 folded). Nothing implemented yet.
+> **Status:** Draft — **Rev 4** (Codex round-3 folded). Nothing implemented yet.
 >
 > **Process** (self-contained — the canonical plan-review protocol lives in
 > `docs/PLAN_REVIEW_PROTOCOL.md`; AGENTS.md rule 0 forbids following cross-repo pointers, so the
@@ -21,9 +21,10 @@
 >    The whole design hinges on the merged valid-leaf set being identical on both sides.
 > 2. **Guard composition.** Seven sites validate a category today (enumerated in Context 2). Does the
 >    plan convert *every* one to the merged set, with none left on the base-only `isTaxonomyLeaf`?
-> 3. **Fail closed.** An unknown category (in neither base nor DB) must still be FATAL / rejected,
->    and the pure verifier's default valid set must stay base-only (strict) so a route that forgets
->    to pass the merged set errs toward rejection, never acceptance.
+> 3. **Fail closed.** An unknown category (in neither base nor DB) must still be FATAL / rejected. The
+>    pure verifier takes the valid set as a **required** argument (no default), so a route that forgets
+>    to pass the merged set is a compile error — not a silent base-only fallback that would turn a legit
+>    DB leaf into a false FATAL.
 >
 > **Review log:**
 > - Rev 1 — authored from a file-anchored read of every taxonomy consumer (Context 2). Manual
@@ -55,6 +56,16 @@
 >     `test_result_callback_verifies_against_merged_set` — seeds a `ReportCategory`, POSTs a DB-leaf
 >     transaction + DB-leaf proposed mapping, and asserts the stored `verification.fatal === false` and
 >     the mapping survived.
+> - Rev 4 — Codex review round 3 (PR #20), one **P2** folded:
+>   - **line 351 — stale verifier carve-out became a loophole.** Rev 3 removed the verifier's base-only
+>     default (made `validLeaves` required), but `test_no_consumer_left_on_base_only_check` still
+>     whitelisted `isTaxonomyLeaf` in `reportResult.ts` "for the documented strict default." Since
+>     implementation follows the plan verbatim, that carve-out would let a base-only verifier path
+>     survive while the invariant test passed — re-opening the false-FATAL Rev 3 closed. Resolved: the
+>     invariant now permits `isTaxonomyLeaf` at **exactly one** runtime site (the create-route
+>     base-leaf-collision check); `reportResult.ts` and the admin routes must use `validLeaves.has(...)`.
+>     The two other stale "verifier default" references (Review-ask 3 and the §4 fail-closed line) are
+>     corrected to the required-arg contract.
 
 ## Context
 
@@ -347,8 +358,10 @@ Invariant (the review asks, banked as tests):
   single-source derivation directly, independent of the route wiring.
 - `test_no_consumer_left_on_base_only_check` — the guard-composition invariant across **all seven**
   sites, not only the `isTaxonomyLeaf` ones. Two parts: **(a)** no category-*validation* site (1–5)
-  calls bare `isTaxonomyLeaf` for runtime membership except the documented strict default in
-  `reportResult.ts` and the base-leaf-collision check in the create route (source-level assertion);
+  calls bare `isTaxonomyLeaf` for runtime membership — the ONLY permitted `isTaxonomyLeaf` call is the
+  base-leaf-collision check in the create route (C1); `reportResult.ts` and the admin validation routes
+  must use `validLeaves.has(...)`, so the required-arg contract is the sole category-membership path and
+  a base-only verifier path cannot survive (source-level assertion; Codex round-3);
   **(b)** the UI/report consumers (6–7) render from the merged source — asserted by **behavior, not
   grep**, since they use the constants `TAXONOMY_LEAVES` / `REPORT_TAXONOMY` rather than
   `isTaxonomyLeaf`: `test_assign_picker_includes_db_category` (the job-detail GET's `categoryLeaves`
@@ -365,8 +378,8 @@ a FATAL → publish → confirm it renders on `/report`.
 
 - **Authorization key:** the create endpoint reuses `authorizeReportsRequest` (exact same admin gate
   as every sibling reports route) — no new auth surface.
-- **Fail closed:** unknown category → FATAL / `400`; pure verifier defaults to the base set;
-  create rejects bad section / collision / empty.
+- **Fail closed:** unknown category → FATAL / `400`; the pure verifier takes a **required** merged set
+  (no base-only default), so a forgotten pass is a build error; create rejects bad section / collision / empty.
 - **Field extraction per type:** the merged set is built one way (`mergedLeafSet`) and consumed
   identically at manifest and verification — no per-path divergence.
 - **Guard composition:** all seven consumers move to the merged set together; two invariant tests pin
