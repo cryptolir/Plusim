@@ -1,14 +1,20 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 20 — RE-REVIEW REQUESTED** (plan PR). Codex round 17
-> folded two distinct P2s on the current head: (1) **cancel must invalidate every
-> in-flight pickup fetch**, not just the final one — a regular 5s poll already in
-> flight can resolve *after* a new send appended its optimistic row and `hydrate`
-> older history over it, dropping the new turn; now a shared cancel token
-> aborts/ignores **every** poll (interval + final). (2) **the seeded fallback must
-> preserve `ctx`** — since `new-session` failed there, the lazy `/api/chat` create
-> is the only path that can persist `sectionContext`, so `ctx` is captured with
-> the seed and passed to the fallback send. Scope: `/chat` bootstrap only.
+> **Status:** 🔍 **Rev 21 — RE-REVIEW REQUESTED** (plan PR). Codex round 18
+> closed the mirror of the multi-tab completion guard: the rule rejected a
+> concurrent user row *after* the captured pending turn, but not an unanswered
+> turn *before* it. With two tabs both pending (`U1, U2`), if `U1`'s reply lands
+> first the history is `U1, U2, A1` and "the row after `U2` is an assistant"
+> would hydrate `A1` — which is `U1`'s reply, not `U2`'s. Fixed symmetrically: the
+> pickup proceeds only when the captured turn is the **sole** trailing unanswered
+> turn (its predecessor is an assistant or start-of-history); an earlier
+> unanswered user row ⇒ ambiguous ⇒ stop silently. Scope: `/chat` bootstrap only.
+>
+> **Rev 21 — Codex round 18 resolution (2026-07-22, PR #22):**
+>
+> | # | Codex | Resolution |
+> |---|---|---|
+> | 25 | **Completion rule ignores an earlier unanswered turn** — the guard rejects a user row *after* the captured pending turn but not one *before* it; with two concurrent pending turns (`U1, U2`), `U1`'s reply landing first (`U1, U2, A1`) makes the "row immediately after `U2`" an assistant that is actually `U1`'s reply → hydrates the wrong reply and stops while `U2` is still pending. | Symmetric guard: the pickup proceeds **only when the captured pending turn is the sole trailing unanswered turn** — its immediate predecessor is an `assistant` row (or it is the first row). An earlier unanswered **user** row ⇒ adjacency ambiguous ⇒ **stop silently** (same conservative fallback). TB1 adds the `U1, U2, A1` case. |
 >
 > **Rev 20 — Codex round 17 resolution (2026-07-22, PR #22):**
 >
@@ -512,6 +518,21 @@ turn**:
   captured turn's reply cannot be identified from the transcript → **stop the
   pickup silently** and fall back to normal reopen (never hydrate a wrong
   reply; the real reply shows on the next `?cid` load, exactly as today).
+  **The same ambiguity exists for an unanswered turn BEFORE the captured one
+  (Rev 21, Codex round 18).** The adjacency guard above only covers a user row
+  *after* the captured turn, but a prior in-flight turn is just as poisonous:
+  if tab B sends `U1` (row persisted) and then tab A sends `U2` and reloads
+  while **both** replies are pending, the bootstrap captures `U2` and the tail
+  is `U1, U2`; if B's reply writes first, history becomes `U1, U2, A1`, so
+  "the row immediately after `U2` is an assistant" would hydrate `A1` — which is
+  **`U1`'s reply, not `U2`'s** — and stop while `U2` is still pending (the exact
+  missed/wrong reply this pickup exists to prevent). So the guard is symmetric:
+  the pickup proceeds **only when the captured pending turn is the *sole*
+  trailing unanswered turn** — i.e. the row *immediately before* it is an
+  `assistant` row (or it is the first row). If the row immediately before the
+  captured turn is another **user** row (an earlier unanswered turn), adjacency
+  is ambiguous → **stop silently** and fall back to reopen, same as the
+  after-case.
   **Adjacency needs a deterministic order, and a timestamp tie is ambiguous
   (Rev 13, Codex round 10):** `/api/chat/history` orders solely by
   `createdAt`, which is millisecond precision, so concurrent tabs can produce
@@ -685,7 +706,11 @@ phantom component tests.
   immediately following the captured pending turn completes (Codex rounds 1–3).
   **Equal-timestamp case (Rev 13):** a row sharing the pending turn's exact
   `createdAt` (concurrent-tab tie) ⇒ adjacency ambiguous ⇒ **stop silently**,
-  never hydrate on a tie.
+  never hydrate on a tie. **Earlier-pending-turn case (Rev 21):**
+  `U1, U2, A1` where `U2` is captured and its predecessor `U1` is an unanswered
+  user row ⇒ adjacency ambiguous (the adjacent `A1` may be `U1`'s reply) ⇒
+  **stop silently**; the pickup completes only when the captured turn's
+  predecessor is an assistant or start-of-history.
   TB2 — **server-anchored age (Rev 12):** `age = serverNow − createdAt` from the
   history response, so a fresh turn gets its full window under **either**
   browser-clock skew direction (ahead-skew no longer collapses to one fetch);
