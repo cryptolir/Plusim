@@ -1,11 +1,21 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 9 — RE-REVIEW REQUESTED** (plan PR). Codex round 7 landed
-> 2 more on P1c (its shared-hook integration — HomeHub + cancel), the 3rd
+> **Status:** 🔍 **Rev 10 — RE-REVIEW REQUESTED** (plan PR). Rev 10 adds
+> cross-app production evidence separating bootstrap resilience from upstream
+> agent latency; it does not change the implementation contract. Codex round 7
+> landed 2 more on P1c (its shared-hook integration — HomeHub + cancel), the 3rd
 > consecutive round touching P1c. Folded (these are P1c's distinct integration
 > points, not the same hole), under the owner's standing "keep going" — **but
 > P1c is now the flagged hotspot: a 4th P1c round triggers an escalation/rethink
 > rather than another patch.** Scope: `/chat` bootstrap only.
+>
+> **Rev 10 — cross-app field findings (2026-07-22, PR #22):**
+>
+> Added the chapter **“Cross-app field findings — separate bootstrap resilience
+> from agent latency”** from a production Havaya rollout. The evidence strengthens
+> P1/P2/P3's resilience case and the rejection of lazy `/chat`, while making
+> explicit that bootstrap work does not materially reduce upstream generation
+> time. No implementation requirement changed.
 >
 > **Rev 9 — Codex round 7 resolution (2026-07-22, PR #22):**
 >
@@ -117,6 +127,95 @@ persisted server-side, stays invisible until a manual reopen.
 This is also the shape Codex round 4 itself endorsed as the alternative:
 *"mint/sync the conversation id before starting the long call, **or keep a
 fixed bootstrap path for these sends**"* — we keep the fixed bootstrap path.
+
+## Cross-app field findings — separate bootstrap resilience from agent latency
+
+A production Havaya rollout on 2026-07-22 provides a useful control case for
+this plan. Havaya and Plusim use the same basic shape: a Next.js chat proxy
+persists the user turn, waits on AgentGlob's synchronous JSON endpoint, then
+persists and returns the assistant turn. Havaya applied the obvious app-side
+latency work first: explicit-only Drive context with a 1.5s bound, a smaller
+hidden context, lazy blank-chat creation, an existence lookup instead of a
+message count, parallel post-agent writes, and structured stage timings. It
+also pinned interactive chat to `gpt-5.6`.
+
+### Production timing evidence
+
+Four consecutive production turns produced this breakdown:
+
+| Turn | Auth | Pre-agent DB/request | Context | AgentGlob | Post-agent DB | Total |
+|---|---:|---:|---:|---:|---:|---:|
+| First | 12ms | 32ms | 0ms | 19,659ms | 22ms | 19,724ms |
+| Follow-up 1 | 1ms | 6ms | 0ms | 23,797ms | 4ms | 23,808ms |
+| Follow-up 2 | 2ms | 6ms | 0ms | 12,678ms | 5ms | 12,691ms |
+| Follow-up 3 | 1ms | 5ms | 0ms | 33,811ms | 4ms | 33,821ms |
+
+All four turns had `hasContext: false`. Non-agent application work was only
+10–66ms; AgentGlob consumed more than 99.6% of total request time. A separate
+minimal `gpt-5.6` smoke prompt returned in 5.07s, so the 12.7–33.8s production
+range is not explained by Havaya's auth, database, Drive context, or route
+bookkeeping. The remaining variance is inside the upstream agent/model path
+(model generation, reasoning, tool/skill loading, queueing, or network time
+that AgentGlob owns).
+
+### What transfers from this plan
+
+- **P1 + P1c transfer as correctness requirements.** A stable server-minted
+  conversation id must reach the runtime and URL before the long synchronous
+  send. Havaya's lazy `/chat` removed a tiny setup round trip but also left no
+  `cid` during the 13–34s wait; a refresh cannot identify and resume the
+  pending conversation. Saving milliseconds is not worth losing continuity.
+- **P2 transfers directly.** Bounded pending-reply pickup does not make the
+  model finish sooner, but it makes refresh/reopen during a long call reliable,
+  keeps the wait cancelable, and surfaces the persisted reply without a resend.
+- **P1b transfers with placeholders.** If the user row persists and the first
+  upstream call fails, a retry is no longer the first message. Title fill must
+  therefore be null-guarded and DB-atomic, not gated only on
+  `isFirstMessage`.
+- **P3 transfers as a clean bootstrap trim.** Removing discarded agent metadata
+  from `new-session` avoids an unnecessary external dependency on the setup
+  path. It is worthwhile, but the measured evidence says to expect a resilience
+  and tail-risk improvement—not seconds of generation-time savings.
+- **The rejection of lazy `/chat` is strengthened.** When upstream work is
+  measured in tens of seconds and local setup in tens of milliseconds, minting
+  the recoverable conversation first is the better trade.
+
+### What does not materially reduce answer time
+
+Once stage timings show that the agent owns more than ~90% of the wall clock,
+further micro-optimizing Prisma calls, title writes, context-free bootstrap, or
+URL updates cannot solve a “slow reply” report. Those changes can reduce local
+tail latency and failure surface, but they should not be presented as making
+the agent itself faster. Likewise, polling/queued delivery improves continuity
+and perceived responsiveness; it does not shorten completion time.
+
+The actual latency levers are upstream:
+
+1. **Real streaming (SSE or an equivalent resumable stream) from AgentGlob** so
+   the first tokens render before the full JSON reply completes.
+2. **Agent-side fast paths** that answer ordinary conversation without loading
+   tools/skills, reserving expensive reasoning and tool execution for turns that
+   need them.
+3. **A faster model or lower reasoning setting** when product requirements allow
+   it; pinning a capable model alone does not guarantee low latency.
+4. **Hybrid routing**: stream simple turns directly through the model provider
+   and send only memory/tool-dependent turns through AgentGlob. This trades
+   architectural simplicity for actual latency control.
+
+### Reusable decision rule for similar apps
+
+Instrument before redesigning. Record at least `authMs`,
+`dbBeforeAgentMs`, `contextMs`, `agentMs`, `dbAfterAgentMs`, and
+`totalMs`, plus first-turn/context/model flags. Then:
+
+- if local/context time dominates, cache or bound that dependency;
+- if AgentGlob dominates, prioritize streaming, model/reasoning policy, and
+  tool routing;
+- regardless of which stage dominates, a synchronous endpoint still needs a
+  stable pre-send conversation id and bounded pending-reply recovery.
+
+This separates two goals that should not be conflated: **bootstrap work makes a
+long request recoverable; upstream work makes the answer arrive sooner.**
 
 ## What already exists — reuse, do not rebuild
 
