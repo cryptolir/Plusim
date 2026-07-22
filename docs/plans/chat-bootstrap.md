@@ -1,10 +1,17 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 4 — RE-REVIEW REQUESTED** (plan PR). Codex round 2
-> landed 2 more P2s, both tightening Rev 3's own pickup fixes (round 2 of the
-> 4-round circuit-breaker). The follow-up plan promised by the chat-latency
-> plan's Rev 7 descope (`docs/plans/chat-latency.md`). Scope: the `/chat`
+> **Status:** 🔍 **Rev 5 — RE-REVIEW REQUESTED** (plan PR). Codex round 3 (3rd
+> consecutive round on the multi-tab completion edge) landed 1 P2. Rev 5
+> replaces the patch-on-patch with a **terminal** rule that ends the ambiguity
+> (the schema has no reply-linkage, so multi-tab is scoped best-effort rather
+> than chased). Round 3 of the 4-round circuit-breaker. Scope: `/chat`
 > bootstrap only.
+>
+> **Rev 5 — Codex round 3 resolution (2026-07-22, PR #22):**
+>
+> | # | Codex P2 | Resolution |
+> |---|---|---|
+> | 5 | **"Any assistant after the pending turn" still stops on the wrong reply** — `/api/chat` writes the user row before its agent call and the assistant after, so a concurrent tab produces `pendingUser, laterUser, laterAssistant`; the captured turn is still unanswered but `laterAssistant` satisfies the predicate. Root cause: no user→reply linkage in the schema. | **Terminal rule:** completion = the row **immediately after** the captured pending turn is an assistant (its adjacent reply). An intervening **user** row ⇒ stop silently, fall back to reopen (never hydrate a wrong reply). Multi-tab-concurrent pickup is now an **explicit best-effort non-goal** — exact single-tab, safe degrade otherwise; making it exact needs a schema reply-linkage column (out of scope, moot under streaming). |
 >
 > **Rev 4 — Codex round 2 resolution (2026-07-22, PR #22):**
 >
@@ -157,12 +164,25 @@ turn**:
   id" is **also** wrong (Rev 4): a second tab/device can append **another
   user** row to the same conversation via `/api/chat`, and that would satisfy
   "a row after the pending id" and stop the pickup before the reply exists.
-  So capture the pending user turn's `id`/`createdAt` at bootstrap and define
-  **completion = an `assistant` row exists after the captured pending turn**;
-  if the next row is another **user** turn, **keep polling** (until that
-  turn's own window, if it becomes the new pending turn, or the deadline).
-  On completion → wholesale `hydrate(allRows, cid)` replace (idempotent — no
-  append/dedupe), `isRunning = false`.
+  **Terminal rule (Rev 5, Codex round 3):** the message schema has **no
+  user→reply linkage** (`Message` is `role`/`content`/`createdAt` only), and
+  `/api/chat` writes each user row *before* its agent call and the assistant
+  *after* (`route.ts:113-119`, `:187-194`), so a concurrent multi-tab turn can
+  interleave as `pendingUser, laterUser, laterAssistant` where `laterAssistant`
+  is **not** the captured turn's reply — "any assistant after the pending turn"
+  is unresolvable in general. So define completion **positionally and
+  conservatively**: capture the pending user turn's `id` at bootstrap;
+  **completion = the row *immediately after* the captured pending turn is an
+  `assistant` row** (its reply, adjacent, no intervening row). If the row
+  immediately after it is a **user** row (a concurrent tab intervened), the
+  captured turn's reply cannot be identified from the transcript → **stop the
+  pickup silently** and fall back to normal reopen (never hydrate a wrong
+  reply; the real reply shows on the next `?cid` load, exactly as today). On
+  completion → wholesale `hydrate(allRows, cid)` replace (idempotent — no
+  append/dedupe), `isRunning = false`. This ends the multi-tab ambiguity
+  instead of chasing it: single-tab (the overwhelming case) is exact; the rare
+  concurrent-multi-tab case degrades to today's reopen behavior, never to a
+  wrong or hung state.
 - **While in the window:** `isRunning = true` (the typing indicator + 15s
   caption render for free, `thread.tsx:83-85`), re-fetch `/api/chat/history`
   every ~5s and apply the completion check above.
@@ -229,6 +249,14 @@ error handling. The prune stays (still needed for bare-visit placeholders).
   landing after a home reload is already surfaced by the recent-chats unread
   dot. Out of scope.
 - Streaming (external, issue #19).
+- **Perfect multi-tab-concurrent pickup (Rev 5, explicit).** With no
+  user→reply linkage in the schema, a conversation being sent to from a second
+  tab *while* this tab is in a reload-pickup cannot have its specific reply
+  disambiguated. The pickup is **best-effort**: exact for the single-tab case,
+  and in the concurrent-multi-tab case it stops silently and falls back to
+  normal reopen — never a wrong reply, never a hang. Making it exact would need
+  a reply-linkage column (a schema change), which is out of scope here and
+  moot once streaming (issue #19) resumes the specific stream directly.
 
 ## Risks / contingencies
 
@@ -280,11 +308,12 @@ phantom component tests.
   no existing test asserts this today.)
 - **TB1–TB3** (automated, against the extracted pure decision function):
   TB1 — last-row-user within the window ⇒ pickup with the clamped remaining
-  time; **completion requires an assistant row after the pending turn**: a
-  **mixed history** with older assistant rows ⇒ not complete; a history whose
-  new trailing row is **another user** turn (multi-tab) ⇒ **not** complete,
-  keep polling; only an assistant row after the captured pending id completes
-  (Codex round 1+2). TB2 — stale turn / ahead-skew ⇒ exactly one immediate
+  time; **completion = the row immediately after the captured pending turn is
+  an assistant** (Rev 5): a **mixed history** with older assistant rows ⇒ not
+  complete; `pendingUser, laterUser, laterAssistant` (concurrent multi-tab)
+  ⇒ **not** complete — the immediate successor is a user row ⇒ **stop silently**
+  (fall back to reopen, never hydrate `laterAssistant`); only an assistant row
+  immediately following the captured pending turn completes (Codex rounds 1–3). TB2 — stale turn / ahead-skew ⇒ exactly one immediate
   fetch then stop; behind-skew ⇒ remaining clamped to one window; deadline ⇒
   spinner (`isRunning`) cleared even if the final fetch never settles, **but a
   final fetch resolving just after the deadline with the reply still hydrates
