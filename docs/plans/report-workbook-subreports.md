@@ -1,6 +1,6 @@
 # Plusim — Report workbook sub-reports (ניתוח תוצאות · התפלגות ההוצאות · טופס עזר למיפוי · חישוב יעדים)
 
-> **Status:** Draft — **Rev 3**, Codex round-2 findings folded in; awaiting re-review.
+> **Status:** Draft — **Rev 4**, Codex round-3 finding folded in; awaiting re-review.
 > Nothing implemented yet.
 >
 > **Process** (self-contained — the canonical plan-review protocol doc lives outside
@@ -34,6 +34,12 @@
 >   Resolved: pre-merge verification is now local-only (dry-run + recalc + manual
 >   Drive-import spot-check of chart conversion); the full runtime round-trip moved
 >   into the post-merge C4 checklist.
+> - Rev 4 — Codex review round 3 (PR #14): **P2** — the goals-sheet `IF(H>0,…)` guard
+>   was insufficient: a blank age cell evaluates as 0, so filling the target age alone
+>   makes every unused child row emit a phantom monthly amount and inflate `סה"כ`.
+>   Resolved: B4 now anchors every downstream formula on the row's own age input
+>   (blank age ⇒ blank row), and the named test is strengthened to
+>   `test_goals_blank_rows_stay_blank`.
 
 ## Context
 
@@ -211,10 +217,15 @@ All changes in `agent/skills/plusim-reports/` unless noted.
   below (the demo workbook itself is not in the repo — the appendix is the reproducible
   source of truth an implementer builds the constant from).
 - **B4. `חישוב יעדים`.** Target amount/age inputs (`D1`, `F1` — `D1` in `₪` format),
-  six blank child rows with the template's formula chain, each division guarded:
-  `=IF(H<r>>0, $D$1/H<r>, "")` (blank rows must not render `#DIV/0!`); a `סה"כ` row
-  summing the per-child monthly amounts. The template's scratch cells (`J9`, `J18`,
-  side table `M11:N16`) are not replicated.
+  six blank child rows with the template's formula chain, where **every downstream
+  formula is anchored on the row's own age input** (a blank age cell evaluates as 0 in
+  Excel/Sheets, so a bare `IF(H>0,…)` guard would emit phantom amounts for unused rows
+  the moment `F1` is filled — Codex round-3):
+  `F<r>=IF(D<r>="","",$F$1-D<r>)` · `H<r>=IF(D<r>="","",F<r>*12)` ·
+  `J<r>=IF(D<r>="","",IF(H<r>>0,$D$1/H<r>,""))`; a `סה"כ` row `=SUM(...)` over the
+  per-child monthly cells (`SUM` ignores the blank-text results). Blank rows render
+  blank — no `#DIV/0!`, no contribution to the total. The template's scratch cells
+  (`J9`, `J18`, side table `M11:N16`) are not replicated.
 - **B5. Sheet insertion** in the Decision-5 order; all new sheets
   `sheet_view.rightToLeft = True`.
 
@@ -319,8 +330,10 @@ Unit (`scripts/test_build_report_xlsx.py`, synthetic transactions, runs with ven
   name/value columns, `dataLabels.showCatName` and `.showPercent` both true, legend
   removed.
 - `test_mapping_helper_static_content` — the static form matches the template constant.
-- `test_goals_division_guard` — blank child rows yield no `#DIV/0!`; filled rows
-  reproduce the template's arithmetic.
+- `test_goals_blank_rows_stay_blank` — with target amount and age filled but only some
+  child rows used: blank rows produce blank `F`/`H`/`J` cells (no `#DIV/0!`, no phantom
+  amounts), the `סה"כ` row sums only the filled rows, and filled rows reproduce the
+  template's arithmetic. (Codex round-3 P2.)
 - `test_sheet_order_and_rtl` — Decision-5 order; every new sheet is rightToLeft.
 - `test_size_under_caps` — a 5000-transaction build stays far below the 15MB decoded /
   20M-char base64 caps (`reportResult.ts:109,226`).
