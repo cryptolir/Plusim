@@ -1,6 +1,6 @@
 # Plusim — Update a ready report (append statements + re-run the same job)
 
-> **Status:** Draft — **Rev 3**, Codex round-2 findings folded; awaiting re-review.
+> **Status:** Draft — **Rev 4**, Codex round-3 findings folded; awaiting re-review.
 > Nothing implemented yet.
 >
 > **Process** (self-contained, per protocol): plan PR → adversarial review → each
@@ -49,6 +49,24 @@
 >   an explicit 409. No lock added — a mutual-exclusion mechanism would be
 >   machinery the watermark already makes unnecessary. Banked as
 >   `publish_partial_append_during_dispatch_409`.
+> - Rev 4 — Codex review round 3 (PR #23): **P1 (new)** — the `completedAt` pin
+>   misses the **rejected**-callback path (`result/route.ts:129-132` writes
+>   `status`/`error` only), so a re-run whose result was rejected could leave a
+>   publish-in-flight free to stamp `published` on the previous artifact while
+>   the latest run had actually failed. Resolved: the conditional write now also
+>   pins **`dispatchedAt`** — every run sets it (`run/route.ts:42-51`), and no
+>   result-route write can occur without a dispatch that postdates the
+>   pre-check (a callback requires `status ∈ dispatched|processing`, which a
+>   publishable job only re-enters via a new dispatch). `completedAt` is kept
+>   alongside it as the result-side watermark, so the pair still holds if a
+>   future result path is added. Banked as `publish_rejected_callback_race_409`.
+>   **P2 (new)** — `TIMESTAMP(3)` ties: a file appended in the *same millisecond*
+>   as the dispatch compares equal, so a strict `gt` would wave an unprocessed
+>   file through. Resolved: the boundary is now **`gte`** (same-millisecond ⇒
+>   409 ⇒ visible re-run, the safe direction). Banked as
+>   `publish_same_millisecond_append_409`. Two threads (`3632830672`,
+>   `3632947421`) were re-anchored unchanged by the bot and are already resolved
+>   in Rev 2 / Rev 3.
 
 ## Problem
 
@@ -232,11 +250,14 @@ Replace the `if (!sheetUrl)` skip (`publish/route.ts:51-53`) with:
 - Export remains best-effort exactly as today: an export failure never blocks
   publish — it only downgrades or clears the link.
 
-**New publish guard — files newer than the last dispatch:** refuse with 409
-when any `StatementFile.createdAt > dispatchedAt` — files the last run cannot
-have covered. `completedAt` is the wrong watermark: rows appended while a run
-is in flight land BEFORE the callback sets `completedAt` and would slip through
-(Rev 2 — Codex P1); `dispatchedAt` is conservative-correct (a file appended
+**New publish guard — files not older than the last dispatch:** refuse with 409
+when any `StatementFile.createdAt >= dispatchedAt` — files the last run cannot
+be proven to have covered. The boundary is `>=`, not `>`: both columns are
+`TIMESTAMP(3)`, so a file appended in the same millisecond as the dispatch
+compares equal and a strict `>` would treat it as processed (Rev 4 — Codex P2).
+A tie now costs one visible re-run instead of a silently incomplete report. `completedAt` is the wrong watermark for the file boundary: rows appended while
+a run is in flight land BEFORE the callback sets `completedAt` and would slip
+through (Rev 2 — Codex P1); `dispatchedAt` is conservative-correct (a file appended
 between dispatch and the agent's manifest fetch may 409 despite being
 processed — the remedy is the same visible re-run). Enforced twice:
 1. **Pre-check** before the export work → friendly 409, no wasted Sheet write.
@@ -252,23 +273,34 @@ processed — the remedy is the same visible re-run). Enforced twice:
 updateMany({ where: {
   id: jobId,
   status: { in: ["completed", "needs_review", "published"] },
-  completedAt: preChecked.completedAt,                        // result watermark
-  files: { none: { createdAt: { gt: preChecked.dispatchedAt } } },
+  dispatchedAt: preChecked.dispatchedAt,                       // run watermark
+  completedAt: preChecked.completedAt,                         // result watermark
+  files: { none: { createdAt: { gte: preChecked.dispatchedAt } } },
 }, data: { status: "published", publishedAt, sheetUrl, agentTokenHash: null, … } })
 ```
 
-Both watermarks are the **values read in the pre-check**, not field references —
-Prisma cannot compare two columns of the same row in a `where`, so a plan that
-says "createdAt > dispatchedAt" must be implemented with the pre-read value or
-it will not compile. A re-run between pre-check and write moves `dispatchedAt`,
-but that job is then `dispatched|processing` (status predicate fails) or has a
-new `completedAt` (watermark fails) — 0 rows either way ⇒ 409.
+All three watermarks are the **values read in the pre-check**, not field
+references — Prisma cannot compare two columns of the same row in a `where`, so
+a plan that says "createdAt >= dispatchedAt" must be implemented with the
+pre-read value or it will not compile.
+
+**Why `dispatchedAt` is the load-bearing pin (Rev 4).** Every dispatch sets it
+(`run/route.ts:42-51`), and **no result-route write can happen without one**: a
+callback is accepted only while `status ∈ (dispatched|processing)`
+(`result/route.ts:39-43`), which a publishable job can re-enter only through a
+new dispatch. So the pin catches the whole class — successful callbacks,
+**rejected** callbacks (`result/route.ts:129-132`, which write `status`/`error`
+and deliberately leave `completedAt` alone — Rev 4, Codex P1), and a re-run
+still in flight. `completedAt` stays as the result-side watermark so the pair
+still holds if a future result path is added that writes outside this
+invariant.
 
 **Interleaving matrix (answers the round-1 append/run/publish thread):**
 
-| when appended rows land | in the agent's manifest? | `createdAt > dispatchedAt`? | outcome |
+| when appended rows land | in the agent's manifest? | `createdAt >= dispatchedAt`? | outcome |
 |---|---|---|---|
-| before `dispatchedAt` | yes (manifest is fetched after dispatch) | no | processed → publishable ✓ |
+| strictly before `dispatchedAt` | yes (manifest is fetched after dispatch) | no | processed → publishable ✓ |
+| same millisecond as the dispatch | maybe | yes (`gte`) | 409 → visible re-run ✓ |
 | between dispatch and manifest fetch | yes | yes | 409 → visible re-run (conservative false positive) |
 | after the manifest fetch | no | yes | 409 → re-run ✓ |
 | while no run is in flight | n/a | yes | 409 at pre-check, and again at the conditional write ✓ |
@@ -311,8 +343,9 @@ the same shapes as today.
 ## Invariants (what review should attack)
 
 0. **A publish only ever publishes the exact result it verified** — status,
-   result watermark (`completedAt`) and file set are all re-asserted in the
-   write, so a result landing mid-publish can never be published unverified.
+   run watermark (`dispatchedAt`), result watermark (`completedAt`) and file set
+   are all re-asserted in the write, so no run or callback landing mid-publish —
+   successful, rejected, or still in flight — can be published unverified.
 1. **No stale callback ever mutates a report the client can see.** Published ⇒
    token null ⇒ 404. Updated-then-republished ⇒ old tokens fail the hash check;
    only the current run's token passes auth AND the conditional write.
@@ -377,6 +410,13 @@ New `runUpdateGuard.test.ts`:
 - `publish_reverse_result_race_409` — a fatal `needs_review` result lands
   between pre-check and the conditional write (moving `completedAt`) ⇒ 0 rows ⇒
   409; the job is NOT published and the fatal result stays reviewable.
+- `publish_rejected_callback_race_409` — a re-run whose callback is REJECTED
+  (status/error written, `completedAt` untouched) lands between pre-check and
+  write ⇒ the `dispatchedAt` pin mismatches ⇒ 409; the stale artifact is not
+  published while the latest run has failed.
+- `publish_same_millisecond_append_409` — a `StatementFile.createdAt` exactly
+  equal to `dispatchedAt` ⇒ `gte` trips ⇒ 409; the tie is never treated as
+  covered.
 - `publish_partial_append_during_dispatch_409` — a file row created after
   `dispatchedAt` while the agent run is in flight ⇒ 409, regardless of whether
   the row predates the callback's `completedAt`.
