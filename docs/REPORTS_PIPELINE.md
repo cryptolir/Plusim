@@ -22,7 +22,9 @@ the processed report in `/report`. Agent-side skill + ops runbook:
         python: parse (Isracard xlsx / MAX pdf) → dedup → deterministic categorize
         model: judge the unknown-merchant shortlist (never guesses → un_categorized),
                applying the admin report_rules carried in the manifest
-        python: build month-sheet xlsx → verify to the agora
+        python: build workbook (month sheets + income block, ניתוח תוצאות,
+                התפלגות ההוצאות + pie, טופס עזר למיפוי, חישוב יעדים,
+                un_categorized, ledger) → verify to the agora
         POST /api/agent/jobs/:id/result     (transactions, totals, xlsx, proposed mappings)
    → app re-verifies INDEPENDENTLY (lib/reportResult.ts) → completed | needs_review
    → admin reviews uncategorized rows + approves merchant mappings → Publish
@@ -68,6 +70,14 @@ the processed report in `/report`. Agent-side skill + ops runbook:
 - **Dispatch tolerates timeouts**: the AgentGlob run continues after a client
   abort; the callback (not the chat reply) completes the job. Admin detail
   page polls while `processing` and offers Re-run.
+- **Sub-report sheets are formula-derived and app-invisible by design**: the
+  analysis / distribution / helper-form / goals sheets (and the month-sheet
+  income block) are live formulas over the month sheets, generated from
+  per-sheet geometry maps (`reference/layout-spec.md`). App-side verification
+  never parses workbook sheets — their correctness is guarded by the named
+  tests in `agent/skills/plusim-reports/scripts/test_build_report_xlsx.py`
+  plus the operator baseline. Income is manual-fill (no bank-statement source);
+  analysis totals cover categorized spend only.
 
 ## Files
 
@@ -89,7 +99,11 @@ src/app/api/reports/[jobId]/download      xlsx download (Clerk + ownership)
 src/lib/googleDrive.ts                    + uploadBinaryFile() (raw statement upload),
                                           getFileBytes() (agent download), uploadXlsxAsSpreadsheet()
                                           (publish export), assertEntryUnderFolder() (read confinement)
-agent/skills/plusim-reports/              the onlyclaw skill (source of truth)
+agent/skills/plusim-reports/              the onlyclaw skill (source of truth);
+                                          workbook layout: reference/layout-spec.md +
+                                          scripts/build_report_xlsx.py (+ its
+                                          scripts/test_build_report_xlsx.py unit suite,
+                                          run with bare python3 -m unittest)
 ```
 
 ## Tests
