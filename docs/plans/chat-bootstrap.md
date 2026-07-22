@@ -1,9 +1,18 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 8 — RE-REVIEW REQUESTED** (plan PR). Codex round 6
-> refined Rev 7's own P1c fix (the callback's skip was too broad — it dropped
-> the URL sync). Folded under the owner's standing "keep going". Findings
-> 2→2→1→1→1→1; still one small edge per round. Scope: `/chat` bootstrap only.
+> **Status:** 🔍 **Rev 9 — RE-REVIEW REQUESTED** (plan PR). Codex round 7 landed
+> 2 more on P1c (its shared-hook integration — HomeHub + cancel), the 3rd
+> consecutive round touching P1c. Folded (these are P1c's distinct integration
+> points, not the same hole), under the owner's standing "keep going" — **but
+> P1c is now the flagged hotspot: a 4th P1c round triggers an escalation/rethink
+> rather than another patch.** Scope: `/chat` bootstrap only.
+>
+> **Rev 9 — Codex round 7 resolution (2026-07-22, PR #22):**
+>
+> | # | Codex P2 | Resolution |
+> |---|---|---|
+> | 9 | **P1c's `sendMessage` await breaks HomeHub** — the hook is shared; HomeHub's lazy chat relies on posting `conversationId: null` to create. An unconditional await would hang/break its first send. | The await is **conditional on an actual pending `/chat` bootstrap** (passed as an option; HomeHub passes none → lazy create as today). No-bootstrap regression test added. |
+> | 10 | **Stop can't cancel the pre-fetch bootstrap wait** — the await runs before `abortRef` is registered, so a hung `new-session` leaves Stop dead. | The bootstrap-id wait is **raced against the same cancel token** (`onCancel`/`cancelPickup`), so Stop ends it; TB5 covers cancel-before-id. |
 >
 > **Rev 8 — Codex round 6 resolution (2026-07-22, PR #22):**
 >
@@ -185,7 +194,26 @@ awaited send post to the **minted** id, there is only ever **one** conversation
 `router.replace` URL sync** to the minted `cid`. Skipping the `replace` too
 would leave the address bar on `/chat` (or with `p`/`autosend`) while the
 message sits in the minted conversation — a refresh would lose the thread /
-replay the seed, reintroducing the very divergence this closes. Guards TB5.
+replay the seed, reintroducing the very divergence this closes.
+
+**P1c integration — two constraints on the shared hook (Rev 9, Codex round 7):**
+`usePlusimRuntime` is shared with **HomeHub's lazy chat**
+(`HomeHub.tsx:33` → `usePlusimRuntime({})`, whose first send deliberately posts
+`conversationId: null` so `/api/chat` creates the conversation). So:
+- **The await is conditional on an ACTUAL pending `/chat` bootstrap.** P1c
+  applies only when the runtime was given a bootstrap promise (the `/chat`
+  page passes one; HomeHub passes none). With no bootstrap promise, `null` →
+  post `null` → lazy create, exactly as today. A literal "always await when
+  ref is null" would hang/break HomeHub's first send — so the option is
+  explicit, and a **no-bootstrap regression test** covers HomeHub's lazy send.
+- **The await is CANCEL-aware.** The preflight await runs *before* the
+  `/api/chat` fetch registers `abortRef`, so today's Stop
+  (`onCancel` → `abortRef.current?.abort()`) can't end it if `new-session`
+  hangs. The bootstrap-id wait is raced against the same cancel token
+  (`cancelPickup`/`onCancel` reject/ignore it) so **Stop ends the waiting
+  state**; TB5 covers cancel-before-id.
+
+Guards TB5.
 
 **P2 — bounded pending-reply pickup (constraint #2), implemented INSIDE
 `usePlusimRuntime` (Rev 2).** The hook exports exactly
@@ -374,12 +402,14 @@ phantom component tests.
   stale null row updates zero rows (stale-null race → exactly one title,
   never clobbered). (`bookkeeping.test.ts` T4/T4b stay green with `update` →
   `updateMany`.)
-- **TB5** (new, automated — guards P1c/Rev 8): a bare-load `sendMessage` fired
-  while the bootstrap id is still pending **awaits** it and posts with the
-  minted id (one conversation, no null-id create); the new-session callback
-  **skips only `hydrate`** (does not wipe the optimistic message) but **still
-  runs `replace`** so the URL carries the minted `cid` (a refresh keeps the
-  thread); a send after the id is installed is unaffected.
+- **TB5** (new, automated — guards P1c through Rev 9): a bare-load `sendMessage`
+  fired while the bootstrap id is pending **awaits** it and posts with the
+  minted id (one conversation, no null-id create); the callback **skips only
+  `hydrate`** but **still runs `replace`** so the URL carries the minted `cid`;
+  **a runtime with no bootstrap promise (HomeHub) posts `null` and lazy-creates
+  as today** (no hang); **cancel-before-id ends the waiting state** (Stop works
+  while `new-session` is in flight); a send after the id is installed is
+  unaffected.
 - Manual E2E (dev tunnel): home-hub prompt click → exactly one conversation,
   URL `cid` correct after reload; refresh mid-wait → typing indicator
   reappears, **Stop button actually stops it**, and the reply surfaces when
