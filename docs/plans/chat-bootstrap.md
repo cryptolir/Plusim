@@ -1,14 +1,25 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 21 — RE-REVIEW REQUESTED** (plan PR). Codex round 18
-> closed the mirror of the multi-tab completion guard: the rule rejected a
-> concurrent user row *after* the captured pending turn, but not an unanswered
-> turn *before* it. With two tabs both pending (`U1, U2`), if `U1`'s reply lands
-> first the history is `U1, U2, A1` and "the row after `U2` is an assistant"
-> would hydrate `A1` — which is `U1`'s reply, not `U2`'s. Fixed symmetrically: the
-> pickup proceeds only when the captured turn is the **sole** trailing unanswered
-> turn (its predecessor is an assistant or start-of-history); an earlier
-> unanswered user row ⇒ ambiguous ⇒ stop silently. Scope: `/chat` bootstrap only.
+> **Status:** 🔍 **Rev 22 — RE-REVIEW REQUESTED** (plan PR). Codex round 19
+> surfaced the **failed-first-turn orphan row** in two places, both folded:
+> (1) **P1d (new):** the first-turn Drive/`past_meeting` context was gated on
+> "zero messages", so a first turn that 502s after persisting its user row made
+> the retry look non-first → the first *successful* agent call lost the meeting
+> context. Now gated on **"no assistant reply yet"** (a role-filtered count), the
+> exact analog of P1b's title fix, so the retry re-injects context — making
+> "`past_meeting` unchanged" actually true. (2) The Rev 21 predecessor guard also
+> backs off on a *single-tab* failed-retry orphan (`U1` dead, `U2` pending); that
+> is **accepted** — it's positionally indistinguishable from the multi-tab case
+> without schema reply-linkage, reverting would reintroduce the multi-tab
+> wrong-reply, and the reply is never lost (shows on reopen; P1d still gives the
+> retry correct context). Scope: `/chat` bootstrap only.
+>
+> **Rev 22 — Codex round 19 resolution (2026-07-22, PR #22):**
+>
+> | # | Codex | Resolution |
+> |---|---|---|
+> | 26 | **Failed retry loses first-turn `past_meeting`/Drive context** — the preamble is gated on `isFirstMessage` (zero messages), but a first turn that 502s leaves an orphan user row, so the retry (`_count = 1`) skips the context on the first successful agent call; the plan's "`past_meeting` unchanged" invariant is false in this case. | **P1d:** gate the first-turn preamble on **"no assistant reply persisted yet"** (a role-filtered `_count` of `assistant` rows), not "no messages" — the exact analog of P1b's title fix. A failed-then-retried first turn re-injects context; normal 2nd+ turns and mid-conversation retries do not. T1 stays green; T1b covers the orphan-row retry. |
+> | 27 | **Rev 21 guard stops pickup on a single-tab failed retry** — an orphan `U1` from a 502 plus a pending `U2` trips the predecessor guard, so `U2`'s reply isn't auto-surfaced on a mid-wait refresh; not the multi-tab non-goal. | **Accepted, guard kept.** At reload the orphan-retry and the multi-tab case are positionally identical (`U1, U2, …`) and indistinguishable without user→reply linkage; reverting the guard would reintroduce the multi-tab **wrong-reply** hydrate (strictly worse). The reply is never lost (shows on reopen), and P1d ensures the retry still gets correct context — only the auto-surface degrades. Documented in Non-goals as the "≥2 trailing unanswered turns" best-effort limit. |
 >
 > **Rev 21 — Codex round 18 resolution (2026-07-22, PR #22):**
 >
@@ -327,7 +338,8 @@ double-send window). `sectionContext` still lands: `new-session`
 already stores `ctx` on the created conversation (`new-session/route.ts:23`),
 and the first-turn preamble reads the **conversation row's** stored
 `sectionContext` on the lookup branch (`route.ts:131`) — `past_meeting`
-unchanged. Remount safety verified (Rev 2): `cacheComponents` is off and a
+unchanged **on the happy path** (and, with **P1d** below, unchanged on a
+failed-first-turn retry too). Remount safety verified (Rev 2): `cacheComponents` is off and a
 same-path searchParams `replace` re-renders the client component in place
 (vendored `use-search-params.md`), so `bootstrapped`, the minted cid, and any
 in-flight state survive the `replace`.
@@ -354,6 +366,29 @@ the second request's filter matches zero rows). The in-memory
 `!conversation.title` stays only as a cheap early-out. `bookkeeping.test.ts`
 T4/T4b stay green (mocks move `update` → `updateMany`); TB4 adds the stale-null
 race (two overlapping fills → exactly one title, never overwritten).
+
+**P1d — first-turn context must survive a failed-then-retried first turn
+(Rev 22, Codex round 19).** Exactly the orphan-row pattern P1b fixes for the
+title also breaks the **context preamble**. `/api/chat` injects the
+Drive/`past_meeting` preamble only under `isFirstMessage`, which today means
+"zero messages" (`_count.messages === 0`, `route.ts:85,130`). But a first
+`/api/chat` call that 502s **after** persisting the user row (the agent write is
+after the user write, `route.ts:113-119,161`) leaves an orphan user row, so the
+retry sees `_count.messages = 1` → `isFirstMessage` false → the **first
+successful** agent call runs **without** the stored `sectionContext`. That
+silently drops the meeting context on a `past_meeting` retry — so "`past_meeting`
+unchanged" is false in the failure case unless we fix it. **Fix:** gate the
+preamble on **"no assistant reply has been persisted yet"**, not "no messages" —
+i.e. redefine the first-turn predicate as a **role-filtered count**
+(`_count: { select: { messages: { where: { role: "assistant" } } } }` → the turn
+is "first" iff that count is 0). This is exactly "the first successful reply
+hasn't happened," so: a normal first turn still injects (0 assistants); a
+failed-then-retried first turn **re-injects** (still 0 assistants — fixed); a
+normal 2nd+ turn does not (an assistant exists); a mid-conversation failed retry
+does not re-inject (assistants already exist — correct, context is a first-turn
+concern only). `chatPreamble.test.ts` (T1) stays green — it mocks `findUnique`
+without `_count`, so the `?? 0` default keeps the turn "first" and the preamble
+path fires. A new case (T1b) covers the orphan-row retry still injecting.
 
 **P1c — lock the bare-load composer until the minted id is installed (Rev 11 —
 redesign after the P1c recursion; owner-directed to keep the protection).**
@@ -533,6 +568,19 @@ turn**:
   captured turn is another **user** row (an earlier unanswered turn), adjacency
   is ambiguous → **stop silently** and fall back to reopen, same as the
   after-case.
+  **This guard also fires on a SINGLE-tab failed-retry orphan, and that is
+  accepted (Rev 22, Codex round 19).** A first turn that 502s leaves an orphan
+  user row `U1` (no reply coming); if the user retries with `U2` and refreshes
+  while `U2` is pending, the tail is `U1, U2` and the predecessor guard backs off
+  — so `U2`'s reply isn't auto-surfaced, only shown on the next reopen. This is
+  **not** distinguishable from the concurrent multi-tab case at reload time: with
+  no user→reply linkage, the transcript alone cannot say whether `U1` is a live
+  concurrent turn or a dead orphan. Reverting the guard to rescue this flow would
+  reintroduce the multi-tab **wrong-reply** hydrate (strictly worse), so the
+  guard stays and the single-tab retry auto-surface is a documented best-effort
+  miss (never a wrong or lost reply — the reply is persisted and shows on
+  reopen). **P1d** independently ensures that retried turn still gets the correct
+  first-turn context; only the mid-retry-refresh *auto-surface* degrades.
   **Adjacency needs a deterministic order, and a timestamp tie is ambiguous
   (Rev 13, Codex round 10):** `/api/chat/history` orders solely by
   `createdAt`, which is millisecond precision, so concurrent tabs can produce
@@ -624,14 +672,21 @@ error handling. The prune stays (still needed for bare-visit placeholders).
   landing after a home reload is already surfaced by the recent-chats unread
   dot. Out of scope.
 - Streaming (external, issue #19).
-- **Perfect multi-tab-concurrent pickup (Rev 5, explicit).** With no
-  user→reply linkage in the schema, a conversation being sent to from a second
-  tab *while* this tab is in a reload-pickup cannot have its specific reply
-  disambiguated. The pickup is **best-effort**: exact for the single-tab case,
-  and in the concurrent-multi-tab case it stops silently and falls back to
-  normal reopen — never a wrong reply, never a hang. Making it exact would need
-  a reply-linkage column (a schema change), which is out of scope here and
-  moot once streaming (issue #19) resumes the specific stream directly.
+- **Auto-surface when the transcript has more than one trailing unanswered
+  turn (Rev 5 multi-tab; Rev 22 failed-retry — explicit).** With no user→reply
+  linkage in the schema, once the transcript holds two or more unanswered `user`
+  rows the reload cannot tell which reply belongs to the captured turn. Two
+  cases produce this: (a) a **second tab/device** sends concurrently while this
+  tab is in a reload-pickup; (b) a **single-tab failed retry** — a first turn
+  that 502'd leaves an orphan `user` row, and the retry adds a second. Both are
+  positionally identical at reload (`U1, U2, …`), so the pickup is
+  **best-effort**: exact when the captured turn is the *sole* trailing unanswered
+  turn, and otherwise it stops silently and falls back to normal reopen — **never
+  a wrong reply, never a lost reply, never a hang** (the reply is persisted and
+  appears on the next `?cid` reopen). The retry still gets correct first-turn
+  context (**P1d**); only the auto-surface-on-mid-wait-refresh degrades. Making
+  it exact would need a reply-linkage column (a schema change) — out of scope
+  here, and moot once streaming (issue #19) resumes the specific stream directly.
 - **A `cid`-in-URL guarantee during the fallback's *first* send (Rev 15,
   explicit).** The fallback path only runs when `new-session` (the server-side
   id minter) is **down**; the first send then lazy-creates via `/api/chat`,
@@ -678,6 +733,15 @@ decision logic is **extracted as a pure function** so TB1–TB3 run in the
 existing node-env suite. The implementation PR must not be reviewed against
 phantom component tests.
 
+- **T1** (carried; automated — `chatPreamble.test.ts`): the first-turn
+  precedence (past_meeting pin, admin preamble prepend, Drive context) is
+  unchanged; stays green **untouched** under P1d's role-filtered count (the mock
+  omits `_count` → `?? 0` default → turn is "first" → preamble fires).
+- **T1b** (new, automated — guards P1d): a conversation whose only row is an
+  **orphan user message** (a 502'd first turn, no assistant reply) is still
+  treated as first-turn → the retry's agent call **re-injects** the stored
+  `sectionContext`/Drive context; a conversation that already has an assistant
+  reply does **not** re-inject.
 - **T2** (carried; manual E2E): a seeded autosend visit creates **exactly
   one** conversation; after the reply, reload of `/chat?cid` hydrates the
   thread that holds the messages. (Today: two conversations, and the reload
