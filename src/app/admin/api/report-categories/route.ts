@@ -21,7 +21,13 @@ export async function POST(req: NextRequest) {
 
   let body: { name?: unknown; section?: unknown };
   try {
-    body = await req.json();
+    // A body that parses to null/array/scalar is a bad shape, not a crash:
+    // funnel it through the field validation below (→ 400), never a 500.
+    const parsed: unknown = await req.json();
+    body =
+      typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+        ? (parsed as { name?: unknown; section?: unknown })
+        : {};
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
@@ -44,10 +50,20 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "קטגוריה כבר קיימת" }, { status: 409 });
   }
 
-  const row = await db.reportCategory.create({
-    data: { name, section, createdBy: auth.actor },
-    select: { id: true, name: true, section: true },
-  });
+  let row: { id: string; name: string; section: string };
+  try {
+    row = await db.reportCategory.create({
+      data: { name, section, createdBy: auth.actor },
+      select: { id: true, name: true, section: true },
+    });
+  } catch (e) {
+    // Concurrent same-name creates can both pass the pre-check; the loser
+    // hits @unique (Prisma P2002) — same 409 contract, not a 500.
+    if ((e as { code?: string } | null)?.code === "P2002") {
+      return NextResponse.json({ error: "קטגוריה כבר קיימת" }, { status: 409 });
+    }
+    throw e;
+  }
   console.log(`[admin/report-categories] added "${row.name}" (${row.section}) by=${auth.actor}`);
   return NextResponse.json({ ok: true, category: row });
 }

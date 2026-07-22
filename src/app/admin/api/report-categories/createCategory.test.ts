@@ -85,4 +85,35 @@ describe("POST /admin/api/report-categories", () => {
       expect(create).not.toHaveBeenCalled();
     }
   });
+
+  it("non-object JSON body (null/array/scalar) → 400 bad shape, never a 500 (Codex round-1 P2)", async () => {
+    for (const rawBody of ["null", "[]", '"סתם מחרוזת"', "42"]) {
+      vi.clearAllMocks();
+      auth.mockResolvedValue({ actor: "admin@plusim.xyz" });
+      const res = await createPOST(
+        new NextRequest("https://plusim.xyz/admin/api/report-categories", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: rawBody,
+        }),
+      );
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("שם קטגוריה לא תקין");
+      expect(create).not.toHaveBeenCalled();
+    }
+  });
+
+  it("duplicate-create race: unique-violation (P2002) from create → 409, same contract (Codex round-1 P3)", async () => {
+    find.mockResolvedValue(null); // pre-check passes for both racers
+    create.mockRejectedValue(Object.assign(new Error("Unique constraint failed"), { code: "P2002" }));
+    const res = await createPOST(req({ name: "קטגוריה חדשה", section: "שונות" }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe("קטגוריה כבר קיימת");
+  });
+
+  it("a non-P2002 create failure still surfaces as an error (not silently 409)", async () => {
+    find.mockResolvedValue(null);
+    create.mockRejectedValue(new Error("db down"));
+    await expect(createPOST(req({ name: "קטגוריה חדשה", section: "שונות" }))).rejects.toThrow("db down");
+  });
 });
