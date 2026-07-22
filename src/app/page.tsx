@@ -7,6 +7,7 @@ import { getSetting } from "@/lib/appSettings";
 import { parsePrompts, parseAppProfileName } from "@/lib/agentContent";
 import { db } from "@/lib/db";
 import { isDriveConnected, listSummaries } from "@/lib/googleDrive";
+import { CONTEXT_TIMEOUT_MS } from "@/lib/chatTimeouts";
 
 export default async function Home() {
   const { userId } = await auth();
@@ -87,15 +88,32 @@ export default async function Home() {
   const firstName = fileName ?? clerkFirst;
 
   // "Past meeting" pin: shown when the user's assigned Drive folder holds
-  // summaries. Guarded so a Drive outage never breaks the home page.
+  // summaries. Guarded so a Drive outage never breaks the home page, and
+  // BOUNDED (B1 rider) — the same unbounded isDriveConnected→listSummaries
+  // chain that Phase B caps for chat also delays this page (which hosts the
+  // composer). An outer deadline returns false past CONTEXT_TIMEOUT_MS; the
+  // AbortSignal cancels an in-flight Drive fetch (cleanup — the race is the
+  // time bound, since a hung token refresh sits before any signaled fetch).
   let pastMeeting = false;
+  const pmController = new AbortController();
+  let pmTimer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const folder = await db.userDriveFolder.findUnique({ where: { userId } });
-    if (folder && (await isDriveConnected())) {
-      pastMeeting = (await listSummaries(folder.folderId)).length > 0;
-    }
-  } catch {
-    pastMeeting = false;
+    const deadline = new Promise<boolean>((resolve) => {
+      pmTimer = setTimeout(() => {
+        pmController.abort();
+        resolve(false);
+      }, CONTEXT_TIMEOUT_MS);
+    });
+    const compute = (async () => {
+      const folder = await db.userDriveFolder.findUnique({ where: { userId } });
+      if (folder && (await isDriveConnected())) {
+        return (await listSummaries(folder.folderId, pmController.signal)).length > 0;
+      }
+      return false;
+    })().catch(() => false);
+    pastMeeting = await Promise.race([compute, deadline]);
+  } finally {
+    if (pmTimer) clearTimeout(pmTimer);
   }
 
   return (
