@@ -1,11 +1,18 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 14 — RE-REVIEW REQUESTED** (plan PR). Codex round 11
-> landed 2 P2s, both hardening the P1c render-gate's **failure fallback** (a
-> real operational path — `new-session` 401/500): the fallback must trigger on
-> non-`res.ok`/missing-id (not just rejected fetch) or the render gate leaves
-> the page permanently inert; and the fallback's lazy-create send must sync the
-> URL. Both folded. Scope: `/chat` bootstrap only.
+> **Status:** 🔍 **Rev 15 — RE-REVIEW REQUESTED** (plan PR). Codex round 12
+> exposed a *fundamental* limit on the fallback path: when `new-session` is down,
+> the id is minted server-side by `/api/chat` and unknown to the client until
+> its 2–90s response, so a refresh *during* the first fallback send can't have a
+> `cid`. Unclosable under constraint #1 (no client-minted ids) — resolved by
+> **accepting it as a documented degraded-mode (outage-only) limitation**, not
+> another patch. This terminates the fallback thread. Scope: `/chat` bootstrap.
+>
+> **Rev 15 — Codex round 12 resolution (2026-07-22, PR #22):**
+>
+> | # | Codex P2 | Resolution |
+> |---|---|---|
+> | 17 | **Fallback `cid` can't reach the URL *during* the long send** — the id is server-minted by `/api/chat`, unknown to the client for 2–90s; the Rev 14 effect only syncs *after* the response, so a refresh mid-fallback-send still orphans. | **Accepted as a degraded-mode non-goal:** occurs only during a `new-session` **outage**, is no worse than today's no-`cid` send, and self-heals (reply persisted, reachable via recent-chats, URL syncs on response). Closing it needs client-minted ids — banned by constraint #1. Documented in Non-goals; normal path unaffected. |
 >
 > **Rev 14 — Codex round 11 resolution (2026-07-22, PR #22):**
 >
@@ -350,16 +357,25 @@ optimistic-append send path. The redesign removes that entire class:
   just the `.catch` path. Any of these → enable the surface in **fallback
   mode** (no `hydrate`/`replace`; the first send lazy-creates with
   `conversationId: null` → `/api/chat` creates). Never a permanently-inert page.
-- **The fallback (lazy-create) send MUST sync the URL (Rev 14, Codex round 11).**
-  On the fallback path the send posts `conversationId: null` and the runtime
-  stores the returned id in hook state only; the page's `router.replace` lives
-  in the *success* callback, which didn't run. Without a URL sync the address
-  bar stays `/chat`, so a refresh during/after the fallback send orphans the
-  thread — the exact no-`cid` long-send problem P1c exists to prevent. Fix: the
-  `/chat` page adds a small **effect watching the runtime's `conversationId`**
-  — when it becomes non-null and the URL has no matching `cid`,
-  `router.replace(?cid=<id>)`. This covers the fallback path (and is a no-op on
-  the normal path, where the callback already set the URL).
+- **The fallback (lazy-create) send syncs the URL as soon as an id exists
+  (Rev 14).** On the fallback path the send posts `conversationId: null` and the
+  runtime stores the returned id in hook state; the `/chat` page adds an
+  **effect watching the runtime's `conversationId`** — when it becomes non-null
+  and the URL has no matching `cid`, `router.replace(?cid=<id>)`. No-op on the
+  normal path (the callback already set the URL).
+- **Residual: the fallback's *during-send* window is a documented degraded-mode
+  limitation (Rev 15, Codex round 12).** On the fallback path the id is minted
+  **server-side by `/api/chat`**, which persists the user row and then waits on
+  AgentGlob (2–90s) before returning it — so the client cannot know the `cid`
+  until the response lands, and a refresh *during* that first fallback send
+  still hits `/chat` with no `cid` (orphaned until reopen). This is
+  **unavoidable under constraint #1** (no client-minted ids; `/api/chat` stays
+  lookup-only) — the only id-minter (`new-session`) is *down* in exactly this
+  path. It is **accepted**: (a) it occurs only during a `new-session` **outage**
+  (rare), (b) it is no worse than today's no-`cid` first send, and (c) it
+  self-heals — the reply is persisted and reachable from recent-chats, and the
+  URL syncs the moment `/api/chat` returns. The normal (non-outage) path has the
+  `cid` before the send via `new-session`, so this residual never applies there.
 - **Window:** `new-session` is one DB insert + prune (P3 also drops the
   `getAgentInfo` await), so the disabled flash is typically sub-100ms.
 
@@ -501,6 +517,14 @@ error handling. The prune stays (still needed for bare-visit placeholders).
   normal reopen — never a wrong reply, never a hang. Making it exact would need
   a reply-linkage column (a schema change), which is out of scope here and
   moot once streaming (issue #19) resumes the specific stream directly.
+- **A `cid`-in-URL guarantee during the fallback's *first* send (Rev 15,
+  explicit).** The fallback path only runs when `new-session` (the server-side
+  id minter) is **down**; the first send then lazy-creates via `/api/chat`,
+  whose id isn't known to the client until its 2–90s response returns. A
+  refresh in that window orphans (self-heals via recent-chats; URL syncs on
+  response). Closing it would require client-minted ids — banned by constraint
+  #1. Accepted degraded-mode edge; the normal path is unaffected (it has the
+  `cid` before the send).
 
 ## Risks / contingencies
 
