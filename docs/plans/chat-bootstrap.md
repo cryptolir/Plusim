@@ -1,12 +1,37 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 1 — DRAFT** (pre-ponytail). The follow-up plan promised
-> by the chat-latency plan's Rev 7 descope (`docs/plans/chat-latency.md`).
-> Scope: the `/chat` bootstrap only — the smallest design that fixes the known
-> bug and satisfies the three constraints banked from the latency plan's
-> review rounds 4–5.
+> **Status:** 🔍 **Rev 2 — READY FOR CODEX REVIEW** (plan PR). Ponytail +
+> correctness pre-passes run per protocol §2 and folded. The follow-up plan
+> promised by the chat-latency plan's Rev 7 descope
+> (`docs/plans/chat-latency.md`). Scope: the `/chat` bootstrap only — the
+> smallest design that fixes the known bug and satisfies the three constraints
+> banked from the latency plan's review rounds 4–5.
 >
-> **Review log:** Rev 1 — initial draft.
+> **Review log:**
+> **Rev 1** — initial draft.
+> **Rev 2** — internal pre-review folded (author-run ponytail + correctness
+> passes; *not* the external Codex round). **P1-blocker fixed:** while pickup
+> holds `isRunning`, the composer swaps Send for a **Stop button**
+> (`thread.tsx:213-218`) whose `onCancel` only aborts `abortRef` — null during
+> pickup → dead button, user locked into an unstoppable 95s thinking state.
+> Pickup now lives **inside `usePlusimRuntime`** with one shared cancel path
+> wired to `onCancel` + `sendMessage`. **P2s fixed:** the pickup's runtime
+> surface is now named (it needs `setIsRunning`/`setMessages`, which the hook
+> does not export — the plan no longer pretends it's pure reuse); the deadline
+> is client-anchored + clamped (server `createdAt` vs browser clock skew can't
+> extend or skip the window); a **final history fetch at the deadline** closes
+> the last-interval miss; and the C3 title condition loses `isFirstMessage &&`
+> (with P1 the seeded flow titles via that best-effort path, which a failed
+> first turn made unreachable forever — fill whenever title is null instead).
+> **Ponytail:** T2/T3 → manual E2E only and TB1-3 → pure-function tests (the
+> repo has no component-test infra; building it would dwarf the change); row
+> "append" → wholesale `hydrate(allRows, cid)` replace (idempotent, zero merge
+> code); notes added (unread-dot needs no client work — the route's own view
+> upsert covers it; P3 moves `getAgentInfo`'s cache-warming to the avatar
+> request; pre-existing seed-drop race documented). **Verified in our favor:**
+> `cacheComponents` is off and a same-path searchParams `replace` re-renders
+> in place (vendored Next 16 docs) — `bootstrapped`, the minted cid, and
+> in-flight state all survive P1's `router.replace`; P1 is safe as specced.
 
 ## Context — the live bug, file-anchored
 
@@ -54,7 +79,7 @@ fixed bootstrap path for these sends**"* — we keep the fixed bootstrap path.
 |---|---|
 | `hydrate(rows, cid)` (`plusimRuntime.ts:167-168`) — sets `conversationIdRef` + state | **The bug fix is calling it.** `hydrate([], cid)` wires the minted id into the runtime before the seeded send |
 | `bootstrapped` ref (`chat/page.tsx:22-26`) | Strict-mode double-effect safety — kept as-is |
-| `ThinkingIndicator` + 15s caption (`thread.tsx`, latency A1), driven by `isRunning` | P2's pickup sets `isRunning` → the wait UI is free |
+| `ThinkingIndicator` + 15s caption (`thread.tsx`, latency A1), driven by `isRunning` | P2's pickup sets `isRunning` → the wait **UI** is free (the hook surface to set it is new — see P2) |
 | `AGENT_TIMEOUT_MS` / `CHAT_CLIENT_TIMEOUT_MS` (`chatTimeouts.ts`) | P2's pickup bound derives from the same constants — no new magic numbers |
 | `/api/chat/history` (returns rows with `role` + `createdAt`) | P2 polls it; the pending state is "last row is a user turn" |
 | Placeholder prune in `new-session` (`route.ts:32-43`) | Kept — placeholders still exist (bare visits), and P1 stops the *seeded-visit* accumulation |
@@ -75,36 +100,77 @@ The seeded send now posts `conversationId: <minted id>` → `/api/chat` appends
 to the **same** conversation (no duplicate); the URL `cid` is the real thread;
 reload hydrates the messages. `sectionContext` still lands: `new-session`
 already stores `ctx` on the created conversation (`new-session/route.ts:23`),
-and `/api/chat` only consumes `sectionContext` on its create branch — which no
-longer runs here. Note the first-turn preamble reads the **conversation's**
-stored `sectionContext` (`route.ts`), so `past_meeting` behavior is unchanged.
+and the first-turn preamble reads the **conversation row's** stored
+`sectionContext` on the lookup branch (`route.ts:131`) — `past_meeting`
+unchanged. Remount safety verified (Rev 2): `cacheComponents` is off and a
+same-path searchParams `replace` re-renders the client component in place
+(vendored `use-search-params.md`), so `bootstrapped`, the minted cid, and any
+in-flight state survive the `replace`.
 
-**P2 — bounded pending-reply pickup (constraint #2).** On the `?cid` bootstrap
-(`chat/page.tsx:28-42`), after `hydrate(rows, cid)`: if the **last row is a
-user turn**, the reply may still be in flight server-side — enter pickup:
+**P1b — title correctness under P1 (Rev 2, correctness pass).** `new-session`
+creates title-null rows, and with P1 the seeded send takes `/api/chat`'s
+lookup branch — so the create-branch title (`route.ts:105`) never runs and the
+seeded conversation titles only via the C3 conditional
+`if (isFirstMessage && !conversation.title)` (`route.ts:206`). That's
+best-effort **and unreachable after a failed first turn**: the user message
+persists before a 502, so the retry sees `_count.messages = 1` →
+`isFirstMessage` false → **permanently null title** in the recent list. Fix:
+drop `isFirstMessage &&` — fill whenever `title` is null, from whatever turn
+finally succeeds. `bookkeeping.test.ts` T4 (null → fills) and T4b (existing →
+skips) stay green under this change.
 
-- Compute the window: a reply can only land within the server ceiling of the
-  user turn, so the pickup deadline is
-  `userTurn.createdAt + CHAT_CLIENT_TIMEOUT_MS`. If already past, do nothing
-  (stale pending turn, e.g. an old 502 — no poll ever starts).
-- While in the window: set `isRunning = true` (the existing typing indicator +
-  15s caption render for free), re-fetch `/api/chat/history` every ~5s.
-- Stop on: (a) an assistant row appears → append rows, `isRunning = false`;
-  (b) the deadline passes → `isRunning = false`, stop **silently** (the user
-  sees their message without a reply and can re-send — no speculative error
-  copy for a turn whose failure we didn't observe); (c) the user sends a new
-  message → cancel the pickup (the new send's own lifecycle takes over).
-- The poll is **conditional** (only when a pending turn is detected on
-  bootstrap) and **bounded** (never outlives the window) — it is not a
-  background poller. When AgentGlob ships SSE (issue #19), this pickup is
-  replaced by stream-resume and deleted.
+**P2 — bounded pending-reply pickup (constraint #2), implemented INSIDE
+`usePlusimRuntime` (Rev 2).** The hook exports exactly
+`{ runtime, hydrate, reset, sendMessage, conversationId, isRunning }`
+(`plusimRuntime.ts:188`) — there is **no** external setter for `isRunning` or
+the message list, so the pickup cannot be driven from the page; it is new hook
+surface, named honestly: a `resumePendingReply(rows, cid)` path (or `hydrate`
+detecting it) that lives next to `setIsRunning`/`setMessages`/`onCancel`.
+Behavior, on the `?cid` bootstrap when the **last hydrated row is a user
+turn**:
+
+- **Window (client-anchored, skew-proof — Rev 2):** the reply can only land
+  within the server ceiling of the user turn, but `createdAt` is DB-server
+  clock and the countdown runs on the browser clock. So: compute
+  `remaining = clamp(userTurn.createdAt + CHAT_CLIENT_TIMEOUT_MS − clientNowAtBootstrap, 0, CHAT_CLIENT_TIMEOUT_MS)`
+  once, then count down on `performance.now()`. The clamp caps behind-skew
+  overrun at one window; if `remaining` is ~0/negative (stale turn or
+  ahead-skew), do **one immediate history re-fetch, then stop** — never skip
+  entirely, never poll longer than one window.
+- **While in the window:** `isRunning = true` (the typing indicator + 15s
+  caption render for free, `thread.tsx:83-85`), re-fetch `/api/chat/history`
+  every ~5s. A returned assistant row → **wholesale `hydrate(allRows, cid)`
+  replace** (idempotent — no append/dedupe code), `isRunning = false`.
+- **Final fetch at the deadline (Rev 2):** before stopping, one last history
+  fetch — a reply landing in the final interval is not missed (the exact bug
+  P2 exists to fix, at the margin).
+- **One shared cancel path (Rev 2 — fixes the pre-review P1-blocker):** while
+  `isRunning` is true the composer shows the **Stop button**
+  (`thread.tsx:213-218`), whose `onCancel` today only does
+  `abortRef.current?.abort()` (`plusimRuntime.ts:147-149`) — null during
+  pickup ⇒ dead button, user locked into an unstoppable 95s thinking state.
+  The pickup registers a `cancelPickup()` that `onCancel` **and** the top of
+  `sendMessage` both call (Enter-key submits can reach `onNew` even while
+  Send is hidden): stop the poll, `isRunning = false`. Stops are therefore:
+  (a) assistant row arrives; (b) deadline (after the final fetch) — silently,
+  no speculative error copy for a failure we didn't observe; (c) user cancels
+  or a new send starts.
+- The poll is **conditional** (only when a pending turn is detected at
+  bootstrap) and **bounded** (≤ one window) — not a background poller.
+  **Unread-dot needs no client work:** `/api/chat`'s own turn bookkeeping
+  upserts the view row after the reply write (`route.ts:212-223`), so a
+  pickup-surfaced reply never leaves a stale dot. When AgentGlob ships SSE
+  (issue #19), this pickup is replaced by stream-resume and deleted.
 
 **P3 — `shrink:` the bootstrap round trip.** `new-session` awaits
 `getAgentInfo()` (an external call on cold cache) and returns `agentInfo`
 that its only caller discards (`chat/page.tsx:50` destructures nothing but
-`conversationId`; avatars use `/api/chat/agent-info`). Delete the await and
-the response field. The prune stays (still needed for bare-visit
-placeholders).
+`conversationId`; avatars use `/api/chat/agent-info`; no test touches the
+route). Delete the await and the response field. One honest side effect
+(Rev 2): today's call pre-warms the 5-min in-process `agentInfoCache`
+(`agentglob.ts:57-77`) for the avatar fetch moments later — deleting it moves
+that cold external call onto the avatar's own request, which has its own
+error handling. The prune stays (still needed for bare-visit placeholders).
 
 ## Alternatives considered
 
@@ -134,6 +200,17 @@ placeholders).
 - **Refresh between mount and the `new-session` response:** nothing was sent;
   the seed params re-fire on the new load and a fresh placeholder is minted
   (the old one is pruned later). Same as today; harmless.
+- **Refresh after `replace` but before the send's user row persists (Rev 2):**
+  the seed is dropped silently (params already stripped, nothing pending on
+  reload). This window exists **identically today** — never-resend >
+  maybe-drop is the T3 trade; documented, not changed.
+- **Clock skew (Rev 2):** the P2 window is computed once against the client
+  clock and clamped to one window on a monotonic countdown — behind-skew
+  can't extend the poll past one window; ahead-skew degrades to one immediate
+  fetch, never to a skipped pickup.
+- **Title regression without P1b:** P1 alone silently demotes seeded-flow
+  titling to an unreachable-after-failure path — P1b (drop
+  `isFirstMessage &&`) ships in the same PR, guarded by TB4.
 - **`hydrate([], cid)` clears message state:** at this point in the bootstrap
   there are no messages in state — it only sets the id. T2 covers the flow.
 - **Pickup vs. a mid-pickup send:** cancel-on-send (P2 stop c) prevents two
@@ -145,26 +222,39 @@ placeholders).
 
 ## Verification — named tests (protocol §2)
 
-- **T2** (carried from the latency plan): a seeded autosend visit creates
-  **exactly one** conversation; after the reply, reload of `/chat?cid`
-  hydrates the thread that holds the messages. (Today: two conversations, and
-  the reload shows an empty placeholder.)
-- **T3** (carried): a refresh during the in-flight wait does **not** re-send
-  the seed (`p`/`autosend` stripped by the `replace` that precedes the send);
-  `ctx` still lands on the conversation (stored by `new-session`).
-- **T9** (carried, transformed): `/api/chat` stays **lookup-only** — a
-  supplied unknown `conversationId` still 404s; no create-if-missing crept
-  in. (Records constraint #1 as satisfied by design.)
-- **TB1** (new): bootstrap onto a conversation whose last row is a user turn
-  *within* the window → pickup activates (`isRunning` true), and when history
-  returns the assistant row it is appended and `isRunning` goes false.
-- **TB2** (new): last-user-turn *older* than the window → no poll starts;
-  an in-window pickup stops at the deadline.
-- **TB3** (new): sending a new message during pickup cancels the poll.
+**Test-infra boundary (Rev 2, stated explicitly):** the repo's vitest runs in
+`environment: "node"` with no jsdom/@testing-library — there is **no**
+component-test infra, and building it would dwarf this change. Client
+effect-ordering behavior (T2/T3) is therefore **manual E2E**; the pickup's
+decision logic is **extracted as a pure function** so TB1–TB3 run in the
+existing node-env suite. The implementation PR must not be reviewed against
+phantom component tests.
+
+- **T2** (carried; manual E2E): a seeded autosend visit creates **exactly
+  one** conversation; after the reply, reload of `/chat?cid` hydrates the
+  thread that holds the messages. (Today: two conversations, and the reload
+  shows an empty placeholder.)
+- **T3** (carried; manual E2E): a refresh during the in-flight wait does
+  **not** re-send the seed (`p`/`autosend` stripped by the `replace` that
+  precedes the send); `ctx` still lands (stored by `new-session`).
+- **T9** (carried, transformed; automated route test): `/api/chat` stays
+  **lookup-only** — a supplied unknown `conversationId` still 404s; no
+  create-if-missing crept in. (Records constraint #1 as satisfied by design;
+  no existing test asserts this today.)
+- **TB1–TB3** (automated, against the extracted pure decision function):
+  TB1 — last-row-user within the window ⇒ pickup with the clamped remaining
+  time; assistant-row rows ⇒ stop. TB2 — stale turn / ahead-skew ⇒ exactly
+  one immediate fetch then stop; behind-skew ⇒ remaining clamped to one
+  window; deadline ⇒ final fetch then stop. TB3 — cancel (user cancel or new
+  send) ⇒ poll stops, `isRunning` false.
+- **TB4** (new, automated — guards P1b): a null-title conversation is titled
+  by **any** successful turn (not just the first); an existing title is never
+  overwritten. (`bookkeeping.test.ts` T4/T4b stay green.)
 - Manual E2E (dev tunnel): home-hub prompt click → exactly one conversation,
   URL `cid` correct after reload; refresh mid-wait → typing indicator
-  reappears and the reply surfaces when it lands; bare `/chat` visit
-  unchanged; `past_meeting` pin unchanged.
+  reappears, **Stop button actually stops it**, and the reply surfaces when
+  it lands; bare `/chat` visit unchanged; `past_meeting` pin unchanged;
+  failed-first-turn retry ends with a titled conversation (P1b).
 - Gates: `pnpm typecheck && pnpm test && pnpm build`.
 
 ## Delivery & order
@@ -185,9 +275,12 @@ placeholders).
    conversations or sends twice?
 2. **Contract guard:** does anything here widen `/api/chat` beyond
    lookup-only, or bypass the ownership check?
-3. **Pickup bounds:** any way the P2 poll outlives its window, polls without a
-   pending turn, or double-appends rows alongside a concurrent send?
-4. **`sectionContext` parity:** does `ctx` still reach the conversation and
-   the first-turn preamble identically to today in the P1 ordering?
+3. **Pickup bounds + cancel:** any way the P2 poll outlives its clamped
+   window, runs without a pending turn, clobbers an in-flight send's state,
+   or leaves the Stop button / a new send unable to end it?
+4. **`sectionContext` + title parity:** does `ctx` still reach the first-turn
+   preamble identically in the P1 ordering, and does P1b's relaxed title
+   condition (`!title` without `isFirstMessage`) have any unwanted writer or
+   overwrite case?
 5. **P3 blast radius:** any consumer of `new-session`'s `agentInfo` field or
-   its `getAgentInfo()` side effect that the inventory missed?
+   its cache-warming side effect that the inventory missed?
