@@ -1,15 +1,21 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 10 — RE-REVIEW REQUESTED** (plan PR). Rev 10 adds
-> cross-app production evidence separating bootstrap resilience from upstream
-> agent latency; it does not change the implementation contract. Codex round 7
-> landed 2 more on P1c (its shared-hook integration — HomeHub + cancel), the 3rd
-> consecutive round touching P1c. Folded (these are P1c's distinct integration
-> points, not the same hole), under the owner's standing "keep going" — **but
-> P1c is now the flagged hotspot: a 4th P1c round triggers an escalation/rethink
-> rather than another patch.** Scope: `/chat` bootstrap only.
+> **Status:** 🔍 **Rev 11 — RE-REVIEW REQUESTED** (plan PR). Codex round 8 was
+> the **4th consecutive round on P1c** (escalation trigger); rather than patch
+> the shared-hook `await` a fifth time, **P1c is redesigned** as a page-level
+> composer gate (owner directed via Rev 10's field evidence to keep the
+> protection, not drop it). Moving the guard off the shared runtime onto the
+> `/chat` page dissolves the whole recursion (rounds 5–8: URL sync, HomeHub,
+> cancel-during-wait, optimistic-append orphan) — no send can fire before the
+> `cid` exists. Scope: `/chat` bootstrap only.
 >
-> **Rev 10 — cross-app field findings (2026-07-22, PR #22):**
+> **Rev 11 — Codex round 8 resolution + P1c redesign (2026-07-22, PR #22):**
+>
+> | # | Codex P2 | Resolution |
+> |---|---|---|
+> | 11 | **Cancel-before-id strands the optimistic message** — the `await` runs after `sendMessage` optimistically appends the user row; Stop during the wait (before any `/api/chat` request) leaves an unsent turn + misleading "check recent chats" copy. | **Resolved by the P1c redesign, not another patch:** the guard moves to a **page-level composer lock** (no send can start until `bootstrapReady`), so there is no pre-id optimistic append, no in-`sendMessage` await, and no cancel-during-wait state. Rounds 5–8's whole class of P1c edges is removed. HomeHub's shared runtime is left unchanged; a `new-session` failure degrades to lazy-create, never a dead composer. |
+>
+> **Rev 10 — cross-app field findings (2026-07-22, PR #22, owner-added):**
 >
 > Added the chapter **“Cross-app field findings — separate bootstrap resilience
 > from agent latency”** from a production Havaya rollout. The evidence strengthens
@@ -274,43 +280,46 @@ the second request's filter matches zero rows). The in-memory
 T4/T4b stay green (mocks move `update` → `updateMany`); TB4 adds the stale-null
 race (two overlapping fills → exactly one title, never overwritten).
 
-**P1c — gate manual sends on the pending bootstrap id (Rev 7, Codex round 5).**
-On a **bare** `/chat` load (no `cid`, no autosend), the composer renders while
-`new-session` is still in flight; a fast manual send today enters `sendMessage`
-with `conversationIdRef.current === null` → `/api/chat` creates a **separate**
-conversation, and the new-session callback's `hydrate([], id)` then clobbers
-the optimistic message while the send returns for the *other* conversation
-(URL/thread diverge). Fix: the bootstrap exposes its minted-id **promise** to
-the runtime, and `sendMessage`, when `conversationIdRef.current` is null,
-**awaits that pending id and posts with it** — a send during the window joins
-the minted conversation (single conversation), with no composer disabling and
-no clobbering. The seeded autosend path is unaffected (it already fires
-`sendMessage(seed)` *after* `hydrate` installs the id). Because P1c makes the
-awaited send post to the **minted** id, there is only ever **one** conversation
-— so the new-session callback still runs, but (Rev 8, Codex round 6) it skips
-**only** the clobbering `hydrate([], id)` when a send has already started
-(that `hydrate` would wipe the optimistic user message), and **always keeps the
-`router.replace` URL sync** to the minted `cid`. Skipping the `replace` too
-would leave the address bar on `/chat` (or with `p`/`autosend`) while the
-message sits in the minted conversation — a refresh would lose the thread /
-replay the seed, reintroducing the very divergence this closes.
+**P1c — lock the bare-load composer until the minted id is installed (Rev 11 —
+redesign after the P1c recursion; owner-directed to keep the protection).**
+The bare-load race is real: on a bare `/chat` load (no `cid`, no autosend) the
+composer renders while `new-session` is in flight, so a send with
+`conversationIdRef` still null would create a *separate* conversation whose
+`cid` isn't in the URL during the long (13–34s, per Rev 10 field data) wait — a
+mid-wait refresh then can't resume it. The owner's Rev 10 evidence makes this a
+**correctness requirement**, so we keep the protection — but move the guard
+**off the shared runtime and onto the `/chat` page**.
 
-**P1c integration — two constraints on the shared hook (Rev 9, Codex round 7):**
-`usePlusimRuntime` is shared with **HomeHub's lazy chat**
-(`HomeHub.tsx:33` → `usePlusimRuntime({})`, whose first send deliberately posts
-`conversationId: null` so `/api/chat` creates the conversation). So:
-- **The await is conditional on an ACTUAL pending `/chat` bootstrap.** P1c
-  applies only when the runtime was given a bootstrap promise (the `/chat`
-  page passes one; HomeHub passes none). With no bootstrap promise, `null` →
-  post `null` → lazy create, exactly as today. A literal "always await when
-  ref is null" would hang/break HomeHub's first send — so the option is
-  explicit, and a **no-bootstrap regression test** covers HomeHub's lazy send.
-- **The await is CANCEL-aware.** The preflight await runs *before* the
-  `/api/chat` fetch registers `abortRef`, so today's Stop
-  (`onCancel` → `abortRef.current?.abort()`) can't end it if `new-session`
-  hangs. The bootstrap-id wait is raced against the same cancel token
-  (`cancelPickup`/`onCancel` reject/ignore it) so **Stop ends the waiting
-  state**; TB5 covers cancel-before-id.
+Rev 7–9 put a pending-id **await inside the shared `sendMessage`**, and that one
+choice spawned four consecutive review rounds — it leaked into the URL sync
+(round 6), HomeHub's lazy send (round 7), the Stop path (round 7), and the
+optimistic-append/cancel window (round 8) — because the guard lived on a shared,
+optimistic-append send path. The redesign removes that entire class:
+
+- **Invariant:** on a bare `/chat` load, **no send can be initiated until the
+  server-minted `cid` is installed in the runtime and the URL.** The `/chat`
+  page tracks `bootstrapReady` (false until `new-session` resolves,
+  `hydrate([], id)` installs the id, and `router.replace(?cid=id)` runs); while
+  not ready the composer is **disabled** (page-level busy state on `<Thread>`;
+  or render a placeholder until ready). Because nothing can send before the id
+  exists, there is no null-id send and nothing to clobber — the callback simply
+  does its normal `hydrate([], id)` + `replace`. The await, the "skip
+  hydrate/replace if a send started", the cancel-during-wait state, and the
+  optimistic-append orphan (rounds 5–8) **all dissolve**.
+- **HomeHub is untouched.** The gate is page-level; `usePlusimRuntime` gains
+  **no** await and no bootstrap-promise option, so HomeHub's lazy chat
+  (`usePlusimRuntime({})`, first send posts `conversationId: null`) is exactly
+  as today — no shared send-path change, no special-case needed.
+- **Seeded autosend unaffected.** The `p`/`autosend` flow fires
+  `sendMessage(seed)` from the callback *after* `bootstrapReady`, and it is a
+  programmatic send, so the brief disabled state never blocks it.
+- **Failure fallback (pre-attack):** if `new-session` errors, the page does
+  **not** strand a permanently-disabled composer — it enables it and lets the
+  first send lazy-create (`conversationId: null` → `/api/chat` creates),
+  syncing the URL from the send response. A `new-session` outage degrades to
+  today's lazy behavior, never a dead composer.
+- **Window:** `new-session` is one DB insert + prune (P3 also drops the
+  `getAgentInfo` await), so the disabled flash is typically sub-100ms.
 
 Guards TB5.
 
@@ -501,14 +510,15 @@ phantom component tests.
   stale null row updates zero rows (stale-null race → exactly one title,
   never clobbered). (`bookkeeping.test.ts` T4/T4b stay green with `update` →
   `updateMany`.)
-- **TB5** (new, automated — guards P1c through Rev 9): a bare-load `sendMessage`
-  fired while the bootstrap id is pending **awaits** it and posts with the
-  minted id (one conversation, no null-id create); the callback **skips only
-  `hydrate`** but **still runs `replace`** so the URL carries the minted `cid`;
-  **a runtime with no bootstrap promise (HomeHub) posts `null` and lazy-creates
-  as today** (no hang); **cancel-before-id ends the waiting state** (Stop works
-  while `new-session` is in flight); a send after the id is installed is
-  unaffected.
+- **TB5** (P1c — page-level gate, Rev 11): while `bootstrapReady` is false the
+  composer is disabled, so **no send fires without a `cid`** (one conversation,
+  no null-id create, no clobber); once `new-session` resolves + `hydrate` +
+  `replace` run, `bootstrapReady` flips true and sends proceed normally; a
+  `new-session` **error** enables the composer and the first send lazy-creates
+  (`conversationId: null`), never a permanently-disabled composer; **HomeHub's
+  runtime is unchanged** (posts `null`, lazy-creates as today). (Page-gate
+  behavior is manual E2E where it depends on the composer's disabled prop; the
+  ready/error state transition is unit-tested.)
 - Manual E2E (dev tunnel): home-hub prompt click → exactly one conversation,
   URL `cid` correct after reload; refresh mid-wait → typing indicator
   reappears, **Stop button actually stops it**, and the reply surfaces when
