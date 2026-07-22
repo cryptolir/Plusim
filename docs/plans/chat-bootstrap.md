@@ -1,10 +1,18 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 13 — RE-REVIEW REQUESTED** (plan PR). Codex round 10
-> landed 2 P2s: the P1c render gate missed the welcome-suggestion send path
-> (now a render gate covering **all** entry points), and P2's positional
-> completion needed a deterministic order + tie-is-ambiguous rule
-> (`createdAt` ms ties). Both folded. Scope: `/chat` bootstrap only.
+> **Status:** 🔍 **Rev 14 — RE-REVIEW REQUESTED** (plan PR). Codex round 11
+> landed 2 P2s, both hardening the P1c render-gate's **failure fallback** (a
+> real operational path — `new-session` 401/500): the fallback must trigger on
+> non-`res.ok`/missing-id (not just rejected fetch) or the render gate leaves
+> the page permanently inert; and the fallback's lazy-create send must sync the
+> URL. Both folded. Scope: `/chat` bootstrap only.
+>
+> **Rev 14 — Codex round 11 resolution (2026-07-22, PR #22):**
+>
+> | # | Codex P2 | Resolution |
+> |---|---|---|
+> | 15 | **Non-OK bootstrap responses don't trigger the fallback** — a 401/500 resolves through `.then(r=>r.json())` without a `conversationId`; with the render gate hiding all affordances, the page stays permanently inert. | The fallback triggers on **any** non-success outcome: rejected fetch, non-`res.ok`, **or** missing `conversationId` → enable the surface in fallback mode. |
+> | 16 | **Fallback lazy-create send never reaches the URL** — the `router.replace` lives only in the success callback, so a fallback send leaves the URL on `/chat` and a refresh orphans the thread (the very thing P1c prevents). | The `/chat` page adds an **effect watching the runtime's `conversationId`** → `router.replace(?cid=id)` when it appears (covers the fallback path; no-op on the normal path). |
 >
 > **Rev 13 — Codex round 10 resolution (2026-07-22, PR #22):**
 >
@@ -333,11 +341,25 @@ optimistic-append send path. The redesign removes that entire class:
 - **Seeded autosend unaffected.** The `p`/`autosend` flow fires
   `sendMessage(seed)` from the callback *after* `bootstrapReady`, and it is a
   programmatic send, so the brief disabled state never blocks it.
-- **Failure fallback (pre-attack):** if `new-session` errors, the page does
-  **not** strand a permanently-disabled composer — it enables it and lets the
-  first send lazy-create (`conversationId: null` → `/api/chat` creates),
-  syncing the URL from the send response. A `new-session` outage degrades to
-  today's lazy behavior, never a dead composer.
+- **Failure fallback covers ALL non-success outcomes (Rev 14, Codex round 11).**
+  The render gate hides every send affordance until `bootstrapReady`, so
+  `bootstrapReady` MUST flip true on every terminal outcome or the page is
+  permanently inert. The fallback triggers on **any** of: a rejected `fetch`
+  (network), a **non-`res.ok`** response (401/500 still resolve through
+  `.then(r => r.json())`), or a **missing `conversationId`** in the body — not
+  just the `.catch` path. Any of these → enable the surface in **fallback
+  mode** (no `hydrate`/`replace`; the first send lazy-creates with
+  `conversationId: null` → `/api/chat` creates). Never a permanently-inert page.
+- **The fallback (lazy-create) send MUST sync the URL (Rev 14, Codex round 11).**
+  On the fallback path the send posts `conversationId: null` and the runtime
+  stores the returned id in hook state only; the page's `router.replace` lives
+  in the *success* callback, which didn't run. Without a URL sync the address
+  bar stays `/chat`, so a refresh during/after the fallback send orphans the
+  thread — the exact no-`cid` long-send problem P1c exists to prevent. Fix: the
+  `/chat` page adds a small **effect watching the runtime's `conversationId`**
+  — when it becomes non-null and the URL has no matching `cid`,
+  `router.replace(?cid=<id>)`. This covers the fallback path (and is a no-op on
+  the normal path, where the callback already set the URL).
 - **Window:** `new-session` is one DB insert + prune (P3 also drops the
   `getAgentInfo` await), so the disabled flash is typically sub-100ms.
 
@@ -560,11 +582,15 @@ phantom component tests.
   send fires without a `cid` (one conversation, no null-id create, no clobber)
   **whether the user uses the composer or clicks a suggestion**; once
   `new-session` resolves + `hydrate` + `replace` run, `bootstrapReady` flips
-  true and both paths proceed; a `new-session` **error** re-enables the surface
-  and the first send lazy-creates (`conversationId: null`), never a permanently
-  inert surface; **HomeHub's runtime is unchanged** (posts `null`, lazy-creates
-  as today). (Render-gate + suggestion coverage are manual E2E where they
-  depend on rendering; the ready/error state transition is unit-tested.)
+  true and both paths proceed; **every non-success `new-session` outcome**
+  (rejected fetch, non-`res.ok`, or missing `conversationId`) re-enables the
+  surface in fallback mode and the first send lazy-creates
+  (`conversationId: null`), never a permanently inert surface; **the fallback
+  send's returned id is synced to the URL** via the page's `conversationId`
+  effect (a refresh after a fallback send resumes the thread); **HomeHub's
+  runtime is unchanged** (posts `null`, lazy-creates as today). (Render-gate +
+  suggestion coverage are manual E2E; the ready/error/fallback-URL-sync
+  transitions are unit-tested.)
 - Manual E2E (dev tunnel): home-hub prompt click → exactly one conversation,
   URL `cid` correct after reload; refresh mid-wait → typing indicator
   reappears, **Stop button actually stops it**, and the reply surfaces when
