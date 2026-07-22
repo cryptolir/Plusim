@@ -1,11 +1,18 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 2 — READY FOR CODEX REVIEW** (plan PR). Ponytail +
-> correctness pre-passes run per protocol §2 and folded. The follow-up plan
-> promised by the chat-latency plan's Rev 7 descope
-> (`docs/plans/chat-latency.md`). Scope: the `/chat` bootstrap only — the
-> smallest design that fixes the known bug and satisfies the three constraints
-> banked from the latency plan's review rounds 4–5.
+> **Status:** 🔍 **Rev 3 — RE-REVIEW REQUESTED** (plan PR). Codex round 1
+> landed 2 P2s on the P2 pickup; both folded. The follow-up plan promised by
+> the chat-latency plan's Rev 7 descope (`docs/plans/chat-latency.md`). Scope:
+> the `/chat` bootstrap only — the smallest design that fixes the known bug and
+> satisfies the three constraints banked from the latency plan's review rounds
+> 4–5.
+>
+> **Rev 3 — Codex round 1 resolution (2026-07-22, PR #22):**
+>
+> | # | Codex P2 | Resolution |
+> |---|---|---|
+> | 1 | **"Any assistant row" completes the pickup wrongly** — a multi-turn history already has older assistant rows, so the first poll stops instantly and re-hydrates the still-pending transcript; the new reply stays invisible. | Completion is now **keyed to the captured pending user turn** (last row is no longer that turn / a row exists after its id), not "an assistant row exists". Mixed-history case added to TB1. |
+> | 2 | **The final deadline fetch is unbounded** — a hung final `/api/chat/history` request holds `isRunning` past the window, breaking the bounded-pickup invariant. | The final fetch carries its own `AbortSignal.timeout`, **and** `isRunning` is cleared at the deadline regardless of whether it settles; a late response is ignored. TB2 covers it. |
 >
 > **Review log:**
 > **Rev 1** — initial draft.
@@ -137,13 +144,25 @@ turn**:
   overrun at one window; if `remaining` is ~0/negative (stale turn or
   ahead-skew), do **one immediate history re-fetch, then stop** — never skip
   entirely, never poll longer than one window.
+- **Completion is keyed to the PENDING turn, not "any assistant row" (Rev 3,
+  Codex P2):** a multi-turn conversation's history already contains **older**
+  assistant rows, so "an assistant row exists" would make the first poll stop
+  instantly and re-hydrate the same still-pending transcript — the reply stays
+  invisible. Capture the pending user turn's `id` (and `createdAt`) at
+  bootstrap; **completion = the last row is no longer that pending user turn**
+  (equivalently: a row exists after the captured pending id). Only then →
+  wholesale `hydrate(allRows, cid)` replace (idempotent — no append/dedupe),
+  `isRunning = false`.
 - **While in the window:** `isRunning = true` (the typing indicator + 15s
   caption render for free, `thread.tsx:83-85`), re-fetch `/api/chat/history`
-  every ~5s. A returned assistant row → **wholesale `hydrate(allRows, cid)`
-  replace** (idempotent — no append/dedupe code), `isRunning = false`.
-- **Final fetch at the deadline (Rev 2):** before stopping, one last history
-  fetch — a reply landing in the final interval is not missed (the exact bug
-  P2 exists to fix, at the margin).
+  every ~5s and apply the completion check above.
+- **Final fetch at the deadline — itself bounded (Rev 3, Codex P2):** before
+  stopping, one last history fetch, but a slow/hung final request must not
+  hold `isRunning` past the window. So the final fetch carries its own
+  `AbortSignal.timeout` **and** `isRunning` is cleared at the deadline
+  **regardless** of whether that fetch settles — the bounded-pickup invariant
+  holds even on a stalled history request. A late-arriving final response is
+  ignored once the pickup has stopped.
 - **One shared cancel path (Rev 2 — fixes the pre-review P1-blocker):** while
   `isRunning` is true the composer shows the **Stop button**
   (`thread.tsx:213-218`), whose `onCancel` today only does
@@ -243,10 +262,14 @@ phantom component tests.
   no existing test asserts this today.)
 - **TB1–TB3** (automated, against the extracted pure decision function):
   TB1 — last-row-user within the window ⇒ pickup with the clamped remaining
-  time; assistant-row rows ⇒ stop. TB2 — stale turn / ahead-skew ⇒ exactly
-  one immediate fetch then stop; behind-skew ⇒ remaining clamped to one
-  window; deadline ⇒ final fetch then stop. TB3 — cancel (user cancel or new
-  send) ⇒ poll stops, `isRunning` false.
+  time; **completion is keyed to the pending turn**: a **mixed history** whose
+  last row is the pending user but which also contains older assistant rows
+  ⇒ **not** complete (must keep polling), and completion fires only once a row
+  exists after the captured pending id (Codex P2). TB2 — stale turn /
+  ahead-skew ⇒ exactly one immediate fetch then stop; behind-skew ⇒ remaining
+  clamped to one window; deadline ⇒ **`isRunning` cleared even if the final
+  fetch never settles** (Codex P2). TB3 — cancel (user cancel or new send) ⇒
+  poll stops, `isRunning` false.
 - **TB4** (new, automated — guards P1b): a null-title conversation is titled
   by **any** successful turn (not just the first); an existing title is never
   overwritten. (`bookkeeping.test.ts` T4/T4b stay green.)
