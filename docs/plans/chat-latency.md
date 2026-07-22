@@ -1,8 +1,14 @@
 # Plusim — chat latency: instrument, trim, and mask the wait
 
-> **Status:** 🔍 **Rev 2 — READY FOR CODEX REVIEW** (plan PR). Ponytail pass
-> run per protocol §2 (author-side, before handoff). Awaiting the external
-> Codex adversarial round on the plan PR. No implementation yet.
+> **Status:** 🔍 **Rev 3 — RE-REVIEW REQUESTED** (plan PR). External Codex
+> round 1 landed 2 P2s; both folded below. No implementation yet.
+>
+> **Rev 3 — Codex round 1 resolution (2026-07-22, PR #12):**
+>
+> | # | Codex P2 | Resolution |
+> |---|---|---|
+> | 1 | **Drive timeout doesn't cover pre-fetch work** — threading `AbortSignal` only into `driveFetch` can't cap `getAccessToken()` (it runs *before* the signaled fetch, `googleDrive.ts:178-180`) nor the route/Prisma work, so A2's `client ≥ server + preprocessing` invariant can still break. | **B1 rewritten:** an **outer bounded path** (`Promise.race([buildLinkedFolderContext(), deadline]`) caps total context wall-clock *including* the OAuth refresh; the inner `AbortSignal` is kept **only** to stop the abandoned fetch leaking (not as the time bound). **A2 budget** now explicitly covers non-Drive preprocessing (Clerk + Prisma) measured in Phase 0, and the client constant is set from that measurement, not assumed. New test **T8**. |
+> | 2 | **Post-reply bookkeeping can drop the saved reply** — a transient DB error in the title update or the raw-bump/view `Promise.all` (after the assistant row exists) rejects the route, so the client gets an error instead of the reply. Plan asserted the invariant but not the mechanism. | **C3 specifies the mechanism:** all post-reply bookkeeping runs inside a best-effort `try/catch` that logs (`chat_bookkeeping_error`) and continues; the route returns the persisted assistant message regardless. New test **T7**. |
 >
 > **Review log:**
 > **Rev 1** — initial plan; folded in the two pre-review inspection passes
@@ -118,12 +124,19 @@ streaming, no runtime coupling. Deleted when SSE ships.
 start at different points: the client's at fetch start
 (`plusimRuntime.ts:65`), the server's at `callAgent` start (`route.ts:103`) —
 i.e. *after* auth, DB writes, and the context build. The invariant is
-therefore **client ≥ server + preprocessing budget**, which only holds once
-B1 bounds preprocessing: with context ≤ 2.5s + ~1s auth/DB slack, client 95s
-vs server 90s is safe. **Ship B1 with or before A2** (they land in the same
-PR — see Delivery). Both values live in one shared const-only module
-(importable by the `"use client"` runtime and the route) so the pair can't
-drift apart. Corrected failure model (Rev 2): on mutual timeout the server's
+**client ≥ server + preprocessing budget**, where preprocessing =
+`bounded context (≤ 2.5s, B1) + auth + pre-agent Prisma writes`. Two of those
+terms are **not** abortable (Clerk `auth()`, the conversation fetch/create +
+user-message write), so the budget is **set from Phase 0 measurement, not
+assumed** (Rev 3, Codex P2#1): read the `dbBeforeAgentMs` + implied auth tail
+from the baseline, take a high percentile, and size the client margin =
+`2.5s + that`. With the code paths as they stand today that lands near the
+Rev 2 figure (~3–4s ⇒ client 95s vs server 90s), but the number is now
+**derived and asserted (T6/T8)**, not guessed — if Phase 0 shows a fatter
+preprocessing tail, the client constant widens to match. **Ship B1 with or
+before A2** (same PR — see Delivery). Both timeout values *and* the `2.5s`
+context deadline live in one shared const-only module (importable by the
+`"use client"` runtime and the route) so the three can't drift apart. Corrected failure model (Rev 2): on mutual timeout the server's
 abort also fires, the route 502s, and **no** reply is written
 (`route.ts:106-108`) — a reply lands unseen only when the agent finishes
 inside the window between the two timeouts, or after a user cancel / network
@@ -141,16 +154,30 @@ appear in the conversation (recent-chats list) shortly.
 
 ### Phase B — first-message overhead (linked-folder users)
 
-**B1. Bound the Drive context build — by aborting, not abandoning.** Thread
-an optional `AbortSignal` through `driveFetch` (it already accepts `init`;
-signal stays optional so admin routes are untouched) and pass
-`AbortSignal.timeout(2500)` down through the `buildLinkedFolderContext`
-chain (`isDriveConnected`'s token refresh excepted — it is a Google SDK call;
-the deadline race still caps total wait). On timeout: return null, proceed
-**without** context, log `contextTimedOut` (Phase 0). A plain `Promise.race`
-abandonment was rejected: the OAuth → list → export chain would keep running
-and stack across sends. Non-timeout Drive errors keep today's never-throws →
-null contract (`pastMeeting.ts:36-38`).
+**B1. Bound the Drive context build — outer deadline for the time cap, inner
+signal against leaks (Rev 3, Codex P2#1).** Two mechanisms, each doing one
+job:
+- **Outer bounded path caps total wall-clock.** Wrap the whole
+  `buildLinkedFolderContext` call in `Promise.race([build, deadline(2500)])`
+  (deadline resolves to null). This is what actually bounds preprocessing,
+  because it covers **every** step — including `getAccessToken()`'s OAuth
+  refresh, which `driveFetch` awaits *before* the signaled fetch
+  (`googleDrive.ts:178-180`) and which an inner fetch signal therefore
+  cannot reach. On deadline: return null, proceed **without** context, log
+  `contextTimedOut` (Phase 0).
+- **Inner `AbortSignal` prevents the leak the race would otherwise cause.**
+  A plain race abandons the losing promise — the OAuth → list → export chain
+  keeps running and can stack across sends. So still thread an optional
+  `AbortSignal` (tied to the same deadline) through `driveFetch` (it already
+  accepts `init`; the param stays optional so admin routes are untouched) to
+  actually abort the in-flight fetch when the deadline fires. The signal is
+  a **cleanup** device, not the time bound.
+
+Non-timeout Drive errors keep today's never-throws → null contract
+(`pastMeeting.ts:36-38`); the race wrapper must not convert them into throws
+(T5). The `2500` constant lives in the shared const module with the A2
+timeouts (below) so the "context bound" the client budget assumes is the
+literal one enforced here.
 
 **Rider (same wrapper, second caller):** the home page runs the same
 unbounded chain (`isDriveConnected()` + `listSummaries()`,
@@ -239,7 +266,17 @@ drop the filter and resurface blank "שיחה חדשה" rows.
   invariant (`updatedAt == lastViewedAt`, no spurious "unread" on home,
   `page.tsx:76`) — a naive three-way batch would let the title update's
   auto-timestamp land *after* the raw bump nondeterministically (T4).
-  Bookkeeping failure never drops the reply or the response.
+- **Bookkeeping is best-effort and isolated (Rev 3, Codex P2#2).** The
+  invariant "a bookkeeping failure never drops the reply" needs a *mechanism*,
+  not just a promise: once the assistant row is persisted, the title update +
+  raw-bump/view batch run inside a `try/catch` that logs
+  (`chat_bookkeeping_error`) and swallows — the route then returns the
+  persisted assistant message **regardless** of a transient title/upsert/bump
+  failure. Without the catch, a straight `await` of those writes would reject
+  the route and hand the user an error while the reply sat saved in the DB
+  (T7). The assistant-message create itself is **not** in the best-effort
+  block — if *that* fails there is no reply to return and the route errors as
+  today.
 - User-message write stays **before** `callAgent` (durability) — unchanged.
 - ~~`after()` variant~~ — **deleted (Rev 2)**: a docs-verification task, a
   post-response error question, and review surface to move ~10–30ms off a
@@ -309,10 +346,14 @@ Net ≈ −120 lines vs Rev 1 as specced.
   this risk is gone with the `after()` cut.)
 - **B1 touches shared `driveFetch`:** the signal parameter is optional and
   unthreaded callers (admin routes) are behavior-identical; verified by
-  typecheck + admin Drive smoke test.
-- **A2/B1 coupling:** the timeout invariant only holds with preprocessing
-  bounded — A2 and B1 ship in the same PR, values in one shared const module
-  (T6 guards the pair).
+  typecheck + admin Drive smoke test. The signal is cleanup only — the outer
+  race is the time bound (Rev 3), so a caller that ignores the signal still
+  gets bounded via the wrapper.
+- **A2/B1 coupling:** the timeout invariant only holds with total
+  preprocessing bounded — the outer race bounds the context build (incl. OAuth
+  refresh) and the client margin is sized from Phase 0's measured non-Drive
+  preprocessing tail (Rev 3); A2 and B1 ship in the same PR, all three
+  constants in one shared module (T6/T8 guard the margin).
 - **C1 param matrix:** `p`/`ctx`/`autosend`/`cid` × reload-mid-wait ×
   strict-mode double-effects — covered by T2/T3 and the E2E matrix below.
 - **`isFirstMessage` race** (two concurrent first sends → both get the
@@ -341,7 +382,18 @@ implementation PR must contain these):**
   the send proceeds; non-timeout Drive errors still → null (never-throws).
 - **T6** (A2): unit-level assertion that the client timeout constant exceeds
   the server constant by at least the preprocessing budget (single shared
-  module — the pair cannot drift).
+  module — the constants cannot drift).
+- **T7** (Codex round 1 P2#2): after the assistant message is persisted, a
+  forced/mocked failure in the title update **and** in the raw-bump/view
+  batch still returns the assistant message to the client (route resolves,
+  not rejects) and emits `chat_bookkeeping_error`. A failure in the
+  assistant-message create itself still errors (that path is *not* isolated).
+- **T8** (Codex round 1 P2#1): with `getAccessToken()` (OAuth refresh) mocked
+  to hang, `buildLinkedFolderContext` still resolves null within the outer
+  deadline (proves the bound covers the pre-fetch step, not just the Drive
+  fetch), and the in-flight fetch receives an abort (no leaked chain). Plus:
+  the client timeout margin ≥ measured preprocessing high-percentile
+  (asserted against the const module).
 
 **Also:**
 - Unit: context deadline fallback; `isFirstMessage` via `_count`;
@@ -361,14 +413,13 @@ implementation PR must contain these):**
 
 ## Delivery & order
 
-1. **This plan (Rev 2)** → plan PR from `claude/agent-response-latency-vt4z4m`
-   with explicit review asks (invariants to attack named in the PR body) +
-   the ponytail-ran confirmation line, per protocol. Plusim has no
-   `plan-review-request.yml` / `CODEX_REVIEW_PAT` automation — the owner
-   posts `@codex review` on the PR (protocol §5: mentions from
-   non-Codex-connected identities bounce). Review rounds fold in as Rev 3+ on
-   the same branch; approved ⇒ merge plan PR, then implement **exactly** the
-   plan.
+1. **This plan** → plan PR #12 from `claude/agent-response-latency-vt4z4m`
+   with explicit review asks + the ponytail-ran line, per protocol. Codex
+   round 1 landed 2 P2s → folded as Rev 3 on the same branch → re-request
+   review. (The `plan-review-request.yml` / `claude.yml` automation +
+   `CODEX_REVIEW_PAT` merged in PR #13 after #12 opened, so #12 itself is
+   driven manually; future plan PRs auto-request.) Approved ⇒ merge plan PR,
+   then implement **exactly** the plan.
 2. **Phase 0** alone → deploy → ≥3–5 days of `chat_latency` baseline.
 3. **Phases A + B in one PR** (A2 depends on B1's bound — see Risks).
 4. **Phase C** — separate PR carrying T2/T3/T4 and the full E2E matrix.
