@@ -1,6 +1,6 @@
 # Plusim — Report workbook sub-reports (ניתוח תוצאות · התפלגות ההוצאות · טופס עזר למיפוי · חישוב יעדים)
 
-> **Status:** Draft — **Rev 4**, Codex round-3 finding folded in; awaiting re-review.
+> **Status:** Draft — **Rev 5**, Codex round-4 finding folded in; awaiting re-review.
 > Nothing implemented yet.
 >
 > **Process** (self-contained — the canonical plan-review protocol doc lives outside
@@ -40,6 +40,12 @@
 >   Resolved: B4 now anchors every downstream formula on the row's own age input
 >   (blank age ⇒ blank row), and the named test is strengthened to
 >   `test_goals_blank_rows_stay_blank`.
+> - Rev 5 — Codex review round 4 (PR #14): **P2** — the plan's `AVERAGE(B:E)` shorthand
+>   reads as a whole-column range, which would average every numeric cell in the month
+>   columns instead of the current category row. Resolved: Context 4 and B1 now require
+>   the row-qualified form `=AVERAGE(<first col><r>:<last col><r>)` (as the template
+>   itself does — `=AVERAGE(B9:E9)`), and `test_analysis_average_and_single_month`
+>   asserts row qualification explicitly.
 
 ## Context
 
@@ -63,7 +69,8 @@ What exists today, read from the code (not memory):
 4. **The template's `ניתוח תוצאות` is pure cross-sheet formulas.** Header row of month
    labels + `ממוצע 4 חודשים`; one row per taxonomy **section and leaf** in order, each
    month cell `='<month sheet>'!K<row>` (section rows bold + yellow fill), average col
-   `=AVERAGE(B:E)`; a `סה"כ` row `=-'<m>'!K63`; an income comparison block
+   row-qualified per row (`=AVERAGE(B9:E9)` on row 9, etc.); a `סה"כ` row
+   `=-'<m>'!K63`; an income comparison block
    (`כמה כסף הבאנו הביתה`, rows referencing the month sheets' `J65..J67` totals) and a
    closing `מצבנו` block (`הכנסות`=avg income, `הוצאות`=avg expenses, `יתרה`=sum).
    Note: in the template this income block's month **columns are in a different order**
@@ -191,7 +198,9 @@ All changes in `agent/skills/plusim-reports/` unless noted.
   then `ממוצע <N> חודשים`. One row per taxonomy section and leaf, in taxonomy order
   (section rows bold + yellow fill, as in the template); each month cell
   `='<month sheet>'!<tcol letter><row>` from the geometry map (sheet names quoted —
-  they contain spaces); average `=AVERAGE(<first month>:<last month>)`. `סה"כ` row
+  they contain spaces); average **row-qualified** on each analysis row `<r>`:
+  `=AVERAGE(<first month col><r>:<last month col><r>)` — never a whole-column
+  `AVERAGE(B:E)`, which would mix sections, leaves, and totals. `סה"כ` row
   referencing each month's grand cell negated (the template's own D69/E69 hand-edit
   inconsistency is normalized to the reference form). Income comparison block
   (`כמה כסף הבאנו הביתה`) referencing each month's income row totals + `סה"כ`; closing
@@ -315,8 +324,9 @@ Unit (`scripts/test_build_report_xlsx.py`, synthetic transactions, runs with ven
 - `test_analysis_cells_reference_month_geometry` — for a job where one month's `tcol`
   ≠ K (a leaf with >9 txns), every analysis cell points at the right sheet (quoted
   name), column letter, and row.
-- `test_analysis_average_and_single_month` — average range spans exactly the month
-  columns; a one-month job builds a valid sheet.
+- `test_analysis_average_and_single_month` — every average formula is row-qualified
+  (`=AVERAGE(B<r>:E<r>)`-form, no whole-column ranges) and spans exactly the month
+  columns; a one-month job builds a valid sheet. (Codex round-4 P2.)
 - `test_analysis_income_and_status_blocks` — income comparison rows hit the month
   income totals; `מצבנו` = avg income / avg expenses / sum.
 - `test_distribution_rows_follow_taxonomy` — row per section, references resolve, and a
