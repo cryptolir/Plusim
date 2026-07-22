@@ -1,14 +1,20 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 18 — RE-REVIEW REQUESTED** (plan PR). Codex round 15
-> closed the last failure-mode of the bare-load fallback: `new-session` was
-> `fetch`ed with **no timeout**, so a request that *hangs* (rather than rejects
-> or 500s) never resolves and — because the render gate hides every send
-> affordance until `bootstrapReady` — leaves the bare `/chat` page permanently
-> inert. Fixed: the `new-session` fetch carries an **`AbortSignal.timeout`**, so
-> a hang aborts into the same rejected-`fetch` branch that already triggers
-> **fallback mode** (surface enabled, first send lazy-creates). Scope: `/chat`
-> bootstrap only.
+> **Status:** 🔍 **Rev 19 — RE-REVIEW REQUESTED** (plan PR). Codex round 16
+> closed the **seeded × fallback** case: on a seeded URL (`/chat?p=…&autosend=1`)
+> that fails `new-session` into fallback mode, the plan did no `hydrate`/`replace`,
+> so the seed params lingered in the address bar through the 2–90s lazy-create
+> send — a mid-send refresh would replay the seed, or (if the fallback didn't
+> autosend) the original click would be dropped. Fixed: on the seeded fallback
+> path the page **captures the seed at mount, synchronously strips the seed
+> params with `window.history.replaceState('/chat')` even without a `cid`, then
+> still autosends** the seed via lazy-create. Scope: `/chat` bootstrap only.
+>
+> **Rev 19 — Codex round 16 resolution (2026-07-22, PR #22):**
+>
+> | # | Codex | Resolution |
+> |---|---|---|
+> | 22 | **Seeded fallback leaves `p`/`autosend` in the URL** — Rev 14/18 covered only the *bare*-load fallback; on a *seeded* URL that enters fallback, the plan did no `hydrate`/`replace`, so the seed params persist through the fallback send → a mid-send refresh replays the seed, or the click is dropped if the fallback doesn't autosend. | The seeded fallback path **captures the seed at mount**, **synchronously strips `p`/`ctx`/`autosend` via `window.history.replaceState('/chat')` even without a `cid`** (no replay on refresh), and **still fires the seeded `sendMessage(seed)`** with `conversationId: null` (click not dropped). TB5/T3 cover it. Completes the fallback matrix across **both** load types (bare + seeded). |
 >
 > **Rev 18 — Codex round 15 resolution (2026-07-22, PR #22):**
 >
@@ -386,9 +392,21 @@ optimistic-append send path. The redesign removes that entire class:
   **no** await and no bootstrap-promise option, so HomeHub's lazy chat
   (`usePlusimRuntime({})`, first send posts `conversationId: null`) is exactly
   as today — no shared send-path change, no special-case needed.
-- **Seeded autosend unaffected.** The `p`/`autosend` flow fires
-  `sendMessage(seed)` from the callback *after* `bootstrapReady`, and it is a
-  programmatic send, so the brief disabled state never blocks it.
+- **Seeded autosend — success AND fallback (Rev 19, Codex round 16).** On the
+  **success** path the `p`/`autosend` flow fires `sendMessage(seed)` from the
+  callback *after* `bootstrapReady`, by which point the synchronous
+  `window.history.replaceState(?cid)` has already stripped `p`/`ctx`/`autosend`;
+  it is a programmatic send, so the brief disabled state never blocks it. On the
+  **fallback** path (`new-session` failed → there is no `cid` to write) the seed
+  must neither be dropped nor left in the URL: the page **captures the seed text
+  at mount, before any URL edit**, then on entering fallback mode **synchronously
+  strips the seed params with `window.history.replaceState('/chat')` even without
+  a `cid`** — so a refresh during the 2–90s fallback send cannot re-enter the
+  autosend bootstrap and replay the seed — and **still fires `sendMessage(seed)`
+  with `conversationId: null`** (lazy-create) so the original click is not lost.
+  The `conversationId` effect then syncs `?cid` once `/api/chat` returns. TB5/T3
+  cover the seeded-fallback path (no seed replay on mid-send refresh; the seed
+  click is not dropped).
 - **Failure fallback covers ALL non-success outcomes (Rev 14, Codex round 11;
   Rev 18, Codex round 15).**
   The render gate hides every send affordance until `bootstrapReady`, so
@@ -623,7 +641,11 @@ phantom component tests.
   (`window.history.replaceState`) *before* the send, so even a refresh in the
   gap right after the send starts sees `?cid` (not `?p=…&autosend=1`); `ctx`
   still lands (stored by `new-session`). Explicitly exercise the
-  send-started-but-just-before-refresh timing.
+  send-started-but-just-before-refresh timing. **Rev 19:** also exercise the
+  **seeded fallback** — when `new-session` fails on a seeded URL, the seed params
+  are stripped synchronously (`replaceState('/chat')`) *before* the lazy-create
+  send, so a mid-fallback-send refresh sees no `?p=…&autosend=1` and does not
+  replay; and the seed still sends (not dropped).
 - **T9** (carried, transformed; automated route test): `/api/chat` stays
   **lookup-only** — a supplied unknown `conversationId` still 404s; no
   create-if-missing crept in. (Records constraint #1 as satisfied by design;
