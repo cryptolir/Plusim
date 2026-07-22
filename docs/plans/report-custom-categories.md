@@ -1,6 +1,6 @@
 # Plusim — Admin-defined report categories (DB-backed, global taxonomy extension)
 
-> **Status:** Draft — **Rev 2** (Codex round-1 folded). Nothing implemented yet.
+> **Status:** Draft — **Rev 3** (Codex round-2 folded). Nothing implemented yet.
 >
 > **Process** (self-contained — the canonical plan-review protocol lives in
 > `docs/PLAN_REVIEW_PROTOCOL.md`; AGENTS.md rule 0 forbids following cross-repo pointers, so the
@@ -43,6 +43,18 @@
 >     (`TAXONOMY_LEAVES` / `REPORT_TAXONOMY`) — a DB category assignable + verified yet missing from the
 >     picker/report, with the test still green. Resolved: the invariant now also asserts sites 6–7 by
 >     behavior — `test_assign_picker_includes_db_category` + `test_report_page_renders_db_category`.
+> - Rev 3 — Codex review round 2 (PR #20), one **P2** folded:
+>   - **line 315 — result-callback route glue untested.** The invariants pinned the manifest route and
+>     the pure verifier, but nothing pinned the one piece of glue that matters: the result callback
+>     actually passing the merged set. With `validLeaves` *defaulting* to base, an implementer writing
+>     `verifyAgentResult(result)` / `parseAgentResult(body)` would silently fall back to base-only — a
+>     DB leaf the agent legitimately used (from the manifest) becomes a **false FATAL** and DB-leaf
+>     proposed mappings are dropped — while every listed test stays green. Resolved two ways: (a) the
+>     `validLeaves` param is now **required** (no default), so a forgotten pass is a `pnpm typecheck`
+>     build error rather than a silent false-FATAL (Decision 4, B1); (b) a mocked route test —
+>     `test_result_callback_verifies_against_merged_set` — seeds a `ReportCategory`, POSTs a DB-leaf
+>     transaction + DB-leaf proposed mapping, and asserts the stored `verification.fatal === false` and
+>     the mapping survived.
 
 ## Context
 
@@ -116,11 +128,14 @@ or the fail-closed verifier.**
    `REPORT_TAXONOMY`'s section names (a Hebrew `<select>` in the UI). This keeps the manifest taxonomy
    well-formed (no invented sections) so the workbook's `Main` / `ניתוח תוצאות` / `התפלגות ההוצאות`
    sheets and `/report`'s section rows place it correctly. No custom sections in v1.
-4. **The verifier stays pure; the route is thin glue.** `verifyAgentResult` (and the proposed-mapping
-   filter in `parseAgentResult`) take a `validLeaves: Set<string>` parameter **defaulting to the base
-   `LEAF_SET`** (strict). The result callback route computes the merged set (one `await`) and passes
-   it. A route that forgets → falls back to base → *rejects* DB leaves (fail-closed), never accepts a
-   bad one. (PLAN_REVIEW_PROTOCOL §4 "pure + tested", "fail closed".)
+4. **The verifier stays pure; the route is thin glue — and the wiring is compiler-enforced.**
+   `verifyAgentResult` and the proposed-mapping filter in `parseAgentResult` take a **required**
+   `validLeaves: Set<string>` parameter (no default). The result callback route computes the merged set
+   (one `await getValidLeafSet()`) and passes it to both. Requiring the param rather than defaulting to
+   base is deliberate: a route that forgets to pass it is a **`pnpm typecheck` build error**, not a
+   silent base-only fallback that turns a legit DB leaf into a false FATAL (Codex round-2, line 315).
+   The pure fns never touch the DB; the route is the only glue that reads it. (PLAN_REVIEW_PROTOCOL §4
+   "pure + tested".)
 5. **The "add category" control lives once in the section header**, not per-row: an
    `➕ הוספת קטגוריה` button in the "ללא סיווג — הקצאת קטגוריות" section opens an inline Hebrew form
    (name input + section `<select>` + `הוספה`); on success the new leaf appears in every row's
@@ -186,14 +201,18 @@ change and no `AGENT_SETUP.md §7` re-install is part of this plan.
 
 ### Phase B — enforce the merged set at all seven consumers
 
-- **B1. Verifier (sites 1–2, `src/lib/reportResult.ts`).** Add a param:
-  `verifyAgentResult(result, validLeaves: Set<string> = LEAF_SET)` and
-  `parseAgentResult(body, validLeaves: Set<string> = LEAF_SET)`; replace the two `isTaxonomyLeaf(...)`
-  calls (:116, :159) with `validLeaves.has(...)`. Pure; default = base (strict, fail-closed).
+- **B1. Verifier (sites 1–2, `src/lib/reportResult.ts`).** Add a **required** param:
+  `verifyAgentResult(result, validLeaves: Set<string>)` and
+  `parseAgentResult(body, validLeaves: Set<string>)`; replace the two `isTaxonomyLeaf(...)` calls
+  (:116, :159) with `validLeaves.has(...)`. Pure. **No default** — every caller must pass a set, so the
+  result route (B2) can't silently fall back to base (Codex round-2). Existing `reportResult.test.ts`
+  callers are updated to pass an explicit set (clearer per-test intent anyway).
 - **B2. Result callback route** (`src/app/api/agent/jobs/[jobId]/result/route.ts:45-47`). Compute
   `const validLeaves = await getValidLeafSet();` once, pass to both `parseAgentResult` and
-  `verifyAgentResult`. This is the single place the merged set enters verification — and it is read at
-  callback time, ⊇ whatever the manifest served earlier (Decision 2).
+  `verifyAgentResult`. This is the single place the merged set enters verification — read at callback
+  time, so ⊇ whatever the manifest served earlier (Decision 2). This glue is the trust boundary: the
+  required param (B1) makes omission a build error, and `test_result_callback_verifies_against_merged_set`
+  (Verification) proves the *right* set is passed — a DB-leaf result verifies non-fatal end to end.
 - **B3. Manifest route (site 5, `…/manifest/route.ts:49`).** `taxonomy: REPORT_TAXONOMY` →
   `taxonomy: await getMergedTaxonomy()`. `/api/agent/**` change — the agent now receives base ∪ DB.
 - **B4. Admin category-validation routes (sites 3–4).** Replace `isTaxonomyLeaf(category)` with a
@@ -267,8 +286,10 @@ change and no `AGENT_SETUP.md §7` re-install is part of this plan.
 - **App↔agent skew.** Closed by Decision 2 (add-only ⇒ manifest set ⊆ verification set). Reviewer
   ask 1 is explicitly to find a counter-interleaving; if one exists, the fallback is the snapshot
   column we cut.
-- **Fail-open regression.** The pure verifier's default must stay `LEAF_SET` (base). A test pins that
-  calling it without a set treats a DB-only leaf as FATAL.
+- **Fail-open / false-FATAL regression.** The merged-set arg is **required** (no default), so a route
+  that omits it fails `pnpm typecheck` rather than silently falling back to base (which would turn a
+  legit DB leaf into a false FATAL). `test_result_callback_verifies_against_merged_set` pins the route
+  glue end to end. (Codex round-2.)
 - **Name hygiene / collision.** Trim + NFKC-normalize; reject base-leaf shadows and duplicates
   (`@unique` + pre-check). Prevents a near-duplicate Hebrew leaf that splits spend across two rows.
 - **Prod migration.** Additive `CREATE TABLE`, safe under `prisma migrate deploy` (README build
@@ -292,11 +313,18 @@ Verifier (`src/lib/reportResult.test.ts`, extended):
   containing it → **not** FATAL. (Core: no false FATAL for an added category.)
 - `test_verify_unknown_category_still_fatal` — a leaf in neither base nor the passed set → FATAL
   (fail-closed preserved).
-- `test_verify_default_valid_set_is_base_only` — `verifyAgentResult(result)` with **no** set treats a
-  DB-only leaf as FATAL (the strict default that makes a forgotten pass fail closed).
+- `test_verify_requires_explicit_valid_set` — `verifyAgentResult` / `parseAgentResult` take the valid
+  set as a **required** arg (no default): a DB-only leaf is FATAL / dropped when the passed set excludes
+  it, accepted when it includes it. (The old base-only default is gone — omission is a typecheck error,
+  not a runtime fallback; Codex round-2.)
 
 Routes (mocked `db` + auth, per the existing route tests):
 
+- `test_result_callback_verifies_against_merged_set` — **the trust-boundary glue test** (Codex
+  round-2). Seed a `ReportCategory` leaf; POST an agent result whose transaction *and* a proposed
+  mapping use that DB leaf; assert the stored `verification.fatal === false` (no false FATAL) and the
+  proposed `MerchantMapping` was created (not dropped by `parseAgentResult`). Proves B2 passes the
+  merged set — not base — through the real route.
 - `test_assign_accepts_db_category` / `test_assign_rejects_unknown` — assign route (site 3) `200` for
   a category present in `ReportCategory`, `400` for an absent one.
 - `test_mapping_approve_accepts_db_category` — mapping route (site 4) `200` for a DB leaf.
