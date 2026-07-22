@@ -1,11 +1,17 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 5 — RE-REVIEW REQUESTED** (plan PR). Codex round 3 (3rd
-> consecutive round on the multi-tab completion edge) landed 1 P2. Rev 5
-> replaces the patch-on-patch with a **terminal** rule that ends the ambiguity
-> (the schema has no reply-linkage, so multi-tab is scoped best-effort rather
-> than chased). Round 3 of the 4-round circuit-breaker. Scope: `/chat`
-> bootstrap only.
+> **Status:** 🔍 **Rev 6 — RE-REVIEW REQUESTED** (plan PR). Codex round 4
+> landed 1 P2 — in a **different** area (P1b title write), i.e. the multi-tab
+> pickup thread **terminated** at Rev 5 (all 5 prior threads outdated). Round 4
+> is the circuit-breaker threshold; folded with the owner flagged, since the
+> churning thread converged and this was a distinct, trivial atomic-update fix
+> (not the non-convergence the breaker guards). Scope: `/chat` bootstrap only.
+>
+> **Rev 6 — Codex round 4 resolution (2026-07-22, PR #22):**
+>
+> | # | Codex P2 | Resolution |
+> |---|---|---|
+> | 6 | **P1b title fill isn't concurrency-safe** — the `!conversation.title` check reads the request-start row, so two overlapping `/api/chat` requests on a null-title conversation both write and the later overwrites the first, violating "existing title never overwritten". | The fill becomes DB-atomic: `updateMany({ where: { id, title: null }, data: { title } })` — the `title: null` filter enforces first-writer-wins; the second request updates zero rows. In-memory check stays as an early-out. TB4 adds the stale-null race. |
 >
 > **Rev 5 — Codex round 3 resolution (2026-07-22, PR #22):**
 >
@@ -136,8 +142,19 @@ best-effort **and unreachable after a failed first turn**: the user message
 persists before a 502, so the retry sees `_count.messages = 1` →
 `isFirstMessage` false → **permanently null title** in the recent list. Fix:
 drop `isFirstMessage &&` — fill whenever `title` is null, from whatever turn
-finally succeeds. `bookkeeping.test.ts` T4 (null → fills) and T4b (existing →
-skips) stay green under this change.
+finally succeeds.
+
+**The fill must be ATOMIC (Rev 6, Codex round 4).** The `!conversation.title`
+check reads the row loaded at request start; two overlapping `/api/chat`
+requests on a still-null-title conversation would both see null and both
+write, the later finishing one overwriting the first — violating "existing
+title is never overwritten". So the write is a DB-atomic guard:
+`db.conversation.updateMany({ where: { id, title: null }, data: { title } })`
+(the `where: { title: null }` is what actually enforces first-writer-wins;
+the second request's filter matches zero rows). The in-memory
+`!conversation.title` stays only as a cheap early-out. `bookkeeping.test.ts`
+T4/T4b stay green (mocks move `update` → `updateMany`); TB4 adds the stale-null
+race (two overlapping fills → exactly one title, never overwritten).
 
 **P2 — bounded pending-reply pickup (constraint #2), implemented INSIDE
 `usePlusimRuntime` (Rev 2).** The hook exports exactly
@@ -321,7 +338,11 @@ phantom component tests.
   poll stops, `isRunning` false, in-flight final fetch discarded.
 - **TB4** (new, automated — guards P1b): a null-title conversation is titled
   by **any** successful turn (not just the first); an existing title is never
-  overwritten. (`bookkeeping.test.ts` T4/T4b stay green.)
+  overwritten; and the write is **atomic** — the `updateMany` carries
+  `where: { title: null }`, so a second overlapping request that read the
+  stale null row updates zero rows (stale-null race → exactly one title,
+  never clobbered). (`bookkeeping.test.ts` T4/T4b stay green with `update` →
+  `updateMany`.)
 - Manual E2E (dev tunnel): home-hub prompt click → exactly one conversation,
   URL `cid` correct after reload; refresh mid-wait → typing indicator
   reappears, **Stop button actually stops it**, and the reply surfaces when
