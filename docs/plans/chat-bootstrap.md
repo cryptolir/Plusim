@@ -1,11 +1,20 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 16 — RE-REVIEW REQUESTED** (plan PR). Codex round 13
-> caught a Next 16 gotcha (distinct area): `router.replace` commits the URL in a
-> React transition, so "strip the seed params before the send" wasn't
-> synchronous — a refresh in the gap could replay the seed. Fixed by committing
-> the `?cid` URL synchronously via `window.history.replaceState` (Next-16-synced,
-> confirmed in vendored docs) before the send. Scope: `/chat` bootstrap only.
+> **Status:** 🔍 **Rev 17 — RE-REVIEW REQUESTED** (plan PR). Codex round 14
+> landed the review's **first P1**: the render gate started `false` until
+> `new-session` resolves, but a `/chat?cid` reload never calls `new-session`, so
+> as written the gate would strand every existing conversation + the P2 pickup
+> behind the placeholder forever. Fixed: the gate applies **only to the bare
+> no-`cid` load** (`bootstrapReady = Boolean(cidParam)`). Plus a P2: the
+> fallback URL-sync now uses the same synchronous `window.history.replaceState`
+> as Rev 16. Both folded. Scope: `/chat` bootstrap only.
+>
+> **Rev 17 — Codex round 14 resolution (2026-07-22, PR #22):**
+>
+> | # | Codex | Resolution |
+> |---|---|---|
+> | 19 (**P1**) | **Render gate strands `?cid` loads** — the gate starts `bootstrapReady=false` until `new-session` resolves, but a `/chat?cid` reload takes the `cidParam` branch and never calls `new-session`; every existing conversation + the P2 mid-wait pickup would stay behind the placeholder forever. | The gate applies **only to the bare no-`cid` load**: `bootstrapReady = Boolean(cidParam)` — **true immediately on the `?cid` path** (renders + hydrates + pickup at once), false only on bare load until the id is minted. |
+> | 20 (P2) | **Fallback URL-sync still used `router.replace`** — same Next 16 transition gap Rev 16 fixed for seeded sends; a refresh right after the response could reload `/chat` without `cid`. | The fallback `conversationId` effect commits with synchronous `window.history.replaceState`. |
 >
 > **Rev 16 — Codex round 13 resolution (2026-07-22, PR #22):**
 >
@@ -335,12 +344,22 @@ choice spawned four consecutive review rounds — it leaked into the URL sync
 optimistic-append/cancel window (round 8) — because the guard lived on a shared,
 optimistic-append send path. The redesign removes that entire class:
 
-- **Invariant:** on a bare `/chat` load, **no send can be initiated from ANY
-  entry point until the server-minted `cid` is installed in the runtime and the
-  URL.** The `/chat` page tracks `bootstrapReady` (false until `new-session`
-  resolves, `hydrate([], id)` installs the id, and `router.replace(?cid=id)`
-  runs). Because nothing can send before the id exists, there is no null-id send
-  and nothing to clobber — the callback simply does its normal `hydrate([], id)`
+- **The gate applies ONLY to the bare (no-`cid`) load (Rev 17, Codex P1).**
+  A `/chat?cid=…` reload takes the existing `cidParam` branch and **never calls
+  `new-session`** — the id already exists. So `bootstrapReady` is initialized
+  `Boolean(cidParam)`: **true immediately on the `?cid` path** (existing
+  conversations, deep links, and the P2 mid-wait pickup all render and hydrate
+  at once — they are NOT gated), and **false only on the bare no-`cid` path**
+  until the id is minted. Gating the `?cid` path would strand every existing
+  conversation behind the placeholder forever — the render gate must not touch
+  it.
+- **Invariant (bare load only):** on a bare `/chat` load, **no send can be
+  initiated from ANY entry point until the server-minted `cid` is installed in
+  the runtime and the URL.** `bootstrapReady` flips true once `new-session`
+  resolves, `hydrate([], id)` installs the id, and the synchronous
+  `window.history.replaceState(?cid=id)` (Rev 16) runs. Because nothing can send
+  before the id exists, there is no null-id send and nothing to clobber — the
+  callback simply does its normal `hydrate([], id)`
   + `replace`. The await, the "skip hydrate/replace if a send started", the
   cancel-during-wait state, and the optimistic-append orphan (rounds 5–8) **all
   dissolve**.
@@ -372,11 +391,14 @@ optimistic-append send path. The redesign removes that entire class:
   mode** (no `hydrate`/`replace`; the first send lazy-creates with
   `conversationId: null` → `/api/chat` creates). Never a permanently-inert page.
 - **The fallback (lazy-create) send syncs the URL as soon as an id exists
-  (Rev 14).** On the fallback path the send posts `conversationId: null` and the
-  runtime stores the returned id in hook state; the `/chat` page adds an
+  (Rev 14 → Rev 17).** On the fallback path the send posts `conversationId: null`
+  and the runtime stores the returned id in hook state; the `/chat` page adds an
   **effect watching the runtime's `conversationId`** — when it becomes non-null
-  and the URL has no matching `cid`, `router.replace(?cid=<id>)`. No-op on the
-  normal path (the callback already set the URL).
+  and the URL has no matching `cid`, it commits via **synchronous
+  `window.history.replaceState(?cid=<id>)`** (Rev 17, Codex — same Next 16
+  transition gap Rev 16 closed for seeded sends; `router.replace` here would let
+  a refresh right after the response still reload `/chat` without `cid`). No-op
+  on the normal path (already URL-synced).
 - **Residual: the fallback's *during-send* window is a documented degraded-mode
   limitation (Rev 15, Codex round 12).** On the fallback path the id is minted
   **server-side by `/api/chat`**, which persists the user row and then waits on
@@ -617,7 +639,9 @@ phantom component tests.
   stale null row updates zero rows (stale-null race → exactly one title,
   never clobbered). (`bookkeeping.test.ts` T4/T4b stay green with `update` →
   `updateMany`.)
-- **TB5** (P1c — page-level render gate, Rev 11 → Rev 13): while
+- **TB5** (P1c — page-level render gate, Rev 11 → Rev 17): a **`/chat?cid`
+  load is `bootstrapReady` immediately** (`Boolean(cidParam)` — renders and
+  hydrates at once, never gated: the round-14 P1); on a **bare** load, while
   `bootstrapReady` is false **no send entry point is active — neither the
   composer NOR the welcome suggestions** (`SuggestionPrimitive.Trigger`), so no
   send fires without a `cid` (one conversation, no null-id create, no clobber)
