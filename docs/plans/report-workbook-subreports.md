@@ -1,6 +1,6 @@
 # Plusim — Report workbook sub-reports (ניתוח תוצאות · התפלגות ההוצאות · טופס עזר למיפוי · חישוב יעדים)
 
-> **Status:** Draft — **Rev 2**, Codex round-1 findings folded in; awaiting re-review.
+> **Status:** Draft — **Rev 3**, Codex round-2 findings folded in; awaiting re-review.
 > Nothing implemented yet.
 >
 > **Process** (self-contained — the canonical plan-review protocol doc lives outside
@@ -26,6 +26,14 @@
 >   `test_distribution_follows_dynamic_average_column`. **P2** — the status header
 >   pointed at a protocol file in a sibling repo that Plusim's hard boundary forbids
 >   reading. Resolved: replaced with the self-contained Process summary above.
+> - Rev 3 — Codex review round 2 (PR #14): **P2** — B3's "copy verbatim from the demo
+>   workbook" was unreproducible from a clean checkout (the workbook is not in the
+>   repo). Resolved: the form's full content is transcribed in the Appendix; B3 builds
+>   from it. **P2** — the pre-merge E2E required an AgentGlob round-trip that would
+>   still run the *old* workspace skill (re-install happens post-merge in C4).
+>   Resolved: pre-merge verification is now local-only (dry-run + recalc + manual
+>   Drive-import spot-check of chart conversion); the full runtime round-trip moved
+>   into the post-merge C4 checklist.
 
 ## Context
 
@@ -198,10 +206,10 @@ All changes in `agent/skills/plusim-reports/` unless noted.
   (`DataLabelList(showCatName=True, showPercent=True)`), **legend removed**
   (`chart.legend = None`) — matching the template's chart XML — anchored beside the
   table (template anchor ≈ `G6`). Row count follows the taxonomy — never hardcoded 10.
-- **B3. `טופס עזר למיפוי`.** Static replica of the template sheet (insurer lists,
-  standing-orders section, ATM/telecom/child-allowance/fees questions with default `לא`,
-  bank + non-bank loan tables, credit-card checklist) from a module-level constant —
-  content copied verbatim from the demo workbook, RTL, no formulas.
+- **B3. `טופס עזר למיפוי`.** Static replica of the template sheet from a module-level
+  constant, RTL, no formulas. The exact content is transcribed in the **Appendix**
+  below (the demo workbook itself is not in the repo — the appendix is the reproducible
+  source of truth an implementer builds the constant from).
 - **B4. `חישוב יעדים`.** Target amount/age inputs (`D1`, `F1` — `D1` in `₪` format),
   six blank child rows with the template's formula chain, each division guarded:
   `=IF(H<r>>0, $D$1/H<r>, "")` (blank rows must not render `#DIV/0!`); a `סה"כ` row
@@ -223,10 +231,14 @@ All changes in `agent/skills/plusim-reports/` unless noted.
   cases in **Verification** below.
 - **C4. Ops (post-merge):** re-install the changed skill files into the onlyclaw
   workspace per `AGENT_SETUP.md` §7 (repo `agent/skills/…` → workspace `skills/…`),
-  verify with `py_compile` + git-blob SHA; then re-run the verified baseline
-  (`docs/REPORTS_PIPELINE.md` — real statements, PII, operator-only) and confirm the
-  regenerated workbook's totals still reconcile to the agora and LibreOffice recalc
-  reports zero formula errors.
+  verify with `py_compile` + git-blob SHA; **then** run the full runtime round-trip —
+  dev job through AgentGlob → result callback → publish → open the exported Google
+  Sheet and confirm the pie chart and cross-sheet values survived Drive conversion —
+  and re-run the verified baseline (`docs/REPORTS_PIPELINE.md` — real statements, PII,
+  operator-only), confirming totals still reconcile to the agora. The round-trip lives
+  here, not in pre-merge verification, because before the re-install onlyclaw still
+  runs the old workspace copy and a "green" round-trip would prove nothing about the
+  new code.
 
 ## Non-goals
 
@@ -313,15 +325,44 @@ Unit (`scripts/test_build_report_xlsx.py`, synthetic transactions, runs with ven
 - `test_size_under_caps` — a 5000-transaction build stays far below the 15MB decoded /
   20M-char base64 caps (`reportResult.ts:109,226`).
 
-Manual E2E (dev server, before merge of the implementation PR):
+Manual E2E, pre-merge (dev server, local only — the runtime still runs the *old*
+workspace skill until C4's re-install, so nothing here may depend on AgentGlob):
 
 - `run_job.py finalize --dry-run` on sample statements → open the workbook, LibreOffice
   recalc → **zero formula errors**; spot-check that analysis numbers equal the month
   sheets they reference.
-- Full dev-job round-trip → publish → open the exported Google Sheet → pie chart and
-  cross-sheet values survived conversion.
-- Operator re-run of the verified baseline (109 tx, totals to the agora) per
-  `docs/REPORTS_PIPELINE.md`.
+- Manually import the dry-run workbook into Google Drive (xlsx → Sheets conversion) →
+  pie chart and cross-sheet values survived conversion.
+
+Manual E2E, post-merge (moved to C4 — Codex round-2): skill re-install, full AgentGlob
+dev-job/publish round-trip, and the operator re-run of the verified baseline (109 tx,
+totals to the agora) per `docs/REPORTS_PIPELINE.md`.
 
 Regression rule: a workbook built from the same transactions as today differs **only**
 by the appended income block and the four new sheets.
+
+## Appendix — `טופס עזר למיפוי` verbatim content
+
+Transcribed cell-by-cell from the demo workbook (the workbook itself is not in the
+repo; this appendix is the source the B3 constant is built from). `(r,c)` = row,
+column; blank cells omitted; the sheet is RTL with no formulas. Contains no household
+data — it is the advisor's generic intake checklist.
+
+| Rows | Content |
+|---|---|
+| 1-2 | A1 `כמות קופת חולים ` · A2 `שם קופת חולים ` |
+| 4 | A `ביטוחים חיים בריאות ` · B-H each `סכום ` |
+| 5-12 | A: `הראל`, `מגדל`, `כלל`, `פניקס`, `מנורה `, `הכשרת הביטוח`, `AIG`, `ביטוח ישיר` |
+| 15 | A `ביטוחים אלמנטרי- רכב דירה ` · B-H each `סכום ` |
+| 16-24 | A: `הראל`, `מגדל`, `כלל`, `פניקס`, `מנורה `, `הכשרת הביטוח`, `איילון`, `AIG`, `ביטוח ישיר` |
+| 26 | A `הוראות קבע שיורדות מהבנק ` |
+| 32 | A `ריבוי משיכות  מכספומט פרטי ` · B `לא` |
+| 34 | A `חיובי תקשורת גבוהים ` · B `לא` · C `חברות תקשורת ` |
+| 36 | A `קצבת ילדים` · B `לא` · C `סכום קיצבה משולם` · E `סכום קיצבה מקורי ` · G `חיסכון לכל ילד ` |
+| 38 | A `חיובי עמלות גבוהים ` · B `לא` · F `כמות כרטיסי אשראי ` |
+| 40 | A `הלוואות בנקאיות ` · B `סכום ההלוואה ` · C `תשלום חודשי ` · D `אחוז ריבית ` · F `כרטיסי אשראי ` · G `כמות ` |
+| 41-48 | A: `דיסקונט`, `פועלים`, `מסד`, `יהב`, `לאומי`, `בנק ירושלים`, `מזרחי`, `אוצר החייל ` — and F41-F45: `ויזה כאל `, `מקס לאומי קארד`, `ישראכרט`, `דיינרס`, `AMX` |
+| 50 | A `הלוואות חוץ בנקאיות ` · B `סכום ההלוואה ` · C `תשלום חודשי ` · D `אחוז ריבית ` |
+| 51-60 | A: `ויזה כאל `, `מקס לאומי קארד`, `ישראכרט`, `דיינרס`, `AMX`, `ליסינג בחברת ___________`, `מימון ישיר `, `פמה `, `הלוואה חברתית ב__________`, `גמ"ח ____________________` |
+
+(`test_mapping_helper_static_content` asserts the built sheet matches this table.)
