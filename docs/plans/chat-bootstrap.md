@@ -1,11 +1,17 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 3 — RE-REVIEW REQUESTED** (plan PR). Codex round 1
-> landed 2 P2s on the P2 pickup; both folded. The follow-up plan promised by
-> the chat-latency plan's Rev 7 descope (`docs/plans/chat-latency.md`). Scope:
-> the `/chat` bootstrap only — the smallest design that fixes the known bug and
-> satisfies the three constraints banked from the latency plan's review rounds
-> 4–5.
+> **Status:** 🔍 **Rev 4 — RE-REVIEW REQUESTED** (plan PR). Codex round 2
+> landed 2 more P2s, both tightening Rev 3's own pickup fixes (round 2 of the
+> 4-round circuit-breaker). The follow-up plan promised by the chat-latency
+> plan's Rev 7 descope (`docs/plans/chat-latency.md`). Scope: the `/chat`
+> bootstrap only.
+>
+> **Rev 4 — Codex round 2 resolution (2026-07-22, PR #22):**
+>
+> | # | Codex P2 | Resolution |
+> |---|---|---|
+> | 3 | **"Any row after the pending id" completes too eagerly** — a second tab/device appending another *user* row to the same conversation would satisfy it and stop the pickup before the reply exists. | Completion now requires an **`assistant` row after the pending turn**; a trailing *user* row (multi-tab) keeps polling. |
+> | 4 | **Bounded final fetch drops the last-interval reply** — a reply written just before the deadline resolves ~1 RTT *after* it; Rev 3 ignored that late response, reintroducing the miss the final fetch exists to close. | Split concerns: the **spinner** is bounded (`isRunning` cleared at the deadline regardless), but the final fetch's **result still hydrates** if it returns the reply just after the deadline. Only cancel / a new send discards it. |
 >
 > **Rev 3 — Codex round 1 resolution (2026-07-22, PR #22):**
 >
@@ -144,25 +150,34 @@ turn**:
   overrun at one window; if `remaining` is ~0/negative (stale turn or
   ahead-skew), do **one immediate history re-fetch, then stop** — never skip
   entirely, never poll longer than one window.
-- **Completion is keyed to the PENDING turn, not "any assistant row" (Rev 3,
-  Codex P2):** a multi-turn conversation's history already contains **older**
-  assistant rows, so "an assistant row exists" would make the first poll stop
-  instantly and re-hydrate the same still-pending transcript — the reply stays
-  invisible. Capture the pending user turn's `id` (and `createdAt`) at
-  bootstrap; **completion = the last row is no longer that pending user turn**
-  (equivalently: a row exists after the captured pending id). Only then →
-  wholesale `hydrate(allRows, cid)` replace (idempotent — no append/dedupe),
-  `isRunning = false`.
+- **Completion requires an ASSISTANT row after the pending turn (Rev 3 →
+  Rev 4, Codex P2):** a multi-turn history already contains **older**
+  assistant rows, so "an assistant row exists" is wrong (first poll stops
+  instantly on a stale transcript). But "any row after the captured pending
+  id" is **also** wrong (Rev 4): a second tab/device can append **another
+  user** row to the same conversation via `/api/chat`, and that would satisfy
+  "a row after the pending id" and stop the pickup before the reply exists.
+  So capture the pending user turn's `id`/`createdAt` at bootstrap and define
+  **completion = an `assistant` row exists after the captured pending turn**;
+  if the next row is another **user** turn, **keep polling** (until that
+  turn's own window, if it becomes the new pending turn, or the deadline).
+  On completion → wholesale `hydrate(allRows, cid)` replace (idempotent — no
+  append/dedupe), `isRunning = false`.
 - **While in the window:** `isRunning = true` (the typing indicator + 15s
   caption render for free, `thread.tsx:83-85`), re-fetch `/api/chat/history`
   every ~5s and apply the completion check above.
-- **Final fetch at the deadline — itself bounded (Rev 3, Codex P2):** before
-  stopping, one last history fetch, but a slow/hung final request must not
-  hold `isRunning` past the window. So the final fetch carries its own
-  `AbortSignal.timeout` **and** `isRunning` is cleared at the deadline
-  **regardless** of whether that fetch settles — the bounded-pickup invariant
-  holds even on a stalled history request. A late-arriving final response is
-  ignored once the pickup has stopped.
+- **Final fetch at the deadline — bounded spinner, but it STILL hydrates
+  (Rev 3 → Rev 4, Codex P2):** separate two concerns. (a) The **spinner** is
+  bounded: `isRunning` is cleared at the deadline **regardless** of whether
+  the final fetch has settled, so a hung history request can't hold the UI
+  open (the final fetch carries its own `AbortSignal.timeout`). (b) The final
+  fetch's **result still hydrates**: a reply written just before the deadline
+  resolves ~1 RTT *after* it, so the final fetch's response — if it shows an
+  assistant row after the pending turn — is applied via `hydrate(allRows,
+  cid)` **even though the spinner already stopped**. Only a pickup ended by
+  **cancel / a new send** (below) discards its in-flight result. This is the
+  whole point of the final fetch (catching the last-interval reply); dropping
+  its result would reintroduce the miss it exists to close.
 - **One shared cancel path (Rev 2 — fixes the pre-review P1-blocker):** while
   `isRunning` is true the composer shows the **Stop button**
   (`thread.tsx:213-218`), whose `onCancel` today only does
@@ -170,8 +185,11 @@ turn**:
   pickup ⇒ dead button, user locked into an unstoppable 95s thinking state.
   The pickup registers a `cancelPickup()` that `onCancel` **and** the top of
   `sendMessage` both call (Enter-key submits can reach `onNew` even while
-  Send is hidden): stop the poll, `isRunning = false`. Stops are therefore:
-  (a) assistant row arrives; (b) deadline (after the final fetch) — silently,
+  Send is hidden): stop the poll, `isRunning = false`, **and abort/ignore any
+  in-flight final fetch** (a new send owns the transcript now — this is the
+  only path that discards the final fetch's result). Stops are therefore:
+  (a) assistant row after the pending turn arrives; (b) deadline — spinner
+  stops but the bounded final fetch may still hydrate a last-interval reply;
   no speculative error copy for a failure we didn't observe; (c) user cancels
   or a new send starts.
 - The poll is **conditional** (only when a pending turn is detected at
@@ -262,14 +280,16 @@ phantom component tests.
   no existing test asserts this today.)
 - **TB1–TB3** (automated, against the extracted pure decision function):
   TB1 — last-row-user within the window ⇒ pickup with the clamped remaining
-  time; **completion is keyed to the pending turn**: a **mixed history** whose
-  last row is the pending user but which also contains older assistant rows
-  ⇒ **not** complete (must keep polling), and completion fires only once a row
-  exists after the captured pending id (Codex P2). TB2 — stale turn /
-  ahead-skew ⇒ exactly one immediate fetch then stop; behind-skew ⇒ remaining
-  clamped to one window; deadline ⇒ **`isRunning` cleared even if the final
-  fetch never settles** (Codex P2). TB3 — cancel (user cancel or new send) ⇒
-  poll stops, `isRunning` false.
+  time; **completion requires an assistant row after the pending turn**: a
+  **mixed history** with older assistant rows ⇒ not complete; a history whose
+  new trailing row is **another user** turn (multi-tab) ⇒ **not** complete,
+  keep polling; only an assistant row after the captured pending id completes
+  (Codex round 1+2). TB2 — stale turn / ahead-skew ⇒ exactly one immediate
+  fetch then stop; behind-skew ⇒ remaining clamped to one window; deadline ⇒
+  spinner (`isRunning`) cleared even if the final fetch never settles, **but a
+  final fetch resolving just after the deadline with the reply still hydrates
+  the transcript** (Codex round 2). TB3 — cancel (user cancel or new send) ⇒
+  poll stops, `isRunning` false, in-flight final fetch discarded.
 - **TB4** (new, automated — guards P1b): a null-title conversation is titled
   by **any** successful turn (not just the first); an existing title is never
   overwritten. (`bookkeeping.test.ts` T4/T4b stay green.)
