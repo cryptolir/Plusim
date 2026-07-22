@@ -9,6 +9,12 @@ import { buildLinkedFolderContext } from "@/lib/pastMeeting";
 const MAX_MESSAGE_LENGTH = 3000;
 
 export async function POST(req: NextRequest) {
+  // Phase 0: total timer starts at request ENTRY (before auth/rate-limit/parse)
+  // so `totalMs` captures the full server-visible wait and `authMs` stays
+  // recoverable as totalMs minus the named segments (Codex P2). The pre-agent
+  // DB segment is marked separately below (`tDbStart`).
+  const tStart = performance.now();
+
   const userId = await getCurrentUser();
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
@@ -41,6 +47,10 @@ export async function POST(req: NextRequest) {
       { status: 400 }
     );
   }
+
+  // Pre-agent DB segment starts here (after auth/rate-limit/parse/validate,
+  // which are captured in totalMs via the entry-time `tStart` above).
+  const tDbStart = performance.now();
 
   let conversation;
   if (conversationId) {
@@ -76,6 +86,7 @@ export async function POST(req: NextRequest) {
       content: message,
     },
   });
+  const tPreContext = performance.now();
 
   // First-message preamble (invisible to the user). Precedence preserves today's
   // behavior exactly: the "past_meeting" pin and plain conversations always get
@@ -97,6 +108,10 @@ export async function POST(req: NextRequest) {
     ? `<<<context>>>\n${hint}\n<<<end_context>>>\n\nUser said: ${message}`
     : message;
 
+  const tPreAgent = performance.now();
+  const dbBeforeAgentMs = Math.round(tPreContext - tDbStart);
+  const contextMs = Math.round(tPreAgent - tPreContext);
+
   let agentReply: string;
   let agentMessageId: string | undefined;
   try {
@@ -105,8 +120,23 @@ export async function POST(req: NextRequest) {
     agentMessageId = result.messageId;
   } catch (err) {
     console.error("callAgent error:", err);
+    console.info(
+      "chat_latency_error",
+      JSON.stringify({
+        conversationId: conversation.id,
+        isFirstMessage,
+        hasContext: Boolean(hint),
+        contextTimedOut: false,
+        dbBeforeAgentMs,
+        contextMs,
+        agentMs: Math.round(performance.now() - tPreAgent),
+        totalMs: Math.round(performance.now() - tStart),
+        outboundChars: outbound.length,
+      })
+    );
     return NextResponse.json({ error: "Agent unavailable. Please try again." }, { status: 502 });
   }
+  const tPostAgent = performance.now();
 
   // One timestamp shared by the recency bump and the view marker, so the chat
   // just used reads as updatedAt == lastViewedAt (never spuriously "unread").
@@ -137,6 +167,27 @@ export async function POST(req: NextRequest) {
       agentglobMessageId: agentMessageId ?? null,
     },
   });
+
+  const tEnd = performance.now();
+  // One `chat_latency` line per successful turn. `contextTimedOut` is always
+  // false until Phase B bounds the Drive context build; the field is emitted
+  // now so the log shape is stable across the phased rollout.
+  console.info(
+    "chat_latency",
+    JSON.stringify({
+      conversationId: conversation.id,
+      isFirstMessage,
+      hasContext: Boolean(hint),
+      contextTimedOut: false,
+      dbBeforeAgentMs,
+      contextMs,
+      agentMs: Math.round(tPostAgent - tPreAgent),
+      dbAfterAgentMs: Math.round(tEnd - tPostAgent),
+      totalMs: Math.round(tEnd - tStart),
+      outboundChars: outbound.length,
+      replyChars: agentReply.length,
+    })
+  );
 
   return NextResponse.json({
     conversationId: conversation.id,
