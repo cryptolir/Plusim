@@ -1,6 +1,6 @@
 # Plusim — Admin-defined report categories (DB-backed, global taxonomy extension)
 
-> **Status:** Draft — **Rev 1**. Nothing implemented yet.
+> **Status:** Draft — **Rev 2** (Codex round-1 folded). Nothing implemented yet.
 >
 > **Process** (self-contained — the canonical plan-review protocol lives in
 > `docs/PLAN_REVIEW_PROTOCOL.md`; AGENTS.md rule 0 forbids following cross-repo pointers, so the
@@ -29,6 +29,20 @@
 > - Rev 1 — authored from a file-anchored read of every taxonomy consumer (Context 2). Manual
 >   ponytail pass ran before handoff (see "Ponytail cuts"); I don't have the `/ponytail` skill in
 >   this environment, so the minimalism pass was done by hand and its cuts are listed explicitly.
+> - Rev 2 — Codex review round 1 (PR #20), two **P2**s folded:
+>   - **line 161 — merged-set derivation.** `mergedLeafSet` computed `base ∪ raw extra names` while the
+>     manifest used the section-*filtered* `mergeTaxonomy`; a `ReportCategory` row with an invalid
+>     `section` (bad seed/migration, or a create-route bug before a DB CHECK constraint exists) would be
+>     dropped from the manifest but kept in the verifier/admin valid set — breaking manifest↔verify
+>     equality and failing open for admin assignment on a leaf the agent was never shown. Resolved: A2
+>     now derives `mergedLeafSet` from the leaves of the **same** `mergeTaxonomy`, so both sides filter
+>     identically; banked as `test_mergedLeafSet_derives_from_merged_taxonomy` + an invalid-section case
+>     added to `test_manifest_and_verification_share_valid_set`.
+>   - **line 296 — invariant test too narrow.** `test_no_consumer_left_on_base_only_check` only banned
+>     bare `isTaxonomyLeaf`, so the UI/report consumers (sites 6–7) could silently stay base-only
+>     (`TAXONOMY_LEAVES` / `REPORT_TAXONOMY`) — a DB category assignable + verified yet missing from the
+>     picker/report, with the test still green. Resolved: the invariant now also asserts sites 6–7 by
+>     behavior — `test_assign_picker_includes_db_category` + `test_report_page_renders_db_category`.
 
 ## Context
 
@@ -158,7 +172,12 @@ change and no `AGENT_SETUP.md §7` re-install is part of this plan.
   - `mergeTaxonomy(base, extra: {name: string; section: string}[]): TaxonomySection[]` — clone base,
     append each extra leaf to its matching section's `leaves` (dedup; an extra whose section isn't in
     base is dropped defensively — create-time validation already forbids it). Pure, order-stable.
-  - `mergedLeafSet(extra): Set<string>` — `new Set([...TAXONOMY_LEAVES, ...extra.map(e => e.name)])`.
+  - `mergedLeafSet(extra): Set<string>` — the flattened leaves of `mergeTaxonomy(REPORT_TAXONOMY, extra)`
+    (**not** `TAXONOMY_LEAVES ∪ raw extra names`). Deriving it from the **same section-filtered merge**
+    the manifest uses is what makes the manifest set and the verifier/validation set provably identical:
+    an invalid-`section` row dropped from the manifest is dropped from the valid set too, so the two can
+    never diverge and the admin routes can't fail open on a leaf the agent was never shown. (Codex
+    round-1 P2, line 161.)
 - **A3. DB-backed accessors** in a new `src/lib/reportCategories.ts` (async; the only place that
   reads the table): `listExtraCategories()` → `db.reportCategory.findMany({orderBy:{createdAt:'asc'}})`;
   `getMergedTaxonomy()` → `mergeTaxonomy(REPORT_TAXONOMY, await listExtraCategories())`;
@@ -237,11 +256,14 @@ change and no `AGENT_SETUP.md §7` re-install is part of this plan.
 
 ## Risks / contingencies
 
-- **Guard-composition (the big one).** If any single site keeps the base-only `isTaxonomyLeaf` while
-  others use the merged set, a DB leaf passes one gate and fails another — either a false FATAL
-  (agent produced it, app rejects) or an un-assignable leaf (picker offers it, assign route `400`s).
-  Mitigation: the Context-2 table enumerates all seven; `test_no_consumer_left_on_base_only_check`
-  (below) and code review against that table are the guard.
+- **Guard-composition (the big one).** If any single site stays base-only while others use the merged
+  set, a DB leaf passes one gate and fails another — a false FATAL (agent produced it, app rejects), an
+  un-assignable leaf (picker offers it, assign route `400`s), or a leaf that verifies but never renders
+  in the picker/report. Note the base-only tell differs by consumer: validation sites (1–5) use
+  `isTaxonomyLeaf`; the UI/report sites (6–7) use the `TAXONOMY_LEAVES` / `REPORT_TAXONOMY` **constants**,
+  which a grep for `isTaxonomyLeaf` would miss (Codex round-1). Mitigation: the Context-2 table
+  enumerates all seven, and `test_no_consumer_left_on_base_only_check` covers 1–5 by source assertion
+  **and** 6–7 by behavior (picker + report render a DB leaf).
 - **App↔agent skew.** Closed by Decision 2 (add-only ⇒ manifest set ⊆ verification set). Reviewer
   ask 1 is explicitly to find a counter-interleaving; if one exists, the fallback is the snapshot
   column we cut.
@@ -289,11 +311,22 @@ Invariant (the review asks, banked as tests):
 
 - `test_manifest_and_verification_share_valid_set` — over the same `ReportCategory` rows, the manifest
   route's serialized taxonomy leaves (site 5) equal `getValidLeafSet()` (the set B2 feeds
-  verification). This is Review-ask 1 as an executable check.
-- `test_no_consumer_left_on_base_only_check` — a source-level assertion (grep-style test) that no
-  category-validation site still calls bare `isTaxonomyLeaf` for *runtime membership* except as the
-  documented strict default in `reportResult.ts` and the base-leaf-collision check in the create
-  route. This is Review-ask 2 as an executable check.
+  verification), **including a row with an invalid `section`**: that row is absent from BOTH (both derive
+  from the one filtered `mergeTaxonomy`, per A2), so the sets stay identical even on malformed data.
+  Review-ask 1 as an executable check. (Codex round-1 P2, line 161.)
+- `test_mergedLeafSet_derives_from_merged_taxonomy` — a `{name, section:"__nonexistent__"}` extra is in
+  neither `mergeTaxonomy`'s leaves nor `mergedLeafSet`; a valid-section extra is in both. Pins the
+  single-source derivation directly, independent of the route wiring.
+- `test_no_consumer_left_on_base_only_check` — the guard-composition invariant across **all seven**
+  sites, not only the `isTaxonomyLeaf` ones. Two parts: **(a)** no category-*validation* site (1–5)
+  calls bare `isTaxonomyLeaf` for runtime membership except the documented strict default in
+  `reportResult.ts` and the base-leaf-collision check in the create route (source-level assertion);
+  **(b)** the UI/report consumers (6–7) render from the merged source — asserted by **behavior, not
+  grep**, since they use the constants `TAXONOMY_LEAVES` / `REPORT_TAXONOMY` rather than
+  `isTaxonomyLeaf`: `test_assign_picker_includes_db_category` (the job-detail GET's `categoryLeaves`
+  and the rendered `<select>` contain a DB leaf) and `test_report_page_renders_db_category` (`/report`
+  section rows / by-leaf bucketing include a published DB-leaf txn). A static base-only import for the
+  category list would fail these. Review-ask 2 as an executable check. (Codex round-1 P2, line 296.)
 
 Manual (dev server, after owner-approved migration): add a Hebrew category in the review UI → it
 appears in the assign dropdown → assign it to an uncategorized row → dispatch a fresh job → confirm
