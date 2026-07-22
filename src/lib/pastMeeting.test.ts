@@ -5,7 +5,7 @@
  * resolves to null (never-throws contract) WITHOUT flagging a timeout; a build
  * that finishes in time returns the context.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("@/lib/db", () => ({
   db: { userDriveFolder: { findUnique: vi.fn(async () => ({ userId: "u", folderId: "f" })) } },

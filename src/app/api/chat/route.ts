@@ -53,12 +53,44 @@ export async function POST(req: NextRequest) {
   // which are captured in totalMs via the entry-time `tStart` above).
   const tDbStart = performance.now();
 
-  let conversation;
+  // C3: fields the route actually uses, plus the message count folded into the
+  // same fetch (`_count`) so no separate `message.count` query runs (−1 round
+  // trip/turn). Selecting `title` lets the post-agent title write be conditional.
+  let conversation: {
+    id: string;
+    userId: string;
+    sessionKey: string;
+    sectionContext: string | null;
+    title: string | null;
+  };
+  let isFirstMessage: boolean;
   if (conversationId) {
-    conversation = await db.conversation.findUnique({ where: { id: conversationId } });
-    if (!conversation || conversation.userId !== userId) {
+    const found = await db.conversation.findUnique({
+      where: { id: conversationId },
+      select: {
+        id: true,
+        userId: true,
+        sessionKey: true,
+        sectionContext: true,
+        title: true,
+        _count: { select: { messages: true } },
+      },
+    });
+    if (!found || found.userId !== userId) {
       return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
     }
+    // Prod always selects `_count`; the precedence test mocks findUnique without
+    // it, so default to 0 (a first message) rather than throwing — keeps
+    // isFirstMessage semantics identical to the old `message.count === 0`.
+    const priorMessages = found._count?.messages ?? 0;
+    isFirstMessage = priorMessages === 0;
+    conversation = {
+      id: found.id,
+      userId: found.userId,
+      sessionKey: found.sessionKey,
+      sectionContext: found.sectionContext,
+      title: found.title,
+    };
   } else {
     const id = crypto.randomUUID();
     const sessionKey = makeSessionKey(userId, id);
@@ -72,13 +104,11 @@ export async function POST(req: NextRequest) {
         sectionContext: sectionContext ?? null,
         title: message.slice(0, 80),
       },
+      select: { id: true, userId: true, sessionKey: true, sectionContext: true, title: true },
     });
+    // Just created — no prior messages by definition.
+    isFirstMessage = true;
   }
-
-  const existingMessages = await db.message.count({
-    where: { conversationId: conversation.id },
-  });
-  const isFirstMessage = existingMessages === 0;
 
   const userMessage = await db.message.create({
     data: {
@@ -151,27 +181,9 @@ export async function POST(req: NextRequest) {
   }
   const tPostAgent = performance.now();
 
-  // One timestamp shared by the recency bump and the view marker, so the chat
-  // just used reads as updatedAt == lastViewedAt (never spuriously "unread").
-  const now = new Date();
-  // Title on the first message only.
-  if (isFirstMessage) {
-    await db.conversation.update({
-      where: { id: conversation.id },
-      data: { title: message.slice(0, 80) },
-    });
-  }
-  // Bump updatedAt to `now` so the recent list orders by activity (creating a
-  // Message does NOT touch the parent Conversation). Raw SQL because Prisma's
-  // @updatedAt would override an explicit value with its own timestamp.
-  await db.$executeRaw`UPDATE "Conversation" SET "updatedAt" = ${now} WHERE "id" = ${conversation.id}`;
-  // Mark the conversation viewed (clears the "new activity" dot) with the same `now`.
-  await db.conversationView.upsert({
-    where: { conversationId: conversation.id },
-    create: { conversationId: conversation.id, lastViewedAt: now },
-    update: { lastViewedAt: now },
-  });
-
+  // C3: persist the reply FIRST — it's what the response needs and the durable
+  // record of the turn. If THIS write fails there is no reply to return and the
+  // route errors (as today); it is deliberately outside the best-effort block.
   const assistantMessage = await db.message.create({
     data: {
       conversationId: conversation.id,
@@ -181,10 +193,41 @@ export async function POST(req: NextRequest) {
     },
   });
 
+  // Post-reply bookkeeping is BEST-EFFORT: a transient DB failure here must
+  // never turn a saved reply into a client error (C3, Codex P2#2). One `now`
+  // is shared by the recency bump and the view marker so the chat just used
+  // reads as updatedAt == lastViewedAt (never spuriously "unread").
+  const now = new Date();
+  try {
+    // Conditional title: /api/chat sets it at creation, so this only fills a
+    // legacy null-title row (e.g. one created by /api/chat/new-session). It runs
+    // BEFORE the raw bump because its @updatedAt side-effect would otherwise
+    // race the explicit `now` and could leave updatedAt != lastViewedAt.
+    if (isFirstMessage && !conversation.title) {
+      await db.conversation.update({
+        where: { id: conversation.id },
+        data: { title: message.slice(0, 80) },
+      });
+    }
+    await Promise.all([
+      // Bump updatedAt to `now` so the recent list orders by activity (creating
+      // a Message does NOT touch the parent). Raw SQL because Prisma's
+      // @updatedAt would override an explicit value with its own timestamp.
+      db.$executeRaw`UPDATE "Conversation" SET "updatedAt" = ${now} WHERE "id" = ${conversation.id}`,
+      // Mark the conversation viewed (clears the "new activity" dot), same `now`.
+      db.conversationView.upsert({
+        where: { conversationId: conversation.id },
+        create: { conversationId: conversation.id, lastViewedAt: now },
+        update: { lastViewedAt: now },
+      }),
+    ]);
+  } catch (err) {
+    console.error("chat_bookkeeping_error:", err);
+  }
+
   const tEnd = performance.now();
-  // One `chat_latency` line per successful turn. `contextTimedOut` is always
-  // false until Phase B bounds the Drive context build; the field is emitted
-  // now so the log shape is stable across the phased rollout.
+  // One `chat_latency` line per successful turn. `dbAfterAgentMs` now covers the
+  // reply write + best-effort bookkeeping.
   console.info(
     "chat_latency",
     JSON.stringify({
