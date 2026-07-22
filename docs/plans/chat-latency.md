@@ -1,17 +1,20 @@
 # Plusim — chat latency: instrument, trim, and mask the wait
 
-> **Status:** 🔍 **Rev 7 — RE-REVIEW REQUESTED, DESCOPED** (plan PR). Codex
-> round 5 landed 2 new P2s, both consequences of Rev 6's `create-if-missing`
-> change — i.e. rounds 4–5 both churned in the same Phase C bootstrap area
-> while everything else stayed converged. Past the 4-round circuit-breaker,
-> this was escalated to the owner per §3, who chose **descope**: the C1/C2
-> `/chat` bootstrap rework leaves this plan for a dedicated follow-up plan
-> (`docs/plans/chat-bootstrap.md`, to be drafted — ideally sequenced with
-> Phase D streaming, which removes the long synchronous wait that makes
-> reload-resilience hard). **Shippable scope of THIS plan: Phases 0, A, B,
-> and C3.** No implementation yet.
+> **Status:** 🔍 **Rev 8 — RE-REVIEW REQUESTED** (plan PR). Codex round 6 (the
+> first round against the descoped Rev 7 scope) confirmed the descope held —
+> all 7 prior threads outdated — and landed **1 small P2 in the kept scope**
+> (A2's margin ignored post-agent work); folded with explicit owner go-ahead.
+> **Shippable scope: Phases 0, A, B, C3.** No implementation yet.
 >
-> **Rev 7 — Codex round 5 resolution (2026-07-22, PR #12, owner-directed):**
+> **Rev 8 — Codex round 6 resolution (2026-07-22, PR #12, owner-approved
+> fold):**
+>
+> | # | Codex P2 | Resolution |
+> |---|---|---|
+> | 8 | **Timeout margin stops at pre-agent work** — the route also awaits post-agent work (assistant create + C3 bookkeeping + response flush) before the fetch resolves; with the agent near the 90s ceiling, a client sized as `server + preprocessing` can still abort *after* the reply is saved but *before* the JSON arrives — recreating the saved-reply-shown-as-error race A2 removes. | **A2 invariant completed (Rev 8):** margin = server + **pre-agent + post-agent** budgets, the post-agent term sized from Phase 0's `dbAfterAgentMs` high percentile (already logged). **T6 extended.** Same mechanism, both sides of the agent call now covered. |
+>
+> **Rev 7 — Codex round 5 resolution (2026-07-22, PR #12, owner-directed
+> descope):**
 >
 > | # | Codex P2 | Resolution |
 > |---|---|---|
@@ -163,20 +166,31 @@ streaming, no runtime coupling. Deleted when SSE ships.
 **A2. Fix the timeout race — with the correct anchors.** The two 90s timers
 start at different points: the client's at fetch start
 (`plusimRuntime.ts:65`), the server's at `callAgent` start (`route.ts:103`) —
-i.e. *after* auth, DB writes, and the context build. The invariant is
-**client ≥ server + preprocessing budget**, where preprocessing =
-`bounded context (≤ 2.5s, B1) + auth + pre-agent Prisma writes`. Two of those
-terms are **not** abortable (Clerk `auth()`, the conversation fetch/create +
-user-message write), so the budget is **set from Phase 0 measurement, not
-assumed** (Rev 3, Codex P2#1): read the `dbBeforeAgentMs` + implied auth tail
-from the baseline, take a high percentile, and size the client margin =
-`2.5s + that`. With the code paths as they stand today that lands near the
-Rev 2 figure (~3–4s ⇒ client 95s vs server 90s), but the number is now
-**derived and asserted (T6/T8)**, not guessed — if Phase 0 shows a fatter
-preprocessing tail, the client constant widens to match. **Ship B1 with or
-before A2** (same PR — see Delivery). Both timeout values *and* the `2.5s`
-context deadline live in one shared const-only module (importable by the
-`"use client"` runtime and the route) so the three can't drift apart. Corrected failure model (Rev 2): on mutual timeout the server's
+i.e. *after* auth, DB writes, and the context build — **and the route keeps
+working after `callAgent` returns** (assistant-message create + C3
+bookkeeping + response flush) before the fetch can resolve. The invariant is
+therefore **client ≥ server + pre-agent budget + post-agent budget (Rev 8,
+Codex P2#8)** — the margin must cover *both* sides of the agent call, or an
+agent reply arriving near the 90s ceiling can still be produced-and-saved
+yet aborted client-side before the JSON lands (the exact "saved reply shown
+as error" race A2 exists to remove):
+- **pre-agent** = `bounded context (≤ 2.5s, B1) + auth + pre-agent Prisma
+  writes`. Two of those terms are **not** abortable (Clerk `auth()`, the
+  conversation fetch/create + user-message write).
+- **post-agent** = assistant create + best-effort bookkeeping + response
+  flush — Phase 0 logs this as `dbAfterAgentMs`.
+
+Both budgets are **set from Phase 0 measurement, not assumed** (Rev 3 P2#1 +
+Rev 8 P2#8): take a high percentile of `dbBeforeAgentMs` (+ implied auth
+tail) and of `dbAfterAgentMs` (+ flush slack) from the baseline, and size the
+client margin = `2.5s + both`. With the code paths as they stand today that
+still lands near the Rev 2 figure (~3–5s ⇒ client 95s vs server 90s — C3
+makes the post-agent side a single batched write path), but the number is
+**derived and asserted (T6/T8)**, not guessed — a fatter tail on either side
+widens the client constant to match. **Ship B1 with or before A2** (same
+PR — see Delivery). Both timeout values *and* the `2.5s` context deadline
+live in one shared const-only module (importable by the `"use client"`
+runtime and the route) so the constants can't drift apart. Corrected failure model (Rev 2): on mutual timeout the server's
 abort also fires, the route 502s, and **no** reply is written
 (`route.ts:106-108`) — a reply lands unseen only when the agent finishes
 inside the window between the two timeouts, or after a user cancel / network
@@ -449,9 +463,12 @@ implementation PR must contain these):**
   the C3 write ordering against the `@updatedAt` race.
 - **T5** (B1): slow/mocked-hanging Drive → context null within the bound and
   the send proceeds; non-timeout Drive errors still → null (never-throws).
-- **T6** (A2): unit-level assertion that the client timeout constant exceeds
-  the server constant by at least the preprocessing budget (single shared
-  module — the constants cannot drift).
+- **T6** (A2; **extended Rev 8, Codex P2#8**): unit-level assertion that the
+  client timeout constant exceeds the server constant by at least the
+  **pre-agent + post-agent** budgets combined (single shared module — the
+  constants cannot drift). The post-agent term is sized from Phase 0's
+  `dbAfterAgentMs` high percentile, so a reply produced near the server
+  ceiling still reaches the client before its abort.
 - **T7** (Codex round 1 P2#2): after the assistant message is persisted, a
   forced/mocked failure in the title update **and** in the raw-bump/view
   batch still returns the assistant message to the client (route resolves,
