@@ -1,7 +1,14 @@
 # Plusim — chat latency: instrument, trim, and mask the wait
 
-> **Status:** 🔍 **Rev 3 — RE-REVIEW REQUESTED** (plan PR). External Codex
-> round 1 landed 2 P2s; both folded below. No implementation yet.
+> **Status:** 🔍 **Rev 4 — RE-REVIEW REQUESTED** (plan PR). Codex round 2
+> landed 1 new P2 (a hole in Rev 3's own fix); folded below. No implementation
+> yet.
+>
+> **Rev 4 — Codex round 2 resolution (2026-07-22, PR #12):**
+>
+> | # | Codex P2 | Resolution |
+> |---|---|---|
+> | 3 | **Rev 3 overclaimed** — the inner `AbortSignal` cannot stop a hung `getAccessToken()`: it `await`s before any signaled fetch starts, so in the exact OAuth-hang case T8 banks there is no in-flight fetch to abort, and the refresh promise leaks/stacks past the outer race. | **B1 corrected + real bound added:** the signal is re-scoped to abort **in-flight Drive fetches only** (list/export), and the false "prevents that leak" claim is removed. The OAuth-refresh leak is closed by a **single-flight guard** on `getAccessToken()` (module-level shared in-flight promise — `getAccessToken` has no dedupe today, `googleDrive.ts:157-176`), capping it at **one** refresh no matter how many sends pile up; that one call warms `accessCache` and isn't cleanly cancellable (google-auth-library limitation), which the plan now states instead of hiding. **T8 rewritten.** |
 >
 > **Rev 3 — Codex round 1 resolution (2026-07-22, PR #12):**
 >
@@ -154,9 +161,9 @@ appear in the conversation (recent-chats list) shortly.
 
 ### Phase B — first-message overhead (linked-folder users)
 
-**B1. Bound the Drive context build — outer deadline for the time cap, inner
-signal against leaks (Rev 3, Codex P2#1).** Two mechanisms, each doing one
-job:
+**B1. Bound the Drive context build — outer deadline for the time cap, plus
+per-leak cleanup (Rev 3 → Rev 4, Codex P2#1/#3).** Three mechanisms, each
+doing one job:
 - **Outer bounded path caps total wall-clock.** Wrap the whole
   `buildLinkedFolderContext` call in `Promise.race([build, deadline(2500)])`
   (deadline resolves to null). This is what actually bounds preprocessing,
@@ -165,13 +172,33 @@ job:
   (`googleDrive.ts:178-180`) and which an inner fetch signal therefore
   cannot reach. On deadline: return null, proceed **without** context, log
   `contextTimedOut` (Phase 0).
-- **Inner `AbortSignal` prevents the leak the race would otherwise cause.**
-  A plain race abandons the losing promise — the OAuth → list → export chain
-  keeps running and can stack across sends. So still thread an optional
-  `AbortSignal` (tied to the same deadline) through `driveFetch` (it already
-  accepts `init`; the param stays optional so admin routes are untouched) to
-  actually abort the in-flight fetch when the deadline fires. The signal is
-  a **cleanup** device, not the time bound.
+- **Inner `AbortSignal` aborts in-flight Drive fetches only.** A plain race
+  abandons the losing promise — the list/export fetches keep running. So
+  thread an optional `AbortSignal` (tied to the same deadline) through
+  `driveFetch` (it already accepts `init`; the param stays optional so admin
+  routes are untouched) to abort an **in-flight Drive fetch** when the
+  deadline fires. Scope it honestly (Rev 4, Codex P2#3): this covers the
+  `listSummaries`/`getFileText` fetches — it does **not** reach a hung
+  `getAccessToken()`, because that `await`s *before* any signaled fetch
+  starts (`googleDrive.ts:178-180`), so in the OAuth-hang case there is no
+  fetch in flight for the signal to cancel. The signal is a **cleanup**
+  device for Drive fetches, not the time bound and not an OAuth-refresh
+  canceller.
+- **OAuth refresh leak — bounded by single-flight, not by the signal (Rev 4,
+  Codex P2#3).** In the `getAccessToken()`-hang case the outer race still
+  returns null on time (user-facing wait bounded), but the refresh promise
+  would run on in the background and, worse, *stack* — a second send with the
+  cache still cold kicks a **second** `client.getAccessToken()`. `getAccessToken`
+  today has no in-flight dedupe (`googleDrive.ts:157-176`: cache check →
+  refresh, no shared promise). Fix: a **single-flight guard** — a module-level
+  `refreshInFlight: Promise<string> | null` that concurrent callers await
+  instead of each starting their own refresh; cleared on settle. That caps it
+  at **one** in-flight refresh regardless of how many sends pile up, and when
+  it resolves it populates `accessCache` (so the work warms the cache, not
+  wasted). The single hung Google token call itself isn't cleanly cancellable
+  (google-auth-library doesn't plumb an abort signal through `getAccessToken()`),
+  and we do **not** pretend otherwise — it's one bounded call, de-duplicated,
+  time-capped for the user by the outer race.
 
 Non-timeout Drive errors keep today's never-throws → null contract
 (`pastMeeting.ts:36-38`); the race wrapper must not convert them into throws
@@ -344,11 +371,16 @@ Net ≈ −120 lines vs Rev 1 as specced.
   behavior verified against the vendored docs
   (`node_modules/next/dist/docs/`) before coding. (The `after()` half of
   this risk is gone with the `after()` cut.)
-- **B1 touches shared `driveFetch`:** the signal parameter is optional and
-  unthreaded callers (admin routes) are behavior-identical; verified by
-  typecheck + admin Drive smoke test. The signal is cleanup only — the outer
-  race is the time bound (Rev 3), so a caller that ignores the signal still
-  gets bounded via the wrapper.
+- **B1 touches shared `driveFetch` + `getAccessToken`:** the `driveFetch`
+  signal parameter is optional and unthreaded callers (admin routes) are
+  behavior-identical; verified by typecheck + admin Drive smoke test. The
+  signal is cleanup only — the outer race is the time bound (Rev 3), so a
+  caller that ignores it is still bounded via the wrapper. The
+  `getAccessToken` single-flight guard (Rev 4) is shared state on the hot
+  token path used by **every** Drive call incl. admin/reports — it must be
+  transparent on the happy path (cache hit → no guard involvement) and only
+  dedupe concurrent cold-cache refreshes; regression-checked by the admin
+  Drive smoke test + T8's single-refresh assertion.
 - **A2/B1 coupling:** the timeout invariant only holds with total
   preprocessing bounded — the outer race bounds the context build (incl. OAuth
   refresh) and the client margin is sized from Phase 0's measured non-Drive
@@ -388,12 +420,15 @@ implementation PR must contain these):**
   batch still returns the assistant message to the client (route resolves,
   not rejects) and emits `chat_bookkeeping_error`. A failure in the
   assistant-message create itself still errors (that path is *not* isolated).
-- **T8** (Codex round 1 P2#1): with `getAccessToken()` (OAuth refresh) mocked
-  to hang, `buildLinkedFolderContext` still resolves null within the outer
-  deadline (proves the bound covers the pre-fetch step, not just the Drive
-  fetch), and the in-flight fetch receives an abort (no leaked chain). Plus:
-  the client timeout margin ≥ measured preprocessing high-percentile
-  (asserted against the const module).
+- **T8** (Codex round 1 P2#1, **rewritten round 2 P2#3**): with
+  `getAccessToken()` mocked to hang, `buildLinkedFolderContext` resolves null
+  within the outer deadline (time bound covers the pre-fetch step). **Leak
+  scoping:** a mocked slow *Drive fetch* (list/export) receives an abort via
+  the signal; a hung *token refresh* does **not** (no fetch in flight) — and
+  N concurrent sends during a cold-cache refresh trigger **exactly one**
+  `client.getAccessToken()` (single-flight guard), which populates
+  `accessCache` on resolve. Plus: the client timeout margin ≥ measured
+  preprocessing high-percentile (asserted against the const module).
 
 **Also:**
 - Unit: context deadline fallback; `isFirstMessage` via `_count`;
