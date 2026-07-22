@@ -1,13 +1,18 @@
 # Plusim — chat latency: instrument, trim, and mask the wait
 
-> **Status:** 🔍 **Rev 5 — RE-REVIEW REQUESTED** (plan PR). Codex round 3
-> landed 1 new P2 (a hole in Rev 4's own fix — the 3rd consecutive round on
-> the OAuth-refresh-cancellation thread). Rev 5 replaces the patch-on-patch
-> with a **terminal** fix (a guaranteed-settling refresh) that ends the
-> recursion. Convergence note: this is review round 3 of the protocol's
-> 4-round circuit-breaker — if round 4 finds yet another hole in this same
-> area, it escalates to the owner instead of a 5th auto-fold. No implementation
-> yet.
+> **Status:** 🔍 **Rev 6 — RE-REVIEW REQUESTED** (plan PR). Codex round 4
+> landed 1 new P2 — in a **different** area (C1 bootstrap), i.e. the
+> OAuth-refresh thread terminated at Rev 5 (all 4 earlier threads now
+> `is_outdated`). This hit the protocol's **4-round circuit-breaker**; per §3
+> it was escalated to the owner, who directed to continue with the recommended
+> fix (client-mint the `cid`). Folded as Rev 6 with that explicit
+> authorization — not an unsupervised loop. No implementation yet.
+>
+> **Rev 6 — Codex round 4 resolution (2026-07-22, PR #12):**
+>
+> | # | Codex P2 | Resolution |
+> |---|---|---|
+> | 5 | **No `cid` in the URL during the long send** — C1 (Rev 2) stripped `p`/`autosend` before the send (T3) but only wrote `?cid=` *after* the 2–90s response, so a refresh mid-wait left a URL with neither param; the late-landed reply couldn't be hydrated and looked lost. The two fixes (T3 strip vs reload-hydrate T2) conflicted because the id didn't exist until after the call. | **C1 reworked (Rev 6):** mint the conversation id **client-side before the send** and `router.replace` `?cid=<id>` in *before* firing `/api/chat`, so the id is in the URL for the whole wait; a mid-wait refresh hydrates by `cid` and does not re-send. `/api/chat` gains a **create-if-missing** branch for a not-yet-existing supplied id (ownership guard unchanged — other-user id still 404s). Keeps C2's `new-session` deletion (id minted in-browser, no extra round trip). New test **T9**; T2/T3 updated. |
 >
 > **Rev 5 — Codex round 3 resolution (2026-07-22, PR #12):**
 >
@@ -269,23 +274,45 @@ wholesale, `chatPreamble.test.ts:26`).
 
 **C1. Blank `/chat` goes lazy** (align with `HomeHub.tsx:33`) — **and fixes
 the double-conversation bug** described in Context. Drop the
-`/api/chat/new-session` call from the no-`cid` mount path; render
-immediately; the first send hits `/api/chat` with no `conversationId`
-(already supported — mints id + sessionKey + title + `sectionContext` in one
-create). Two sequencing requirements (Rev 2):
-- **At autosend time**, `router.replace` strips `p`/`autosend` (preserving
-  `ctx`) *before/with* firing `sendMessage(seed)` — otherwise a refresh
-  during the 2–90s wait re-fires the seed into a second conversation (a
-  window today's flow doesn't have, T3).
-- **When the runtime's `conversationId` appears** (from the response), a
-  small effect syncs the URL to `?cid=<id>` — this is what makes
-  reload-after-first-send hydrate the thread that actually holds the
-  messages (T2). The existing `bootstrapped` ref pattern is kept
-  (strict-mode double-effect safety); `sectionContextRef` is assigned during
-  render (`plusimRuntime.ts:49`) before effects run, so `ctx` lands on the
+`/api/chat/new-session` call from the no-`cid` mount path; render immediately.
+**The conversation id is minted client-side *before* the send (Rev 6, Codex
+P2#5)** — not synced back from the response — which is what closes the
+orphaned-reply window:
+- **At send time (seed autosend or first composer send):** the client
+  generates the conversation UUID, `router.replace`s the URL to `?cid=<id>`
+  **before** firing the fetch (stripping `p`/`autosend`, preserving `ctx`),
+  then posts to `/api/chat` **with** that `conversationId`. So the `cid` is in
+  the URL for the entire 2–90s wait.
+- **A refresh/navigation mid-wait now lands on `?cid=<id>`** → the normal
+  `cid` bootstrap runs (`history` fetch → hydrate) and, crucially, does
+  **not** re-send (params already stripped). The reply — which `/api/chat`
+  persists server-side regardless — is reachable directly by that `cid`, not
+  orphaned. This resolves the Rev 2 conflict: T3 (strip params so no
+  re-send) and "reload must hydrate the right thread" (T2) are both satisfied
+  because the id exists up front instead of only after the response.
+- Rev 2's "sync `cid` after the response" step is **removed** (it was the
+  source of the gap). The `bootstrapped` ref is kept (strict-mode
+  double-effect safety); `sectionContextRef` is assigned during render
+  (`plusimRuntime.ts:49`) before effects run, so `ctx` still lands on the
   created conversation.
 
-`?cid` deep-link + `mark-viewed` behavior unchanged.
+**`/api/chat` contract change (create-if-missing).** Today the route 404s a
+`conversationId` it can't find (`route.ts:46-50`). Rev 6: a supplied id that
+**doesn't exist yet** is **created** (userId, `sessionKey =
+makeSessionKey(userId, id)`, `sectionContext`, first-message title) — the same
+create the no-id branch does, just on the client's id. Guards (T9): a supplied
+id that **exists but belongs to another user** still 404s (unchanged ownership
+check — never fall through to create, and `sessionKey`'s `@unique` +
+per-user namespacing means a guessed id can't hijack or collide). The no-id
+branch stays as a fallback. This keeps C2's `new-session` deletion (the id is
+minted in the browser, not via a server round trip) — laziness preserved, one
+fewer route, and a `cid` in the URL before the long call.
+
+`?cid` deep-link + `mark-viewed` behavior unchanged. Residual: a sub-second
+window between the client setting `?cid` and `/api/chat` persisting the row —
+a refresh *there* 404s the history fetch and shows an empty thread until the
+send completes; vastly smaller than the 2–90s agent wait it replaces, and
+self-heals on the next hydrate.
 
 **C2. Delete `/api/chat/new-session`.** Caller inventory verified complete:
 the chat page (`chat/page.tsx:44`) is the sole fetch caller and discards
@@ -424,12 +451,14 @@ implementation PR must contain these):**
 - **T1** (pre-review P1): `chatPreamble.test.ts` merges green **untouched** —
   incl. `:85` (`getSetting` never called on `past_meeting`); B2's conditional
   form is what makes this hold.
-- **T2** (bootstrap bug, found by both passes): E2E — seeded autosend visit
-  creates **exactly one** conversation; after the reply, reload of
-  `/chat?cid=<id>` hydrates the thread that holds the messages (today it
-  hydrates an empty placeholder).
-- **T3** (pre-review P2): refresh during the in-flight autosend wait does
-  **not** re-send the seed (params stripped at send time; `ctx` preserved).
+- **T2** (bootstrap bug, found by both passes; **updated Rev 6**): seeded
+  autosend visit creates **exactly one** conversation; the URL carries
+  `?cid=<id>` **before** the response (client-minted), and a reload
+  *during* or after the wait hydrates the thread that holds the messages
+  (today it hydrates an empty placeholder / an orphaned reply).
+- **T3** (pre-review P2; **updated Rev 6**): refresh during the in-flight
+  autosend wait does **not** re-send the seed (params stripped at send time)
+  **and** does not orphan the reply (URL already has `cid`); `ctx` preserved.
 - **T4** (pre-review P2): first message on a legacy null-title conversation →
   final `updatedAt == lastViewedAt` (no spurious "unread" on home) — guards
   the C3 write ordering against the `@updatedAt` race.
@@ -455,6 +484,14 @@ implementation PR must contain these):**
   also gets a bounded rejection, not an infinite await. Plus: the client
   timeout margin ≥ measured preprocessing high-percentile (asserted against
   the const module).
+- **T9** (Codex round 4 P2#5): `/api/chat` create-if-missing — a supplied
+  `conversationId` that **doesn't exist** is created for the caller (correct
+  `userId` + `sessionKey` + `sectionContext`) and replies; a supplied id
+  **owned by another user** 404s and creates nothing (no fall-through, no
+  `sessionKey` collision); a supplied id owned by the caller appends as a
+  normal follow-up turn (`isFirstMessage` false). Client-side: the URL holds
+  `?cid=<minted id>` before the fetch resolves, and a mid-wait reload hydrates
+  by that id without re-sending.
 
 **Also:**
 - Unit: context deadline fallback; `isFirstMessage` via `_count`;
