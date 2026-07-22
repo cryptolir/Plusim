@@ -1,6 +1,7 @@
 # Plusim — Update a ready report (append statements + re-run the same job)
 
-> **Status:** Draft — **Rev 1**, awaiting first Codex review. Nothing implemented yet.
+> **Status:** Draft — **Rev 2**, Codex round-1 findings folded; awaiting re-review.
+> Nothing implemented yet.
 >
 > **Process** (self-contained, per protocol): plan PR → adversarial review → each
 > review round becomes a new Rev on this branch with resolution notes (never
@@ -12,6 +13,26 @@
 > - Rev 1 — authored from a file-anchored read of the pipeline (routes, auth,
 >   UI, schema all quoted below). Ponytail pass ran before handoff (see
 >   "Ponytail cuts").
+> - Rev 2 — Codex review round 1 (PR #23): **P1** — a totally failed re-export
+>   (in-place update AND fallback create both failing) would keep serving the
+>   old Google Sheet link as current next to updated `/report` tables. Resolved:
+>   on re-publish, total export failure **clears `sheetUrl`** — no link until a
+>   later successful export; banked as `republish_failed_export_clears_sheet_url`.
+>   **P2** — root containment is not folder containment: a sheet moved into
+>   ANOTHER client's folder (or orphaned by folder reassignment) would be
+>   updated in place with this user's data. Resolved: the in-place path now
+>   requires `assertEntryUnderFolder(sheetId, currentFolder)` — the same binding
+>   the statement-read route uses (Context 7); any failure falls back to
+>   create-new in the assigned folder, best-effort trashing the old sheet;
+>   banked as `republish_sheet_outside_user_folder_falls_back`. **P1** — append
+>   refuses a running job, but run/publish could start mid-append and publish a
+>   report missing listed files (the `completedAt` guard postdates appended
+>   rows). Resolved: serialize **outcomes**, not requests — the publish guard
+>   compares against **`dispatchedAt`** and is enforced twice: a friendly
+>   pre-check AND the same predicate inside a conditional `updateMany` (the
+>   result route's proven pattern), so every interleaving degrades to a 409 +
+>   re-run, never a silently partial report; banked as
+>   `publish_with_unprocessed_files_409` + `publish_append_race_conditional_409`.
 
 ## Problem
 
@@ -133,6 +154,12 @@ Rollback on mid-loop Drive failure: trash only the **newly** uploaded Drive
 files and delete only the **newly** created rows — never the job, never
 pre-existing files (unlike create's job-delete at `route.ts:131-137`).
 
+**Race posture (Rev 2):** append takes no lock against a concurrent run or
+publish. Instead every bad interleaving is made harmless downstream: any row
+whose `createdAt` postdates the run's `dispatchedAt` trips the publish guard
+(C) — worst case is an explicit 409 + re-run, never a published report that
+silently omits files it lists.
+
 ### B. Run gate — allow a deliberate update of a published job
 
 `run/route.ts:34-36` changes from a flat 409 to:
@@ -162,25 +189,46 @@ Replace the `if (!sheetUrl)` skip (`publish/route.ts:51-53`) with:
 
 - `sheetUrl` set → parse the spreadsheet id from the URL (publish itself minted
   it as `https://docs.google.com/spreadsheets/d/<id>/edit`, `:70`), then
-  `assertEntryUnderRoot(id)` and **update the same spreadsheet in place** via a
-  new `googleDrive.ts` helper `updateXlsxSpreadsheet({ fileId, xlsx })` —
-  a `files.update` media upload (PATCH) with the xlsx body, mirroring
-  `uploadXlsxAsSpreadsheet` (`googleDrive.ts:315`) which already does the
-  create-side conversion. The user's bookmarked link stays valid and current.
-  (Verify the convert-on-update semantics against the Drive API during
-  implementation; the fallback below covers a refusal.)
-- Update fails (deleted / moved outside root / API refusal) → fall back to the
-  existing create-new path in the assigned folder and overwrite `sheetUrl`.
+  **`assertEntryUnderFolder(id, currentFolder.folderId)`** — the user's CURRENT
+  `UserDriveFolder`, the same binding the statement-read route enforces
+  (Context 7); root containment alone would allow updating a sheet that was
+  moved into another client's folder (Rev 2 — Codex P2). Only then **update the
+  same spreadsheet in place** via a new `googleDrive.ts` helper
+  `updateXlsxSpreadsheet({ fileId, xlsx })` — a `files.update` media upload
+  (PATCH) with the xlsx body, mirroring `uploadXlsxAsSpreadsheet`
+  (`googleDrive.ts:315`) which already does the create-side conversion. The
+  user's bookmarked link stays valid and current. (Verify the
+  convert-on-update semantics against the Drive API during implementation; the
+  fallback below covers a refusal.)
+- In-place path fails for any reason (not under the user's folder, deleted,
+  API refusal) → fall back to the existing create-new path in the assigned
+  folder, overwrite `sheetUrl`, and **best-effort trash the old spreadsheet**
+  (a stale sheet next to the new one is the same confusion as a stale link;
+  trash failure is ignored).
+- Both in-place update AND fallback create fail on a job that HAS a `sheetUrl`
+  → **clear `sheetUrl`** (and set `exportNote`): publish still succeeds, but
+  the old link is never served as current next to updated tables (Rev 2 —
+  Codex P1). First publish keeps today's semantics (no link existed, none
+  shown).
 - No `sheetUrl` → create-new path, unchanged.
-- Export remains best-effort exactly as today: any export failure sets
-  `exportNote`, never blocks publish.
+- Export remains best-effort exactly as today: an export failure never blocks
+  publish — it only downgrades or clears the link.
 
-**New publish guard — files newer than the last result:** refuse with 409 when
-`max(StatementFile.createdAt) > completedAt` — i.e. files were appended but the
-agent never ran over them. Without this, re-publish would silently ship a
-report that ignores statements the admin just uploaded (and the Sheet would be
-"updated in place" to the same stale content, making it look fresh). Fatal-
-verification 409 (`:34-44`) and token-clearing (`:92-94`) are unchanged.
+**New publish guard — files newer than the last dispatch:** refuse with 409
+when any `StatementFile.createdAt > dispatchedAt` — files the last run cannot
+have covered. `completedAt` is the wrong watermark: rows appended while a run
+is in flight land BEFORE the callback sets `completedAt` and would slip through
+(Rev 2 — Codex P1); `dispatchedAt` is conservative-correct (a file appended
+between dispatch and the agent's manifest fetch may 409 despite being
+processed — the remedy is the same visible re-run). Enforced twice:
+1. **Pre-check** before the export work → friendly 409, no wasted Sheet write.
+2. **Conditional publish write** — the final `update` becomes an `updateMany`
+   whose `where` carries `status ∈ (completed|needs_review|published)` AND
+   `files: { none: { createdAt: { gt: dispatchedAt } } }`; 0 rows ⇒ 409,
+   nothing published — closing the pre-check→update TOCTOU the same way the
+   result route closes the publish/result race (`result/route.ts:39-43`).
+
+Fatal-verification 409 (`:34-44`) and token-clearing (`:92-94`) are unchanged.
 
 ### D. UI — `ReportJobDetail.tsx` only
 
@@ -214,7 +262,8 @@ the same shapes as today.
    Drive files, no orphan rows, and never deletes the job or old files.
 3. **What the client sees is always an admin-published, verified artifact:**
    fatal verification still blocks publish; appended-but-unprocessed files now
-   also block publish; the exported Sheet always matches the stored artifact.
+   also block publish (race-proof via the conditional write); the exported
+   Sheet either matches the stored artifact or is not linked at all.
 4. **Append during a run is impossible** (manifest/files-list consistency).
 5. **Report formats unchanged** — `/report` rendering, xlsx workbook, Sheets
    export are the same code paths over the same shapes.
@@ -261,12 +310,22 @@ New `runUpdateGuard.test.ts`:
   token ⇒ 404.
 
 `publishGuard.test.ts` add:
-- `publish_with_unprocessed_files_409` — `StatementFile.createdAt > completedAt`
-  ⇒ 409, no state change.
+- `publish_with_unprocessed_files_409` — a `StatementFile.createdAt >
+  dispatchedAt` ⇒ 409 at the pre-check: no export call, no state change.
+- `publish_append_race_conditional_409` — the conditional `updateMany`
+  (status + no-newer-files predicate) matches 0 rows ⇒ 409, job not published
+  (the `resultRace.test.ts` pattern).
 - `republish_updates_sheet_in_place` — `sheetUrl` set ⇒ update helper called
-  with the parsed id after containment; no new spreadsheet created.
+  with the parsed id only after `assertEntryUnderFolder` against the user's
+  CURRENT folder; no new spreadsheet created.
+- `republish_sheet_outside_user_folder_falls_back` — sheet under the root but
+  NOT under the user's current folder ⇒ no in-place write; create-new in the
+  assigned folder; `sheetUrl` replaced; old sheet trashed best-effort.
 - `republish_sheet_update_falls_back_to_create` — update throws ⇒ create-new
   path runs, `sheetUrl` replaced, publish still succeeds.
+- `republish_failed_export_clears_sheet_url` — update AND create both fail on a
+  job with an existing `sheetUrl` ⇒ publish succeeds, `sheetUrl` cleared,
+  `exportNote` set.
 
 ## Sequencing (one implementation PR)
 
