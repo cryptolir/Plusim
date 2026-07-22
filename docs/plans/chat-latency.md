@@ -1,8 +1,19 @@
 # Plusim — chat latency: instrument, trim, and mask the wait
 
-> **Status:** 🔍 **Rev 4 — RE-REVIEW REQUESTED** (plan PR). Codex round 2
-> landed 1 new P2 (a hole in Rev 3's own fix); folded below. No implementation
+> **Status:** 🔍 **Rev 5 — RE-REVIEW REQUESTED** (plan PR). Codex round 3
+> landed 1 new P2 (a hole in Rev 4's own fix — the 3rd consecutive round on
+> the OAuth-refresh-cancellation thread). Rev 5 replaces the patch-on-patch
+> with a **terminal** fix (a guaranteed-settling refresh) that ends the
+> recursion. Convergence note: this is review round 3 of the protocol's
+> 4-round circuit-breaker — if round 4 finds yet another hole in this same
+> area, it escalates to the owner instead of a 5th auto-fold. No implementation
 > yet.
+>
+> **Rev 5 — Codex round 3 resolution (2026-07-22, PR #12):**
+>
+> | # | Codex P2 | Resolution |
+> |---|---|---|
+> | 4 | **Rev 4's single-flight can itself get stuck** — `refreshInFlight` clears only *on settle*, so a hung Google token call never clears it and pins every later cold-cache Drive caller (incl. admin/report, which lack the outer race) on a dead promise until process restart. | **Terminal fix (Rev 5):** stop stacking guards that can get stuck; **bound the refresh itself** — wrap `client.getAccessToken()` in a hard ~4s timeout that rejects, so the promise is *guaranteed to settle* and can never pin. Strictly more robust than today (`getAccessToken` has no timeout now, so a hung endpoint already hangs all callers unbounded). Single-flight dedup demoted to an optional ponytail cut-candidate (no longer load-bearing). **T8 extended** to cover a later call after the first refresh hangs. |
 >
 > **Rev 4 — Codex round 2 resolution (2026-07-22, PR #12):**
 >
@@ -162,8 +173,8 @@ appear in the conversation (recent-chats list) shortly.
 ### Phase B — first-message overhead (linked-folder users)
 
 **B1. Bound the Drive context build — outer deadline for the time cap, plus
-per-leak cleanup (Rev 3 → Rev 4, Codex P2#1/#3).** Three mechanisms, each
-doing one job:
+bounded per-leak cleanup (Rev 3 → Rev 5, Codex P2#1/#3/#4).** Three
+mechanisms, each doing one job:
 - **Outer bounded path caps total wall-clock.** Wrap the whole
   `buildLinkedFolderContext` call in `Promise.race([build, deadline(2500)])`
   (deadline resolves to null). This is what actually bounds preprocessing,
@@ -184,21 +195,31 @@ doing one job:
   fetch in flight for the signal to cancel. The signal is a **cleanup**
   device for Drive fetches, not the time bound and not an OAuth-refresh
   canceller.
-- **OAuth refresh leak — bounded by single-flight, not by the signal (Rev 4,
-  Codex P2#3).** In the `getAccessToken()`-hang case the outer race still
-  returns null on time (user-facing wait bounded), but the refresh promise
-  would run on in the background and, worse, *stack* — a second send with the
-  cache still cold kicks a **second** `client.getAccessToken()`. `getAccessToken`
-  today has no in-flight dedupe (`googleDrive.ts:157-176`: cache check →
-  refresh, no shared promise). Fix: a **single-flight guard** — a module-level
-  `refreshInFlight: Promise<string> | null` that concurrent callers await
-  instead of each starting their own refresh; cleared on settle. That caps it
-  at **one** in-flight refresh regardless of how many sends pile up, and when
-  it resolves it populates `accessCache` (so the work warms the cache, not
-  wasted). The single hung Google token call itself isn't cleanly cancellable
-  (google-auth-library doesn't plumb an abort signal through `getAccessToken()`),
-  and we do **not** pretend otherwise — it's one bounded call, de-duplicated,
-  time-capped for the user by the outer race.
+- **OAuth refresh — make it always settle (the terminal fix, Rev 5, Codex
+  P2#4).** Rev 4 added a single-flight `refreshInFlight` promise cleared *on
+  settle*; Codex round 3 correctly holed it — if the Google token call
+  **hangs**, it never settles, so `refreshInFlight` is never cleared and every
+  later cold-cache Drive caller (incl. admin/report, which have **no** outer
+  race) awaits that dead promise until the process restarts. Stacking a guard
+  that can itself get stuck was the wrong shape. **Real fix: bound the refresh
+  itself** so the promise is *guaranteed* to settle — wrap the
+  `client.getAccessToken()` call in `googleDrive.ts` in a hard timeout
+  (`TOKEN_REFRESH_TIMEOUT_MS`, ~4s, shared const module) that **rejects** on
+  expiry. A promise that always settles cannot pin anything: on a hang it
+  rejects within ~4s, the guard clears, and the next call retries fresh. This
+  is **strictly more robust than today** — `getAccessToken` currently has *no*
+  timeout (`googleDrive.ts:157-176`), so a hung token endpoint already hangs
+  every Drive caller unbounded; Rev 5 gives them a bounded failure instead
+  (chat → null context via the outer race; admin/report → a normal bounded
+  error, not an infinite await). No retry storm: a timed-out refresh returns a
+  bounded rejection to its caller, which does not tight-loop.
+  - The **single-flight dedup** (`refreshInFlight`) is *kept but demoted to
+    optional* now that settle is guaranteed — it saves N→1 concurrent token
+    calls but is no longer load-bearing for correctness. **Ponytail
+    cut-candidate:** if reviewers prefer minimal, drop it and rely on the
+    per-refresh timeout alone (N bounded concurrent refreshes on a cold cache
+    is acceptable and self-healing). The timeout is the fix; the dedup is a
+    nicety.
 
 Non-timeout Drive errors keep today's never-throws → null contract
 (`pastMeeting.ts:36-38`); the race wrapper must not convert them into throws
@@ -376,11 +397,13 @@ Net ≈ −120 lines vs Rev 1 as specced.
   behavior-identical; verified by typecheck + admin Drive smoke test. The
   signal is cleanup only — the outer race is the time bound (Rev 3), so a
   caller that ignores it is still bounded via the wrapper. The
-  `getAccessToken` single-flight guard (Rev 4) is shared state on the hot
-  token path used by **every** Drive call incl. admin/reports — it must be
-  transparent on the happy path (cache hit → no guard involvement) and only
-  dedupe concurrent cold-cache refreshes; regression-checked by the admin
-  Drive smoke test + T8's single-refresh assertion.
+  `getAccessToken` change (Rev 5) is on the hot token path used by **every**
+  Drive call incl. admin/reports: a hard ~4s refresh timeout (the fix) plus an
+  optional single-flight dedup. It must be transparent on the happy path
+  (cache hit → neither engages) and only affect concurrent cold-cache
+  refreshes; the timeout makes a hung endpoint a bounded failure for **all**
+  Drive callers (today it's an unbounded hang). Regression-checked by the
+  admin Drive smoke test + T8's self-eviction assertion.
 - **A2/B1 coupling:** the timeout invariant only holds with total
   preprocessing bounded — the outer race bounds the context build (incl. OAuth
   refresh) and the client margin is sized from Phase 0's measured non-Drive
@@ -420,15 +443,18 @@ implementation PR must contain these):**
   batch still returns the assistant message to the client (route resolves,
   not rejects) and emits `chat_bookkeeping_error`. A failure in the
   assistant-message create itself still errors (that path is *not* isolated).
-- **T8** (Codex round 1 P2#1, **rewritten round 2 P2#3**): with
-  `getAccessToken()` mocked to hang, `buildLinkedFolderContext` resolves null
-  within the outer deadline (time bound covers the pre-fetch step). **Leak
-  scoping:** a mocked slow *Drive fetch* (list/export) receives an abort via
-  the signal; a hung *token refresh* does **not** (no fetch in flight) — and
-  N concurrent sends during a cold-cache refresh trigger **exactly one**
-  `client.getAccessToken()` (single-flight guard), which populates
-  `accessCache` on resolve. Plus: the client timeout margin ≥ measured
-  preprocessing high-percentile (asserted against the const module).
+- **T8** (Codex round 1 P2#1, rewritten round 2 P2#3, **extended round 3
+  P2#4**): with `getAccessToken()` mocked to hang, `buildLinkedFolderContext`
+  resolves null within the outer deadline (time bound covers the pre-fetch
+  step). **Leak scoping:** a mocked slow *Drive fetch* (list/export) receives
+  an abort via the signal; a hung *token refresh* does **not** (no fetch in
+  flight). **No stuck pin (round 3):** the hung refresh **rejects within
+  `TOKEN_REFRESH_TIMEOUT_MS`**, and a *later* `getAccessToken` call after the
+  first one hangs starts a **fresh** attempt (not awaiting a dead promise) —
+  proving the guard self-evicts; an admin/report caller in the same window
+  also gets a bounded rejection, not an infinite await. Plus: the client
+  timeout margin ≥ measured preprocessing high-percentile (asserted against
+  the const module).
 
 **Also:**
 - Unit: context deadline fallback; `isFirstMessage` via `_count`;
