@@ -1,13 +1,16 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 11 — RE-REVIEW REQUESTED** (plan PR). Codex round 8 was
-> the **4th consecutive round on P1c** (escalation trigger); rather than patch
-> the shared-hook `await` a fifth time, **P1c is redesigned** as a page-level
-> composer gate (owner directed via Rev 10's field evidence to keep the
-> protection, not drop it). Moving the guard off the shared runtime onto the
-> `/chat` page dissolves the whole recursion (rounds 5–8: URL sync, HomeHub,
-> cancel-during-wait, optimistic-append orphan) — no send can fire before the
-> `cid` exists. Scope: `/chat` bootstrap only.
+> **Status:** 🔍 **Rev 12 — RE-REVIEW REQUESTED** (plan PR). Codex round 9
+> landed 1 P2 on **P2** (the pickup window's clock-skew handling — a *different*
+> area, confirming the Rev 11 P1c redesign held). Folded: the pickup age is now
+> **server-anchored** (no browser clock in the age). Scope: `/chat` bootstrap
+> only.
+>
+> **Rev 12 — Codex round 9 resolution (2026-07-22, PR #22):**
+>
+> | # | Codex P2 | Resolution |
+> |---|---|---|
+> | 12 | **Ahead-skew collapses the pickup window** — Rev 2 anchored `remaining` to the browser clock; an ahead-running client clock made a fresh pending turn compute `remaining ≤ 0` → one fetch then stop, so a refresh a few seconds into a real 13–34s send could miss the reply. | Age is derived from **server time only**: `/api/chat/history` returns `serverNow`; `age = serverNow − createdAt`, `remaining = clamp(WINDOW − age, 0, WINDOW)`; UI ticks on a monotonic `performance.now()` delta. No client wall-clock in the age → fresh turns get the full window under either skew direction. TB2 updated. |
 >
 > **Rev 11 — Codex round 8 resolution + P1c redesign (2026-07-22, PR #22):**
 >
@@ -231,7 +234,7 @@ long request recoverable; upstream work makes the answer arrive sooner.**
 | `bootstrapped` ref (`chat/page.tsx:22-26`) | Strict-mode double-effect safety — kept as-is |
 | `ThinkingIndicator` + 15s caption (`thread.tsx`, latency A1), driven by `isRunning` | P2's pickup sets `isRunning` → the wait **UI** is free (the hook surface to set it is new — see P2) |
 | `AGENT_TIMEOUT_MS` / `CHAT_CLIENT_TIMEOUT_MS` (`chatTimeouts.ts`) | P2's pickup bound derives from the same constants — no new magic numbers |
-| `/api/chat/history` (returns rows with `role` + `createdAt`) | P2 polls it; the pending state is "last row is a user turn" |
+| `/api/chat/history` (returns rows with `role` + `createdAt`) | P2 polls it; the pending state is "last row is a user turn". **Rev 12:** add a `serverNow` field to the response so the pickup age is server-anchored (skew-free) |
 | Placeholder prune in `new-session` (`route.ts:32-43`) | Kept — placeholders still exist (bare visits), and P1 stops the *seeded-visit* accumulation |
 | Abort copy (`plusimRuntime.ts`, latency A3) | P2's bound-stop can reuse the same honest wording if we choose to say anything (see P2) |
 
@@ -333,14 +336,21 @@ detecting it) that lives next to `setIsRunning`/`setMessages`/`onCancel`.
 Behavior, on the `?cid` bootstrap when the **last hydrated row is a user
 turn**:
 
-- **Window (client-anchored, skew-proof — Rev 2):** the reply can only land
+- **Window (SERVER-anchored age — Rev 2 → Rev 12, Codex):** the reply can land
   within the server ceiling of the user turn, but `createdAt` is DB-server
-  clock and the countdown runs on the browser clock. So: compute
-  `remaining = clamp(userTurn.createdAt + CHAT_CLIENT_TIMEOUT_MS − clientNowAtBootstrap, 0, CHAT_CLIENT_TIMEOUT_MS)`
-  once, then count down on `performance.now()`. The clamp caps behind-skew
-  overrun at one window; if `remaining` is ~0/negative (stale turn or
-  ahead-skew), do **one immediate history re-fetch, then stop** — never skip
-  entirely, never poll longer than one window.
+  clock. Rev 2 anchored the initial `remaining` to the **browser** clock
+  (`clientNowAtBootstrap`), which a clamp only fixed for *behind*-skew — an
+  *ahead*-running browser clock made a genuinely-fresh pending turn compute
+  `remaining ≤ 0` and collapse to a single fetch, so a refresh a few seconds
+  into a real 13–34s send could miss the reply. Fix: derive the age from
+  **server time only**. `/api/chat/history` returns a `serverNow` field (its
+  own `new Date()`); then
+  `age = serverNow − pendingTurn.createdAt` (both DB-server clock, skew-free)
+  and `remaining = clamp(CHAT_CLIENT_TIMEOUT_MS − age, 0, CHAT_CLIENT_TIMEOUT_MS)`.
+  Count *down* on `performance.now()` for the UI tick (a monotonic delta, not a
+  wall-clock read). A truly stale turn (`age ≥ window`) → `remaining 0` → no
+  poll; a fresh turn gets its full remaining window regardless of browser-clock
+  skew in either direction. No client wall-clock enters the age.
 - **Completion requires an ASSISTANT row after the pending turn (Rev 3 →
   Rev 4, Codex P2):** a multi-turn history already contains **older**
   assistant rows, so "an assistant row exists" is wrong (first poll stops
@@ -453,10 +463,10 @@ error handling. The prune stays (still needed for bare-visit placeholders).
   the seed is dropped silently (params already stripped, nothing pending on
   reload). This window exists **identically today** — never-resend >
   maybe-drop is the T3 trade; documented, not changed.
-- **Clock skew (Rev 2):** the P2 window is computed once against the client
-  clock and clamped to one window on a monotonic countdown — behind-skew
-  can't extend the poll past one window; ahead-skew degrades to one immediate
-  fetch, never to a skipped pickup.
+- **Clock skew (Rev 12):** the P2 window age is computed from **server time
+  only** (`serverNow − createdAt`, both from the history response), so neither
+  browser-clock direction can shrink or extend the window; the UI ticks down on
+  a monotonic `performance.now()` delta. No client wall-clock touches the age.
 - **Title regression without P1b:** P1 alone silently demotes seeded-flow
   titling to an unreachable-after-failure path — P1b (drop
   `isFirstMessage &&`) ships in the same PR, guarded by TB4.
@@ -497,12 +507,15 @@ phantom component tests.
   complete; `pendingUser, laterUser, laterAssistant` (concurrent multi-tab)
   ⇒ **not** complete — the immediate successor is a user row ⇒ **stop silently**
   (fall back to reopen, never hydrate `laterAssistant`); only an assistant row
-  immediately following the captured pending turn completes (Codex rounds 1–3). TB2 — stale turn / ahead-skew ⇒ exactly one immediate
-  fetch then stop; behind-skew ⇒ remaining clamped to one window; deadline ⇒
-  spinner (`isRunning`) cleared even if the final fetch never settles, **but a
-  final fetch resolving just after the deadline with the reply still hydrates
-  the transcript** (Codex round 2). TB3 — cancel (user cancel or new send) ⇒
-  poll stops, `isRunning` false, in-flight final fetch discarded.
+  immediately following the captured pending turn completes (Codex rounds 1–3).
+  TB2 — **server-anchored age (Rev 12):** `age = serverNow − createdAt` from the
+  history response, so a fresh turn gets its full window under **either**
+  browser-clock skew direction (ahead-skew no longer collapses to one fetch);
+  a stale turn (`age ≥ window`) ⇒ `remaining 0` ⇒ no poll; deadline ⇒ spinner
+  (`isRunning`) cleared even if the final fetch never settles, **but a final
+  fetch resolving just after the deadline with the reply still hydrates the
+  transcript** (Codex round 2). TB3 — cancel (user cancel or new send) ⇒ poll
+  stops, `isRunning` false, in-flight final fetch discarded.
 - **TB4** (new, automated — guards P1b): a null-title conversation is titled
   by **any** successful turn (not just the first); an existing title is never
   overwritten; and the write is **atomic** — the `updateMany` carries
