@@ -1,13 +1,20 @@
 # Plusim — chat bootstrap: fix the double-conversation bug + pending-reply pickup
 
-> **Status:** 🔍 **Rev 17 — RE-REVIEW REQUESTED** (plan PR). Codex round 14
-> landed the review's **first P1**: the render gate started `false` until
-> `new-session` resolves, but a `/chat?cid` reload never calls `new-session`, so
-> as written the gate would strand every existing conversation + the P2 pickup
-> behind the placeholder forever. Fixed: the gate applies **only to the bare
-> no-`cid` load** (`bootstrapReady = Boolean(cidParam)`). Plus a P2: the
-> fallback URL-sync now uses the same synchronous `window.history.replaceState`
-> as Rev 16. Both folded. Scope: `/chat` bootstrap only.
+> **Status:** 🔍 **Rev 18 — RE-REVIEW REQUESTED** (plan PR). Codex round 15
+> closed the last failure-mode of the bare-load fallback: `new-session` was
+> `fetch`ed with **no timeout**, so a request that *hangs* (rather than rejects
+> or 500s) never resolves and — because the render gate hides every send
+> affordance until `bootstrapReady` — leaves the bare `/chat` page permanently
+> inert. Fixed: the `new-session` fetch carries an **`AbortSignal.timeout`**, so
+> a hang aborts into the same rejected-`fetch` branch that already triggers
+> **fallback mode** (surface enabled, first send lazy-creates). Scope: `/chat`
+> bootstrap only.
+>
+> **Rev 18 — Codex round 15 resolution (2026-07-22, PR #22):**
+>
+> | # | Codex | Resolution |
+> |---|---|---|
+> | 21 | **`new-session` fetch is unbounded** — the gate holds `bootstrapReady=false` until the fetch settles; a *hung* `new-session` (not a reject or non-OK, which Rev 14 already handles, but a never-settling request) leaves the bare-load page permanently inert with no send affordance. | The `new-session` fetch carries an **`AbortSignal.timeout(NEW_SESSION_TIMEOUT_MS)`**; on abort it rejects, which routes into the **existing** rejected-`fetch` fallback (Rev 14) → surface enabled in fallback mode, first send lazy-creates. One bound completes the fallback's failure-mode set (reject / non-OK / missing-id / **hang**). |
 >
 > **Rev 17 — Codex round 14 resolution (2026-07-22, PR #22):**
 >
@@ -270,6 +277,7 @@ long request recoverable; upstream work makes the answer arrive sooner.**
 | `bootstrapped` ref (`chat/page.tsx:22-26`) | Strict-mode double-effect safety — kept as-is |
 | `ThinkingIndicator` + 15s caption (`thread.tsx`, latency A1), driven by `isRunning` | P2's pickup sets `isRunning` → the wait **UI** is free (the hook surface to set it is new — see P2) |
 | `AGENT_TIMEOUT_MS` / `CHAT_CLIENT_TIMEOUT_MS` (`chatTimeouts.ts`) | P2's pickup bound derives from the same constants — no new magic numbers |
+| `NEW_SESSION_TIMEOUT_MS` (`chatTimeouts.ts`, new — Rev 18) | Bounds the bare-load `new-session` fetch so a hang aborts into fallback mode instead of pinning the render gate; ~4s (well above one insert+prune, well under user patience) |
 | `/api/chat/history` (returns rows with `role` + `createdAt`) | P2 polls it; the pending state is "last row is a user turn". **Rev 12:** add a `serverNow` field (server-anchored pickup age). **Rev 13:** order by `(createdAt ASC, id ASC)` for a deterministic sequence under ms-tie |
 | Placeholder prune in `new-session` (`route.ts:32-43`) | Kept — placeholders still exist (bare visits), and P1 stops the *seeded-visit* accumulation |
 | Abort copy (`plusimRuntime.ts`, latency A3) | P2's bound-stop can reuse the same honest wording if we choose to say anything (see P2) |
@@ -381,14 +389,21 @@ optimistic-append send path. The redesign removes that entire class:
 - **Seeded autosend unaffected.** The `p`/`autosend` flow fires
   `sendMessage(seed)` from the callback *after* `bootstrapReady`, and it is a
   programmatic send, so the brief disabled state never blocks it.
-- **Failure fallback covers ALL non-success outcomes (Rev 14, Codex round 11).**
+- **Failure fallback covers ALL non-success outcomes (Rev 14, Codex round 11;
+  Rev 18, Codex round 15).**
   The render gate hides every send affordance until `bootstrapReady`, so
   `bootstrapReady` MUST flip true on every terminal outcome or the page is
   permanently inert. The fallback triggers on **any** of: a rejected `fetch`
   (network), a **non-`res.ok`** response (401/500 still resolve through
-  `.then(r => r.json())`), or a **missing `conversationId`** in the body — not
-  just the `.catch` path. Any of these → enable the surface in **fallback
-  mode** (no `hydrate`/`replace`; the first send lazy-creates with
+  `.then(r => r.json())`), a **missing `conversationId`** in the body, or a
+  **hung request that never settles** — not just the `.catch` path. The hang is
+  the subtle one: a promise that never resolves would hold `bootstrapReady`
+  false forever, so the `new-session` fetch carries an
+  **`AbortSignal.timeout(NEW_SESSION_TIMEOUT_MS)`** (a new const in
+  `chatTimeouts.ts`, ~4s — comfortably above a normal single-insert `new-session`
+  but well under any user's patience); on timeout it aborts and rejects, which
+  falls into the same rejected-`fetch` branch. Any of these → enable the surface
+  in **fallback mode** (no `hydrate`/`replace`; the first send lazy-creates with
   `conversationId: null` → `/api/chat` creates). Never a permanently-inert page.
 - **The fallback (lazy-create) send syncs the URL as soon as an id exists
   (Rev 14 → Rev 17).** On the fallback path the send posts `conversationId: null`
@@ -648,7 +663,8 @@ phantom component tests.
   **whether the user uses the composer or clicks a suggestion**; once
   `new-session` resolves + `hydrate` + `replace` run, `bootstrapReady` flips
   true and both paths proceed; **every non-success `new-session` outcome**
-  (rejected fetch, non-`res.ok`, or missing `conversationId`) re-enables the
+  (rejected fetch, non-`res.ok`, missing `conversationId`, or a **hung request
+  that aborts on `AbortSignal.timeout`** — Rev 18) re-enables the
   surface in fallback mode and the first send lazy-creates
   (`conversationId: null`), never a permanently inert surface; **the fallback
   send's returned id is synced to the URL** via the page's `conversationId`
