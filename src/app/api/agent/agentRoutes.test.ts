@@ -10,6 +10,7 @@ import { NextRequest } from "next/server";
 vi.mock("@/lib/db", () => ({
   db: {
     reportJob: { findUnique: vi.fn() },
+    reportCategory: { findMany: vi.fn(async () => []) },
     statementFile: { findMany: vi.fn(), findFirst: vi.fn() },
     merchantMapping: { findMany: vi.fn() },
     userDriveFolder: { findUnique: vi.fn() },

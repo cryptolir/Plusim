@@ -6,7 +6,7 @@
  * merchant-mapping approvals. All calls carry the reports save token.
  */
 import { useEffect, useState } from "react";
-import { TAXONOMY_LEAVES } from "@/config/reportTaxonomy";
+import { SECTION_NAMES } from "@/config/reportTaxonomy";
 
 // Hebrew display labels for job.status (keys stay English — they are the status
 // enum used in logic; only the rendered badge text is translated).
@@ -66,6 +66,9 @@ function shekel(agorot: number): string {
 export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken: string }) {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [mappings, setMappings] = useState<Mapping[]>([]);
+  // Merged (base ∪ admin-added) category leaves from the job-detail GET — the
+  // single source for the assign picker; never the static base constant.
+  const [categoryLeaves, setCategoryLeaves] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -88,6 +91,7 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
       }
       setJob(data.job);
       setMappings(data.pendingMappings ?? []);
+      setCategoryLeaves(data.categoryLeaves ?? []);
     }
     void tick();
     const t = setInterval(() => void tick(), 10_000);
@@ -217,7 +221,20 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
 
       {uncategorized.length > 0 && (
         <section className="rounded-xl border p-4">
-          <h2 className="mb-2 font-medium">ללא סיווג — הקצאת קטגוריות ({uncategorized.length})</h2>
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <h2 className="font-medium">ללא סיווג — הקצאת קטגוריות ({uncategorized.length})</h2>
+            <AddCategoryForm
+              onAdd={async (name, section) => {
+                const data = await action("add-category", "/admin/api/report-categories", {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ name, section }),
+                });
+                return data !== undefined;
+              }}
+              busy={busy === "add-category"}
+            />
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
@@ -231,7 +248,7 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
               </thead>
               <tbody>
                 {uncategorized.map((t) => (
-                  <UncatRow key={t.id} txn={t} onAssign={assignCategory} />
+                  <UncatRow key={t.id} txn={t} leaves={categoryLeaves} onAssign={assignCategory} />
                 ))}
               </tbody>
             </table>
@@ -306,11 +323,74 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
   );
 }
 
+function AddCategoryForm({
+  onAdd,
+  busy,
+}: {
+  onAdd: (name: string, section: string) => Promise<boolean>;
+  busy: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [section, setSection] = useState(SECTION_NAMES[0] ?? "");
+
+  if (!open) {
+    return (
+      <button onClick={() => setOpen(true)} className="rounded-lg border px-3 py-1 text-sm">
+        ➕ הוספת קטגוריה
+      </button>
+    );
+  }
+  return (
+    <span className="flex flex-wrap items-center gap-2 text-sm" dir="rtl">
+      <input
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="שם קטגוריה חדשה"
+        className="rounded border bg-background px-2 py-1"
+        dir="rtl"
+      />
+      <label className="flex items-center gap-1 text-muted-foreground">
+        שיוך למדור
+        <select
+          value={section}
+          onChange={(e) => setSection(e.target.value)}
+          className="rounded border bg-background px-1 py-1"
+          dir="rtl"
+        >
+          {SECTION_NAMES.map((s) => (
+            <option key={s} value={s}>
+              {s}
+            </option>
+          ))}
+        </select>
+      </label>
+      <button
+        onClick={async () => {
+          if (await onAdd(name.trim(), section)) {
+            setName("");
+            setOpen(false);
+          }
+        }}
+        disabled={busy || !name.trim()}
+        className="rounded border px-3 py-1 disabled:opacity-50"
+      >
+        {busy ? "מוסיף…" : "הוספה"}
+      </button>
+      <button onClick={() => setOpen(false)} className="rounded border px-3 py-1 text-muted-foreground">
+        ביטול
+      </button>
+    </span>
+  );
+}
+
 function UncatRow({
   txn,
+  leaves,
   onAssign,
 }: {
   txn: Txn;
+  leaves: string[];
   onAssign: (txId: string, category: string, remember: boolean) => Promise<void>;
 }) {
   const [category, setCategory] = useState("");
@@ -330,7 +410,7 @@ function UncatRow({
             dir="rtl"
           >
             <option value="">בחר קטגוריה…</option>
-            {TAXONOMY_LEAVES.map((l) => (
+            {leaves.map((l) => (
               <option key={l} value={l}>
                 {l}
               </option>

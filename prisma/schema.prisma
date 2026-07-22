@@ -137,6 +137,19 @@ model ReportTransaction {
   @@index([jobId, month])
 }
 
+// Admin-defined category leaves that EXTEND the base REPORT_TAXONOMY constant.
+// Merged into the taxonomy at every consumer (agent manifest, result
+// verification, admin category validation, the assign picker, the client
+// report page) so app and agent still agree on the full leaf set. Add-only in
+// v1 — see docs/plans/report-custom-categories.md.
+model ReportCategory {
+  id        String   @id @default(cuid())
+  name      String   @unique // Hebrew leaf name; must not collide with a base leaf
+  section   String // one of REPORT_TAXONOMY's section names
+  createdBy String // admin email
+  createdAt DateTime @default(now())
+}
+
 // Learned merchant→category dictionary. Approved rows are included in every
 // job manifest so the deterministic pass grows over time.
 model MerchantMapping {

@@ -43,6 +43,14 @@ the processed report in `/report`. Agent-side skill + ops runbook:
 - **Learning loop**: agent-proposed mappings land unapproved; admin approval
   (or "remember" during review) adds them to every future manifest, shrinking
   the judgment tail over time.
+- **The taxonomy is base ∪ admin-added categories.** `reportTaxonomy.ts` is the base constant;
+  admins extend it from the review UI (`ReportCategory` rows, **add-only**, each joining an existing
+  base section). ONE filtered merge (`mergeTaxonomy` → `getMergedTaxonomy`/`getValidLeafSet` in
+  `lib/reportCategories.ts`) feeds every consumer — agent manifest, result verification, admin
+  category validation, the assign picker, `/report` — so app and agent still never disagree on
+  category names (add-only ⇒ the manifest set is always ⊆ the later verification set). The pure
+  verifier takes the valid set as a **required** argument; forgetting to pass it is a typecheck
+  error, never a base-only fallback. Full design: `docs/plans/report-custom-categories.md`.
 - **Admin categorization rules** (`report_rules`, set in `/admin/settings`) ride
   in every job manifest and steer the model's judgment of the **unresolved**
   shortlist only — they do NOT override a category the deterministic pass already
@@ -84,7 +92,10 @@ the processed report in `/report`. Agent-side skill + ops runbook:
 ```
 prisma/…/20260719120000_report_pipeline   ReportJob, StatementFile, ReportArtifact,
                                           ReportTransaction, MerchantMapping
-src/config/reportTaxonomy.ts              taxonomy (single source; serialized into manifests)
+prisma/…/20260722130000_report_category   ReportCategory (admin-added taxonomy leaves, add-only)
+src/config/reportTaxonomy.ts              BASE taxonomy + pure merge (mergeTaxonomy/mergedLeafSet)
+src/lib/reportCategories.ts               DB-backed merged-taxonomy accessors (the only
+                                          ReportCategory reader)
 src/lib/agentRuntimeAuth.ts               bearer + per-job token auth, appBaseUrl()
 src/lib/reportResult.ts                   result parsing + independent verification
 src/lib/reportsAdminAuth.ts               dual-auth for admin reports APIs (scope "reports")
@@ -92,6 +103,7 @@ src/app/api/agent/jobs/[jobId]/…          manifest | files/[fileId] | result
 src/app/admin/api/reports/…               create+list | [jobId] detail | run | publish |
                                           transactions/[txId] review
 src/app/admin/api/report-mappings/[id]    approve/reject proposed mappings
+src/app/admin/api/report-categories       add a custom category (POST; Hebrew errors)
 src/app/admin/(dash)/reports/…            admin UI (upload form, job list, job detail)
 src/components/admin/ReportUploadForm.tsx, ReportJobDetail.tsx
 src/app/report/page.tsx                   client report section (published only)
@@ -119,6 +131,15 @@ src/app/api/agent/resultRace.test.ts      conditional write: 0 rows ⇒ 409, not
 src/app/admin/api/reports/publishGuard.test.ts    every fatal class ⇒ publish 409; non-fatal ⇒ publishes
 src/app/admin/api/reports/uploadContainment.test.ts   no folder / not connected / moved-or-deleted ⇒ 409
 src/app/api/agent/reportRulesManifest.test.ts     manifest carries report_rules (set ⇒ value; blank ⇒ "")
+src/config/reportTaxonomy.test.ts         pure merge: section append, invalid-section drop, set≡merge
+src/config/taxonomyInvariants.test.ts     manifest leaves ≡ getValidLeafSet (same rows, malformed too);
+                                          no consumer left on the base-only check (source+behavior)
+src/app/api/agent/resultMergedSet.test.ts result callback verifies against the merged set — DB-leaf
+                                          result non-fatal, mapping survives; without the row → fatal
+src/app/admin/api/report-categories/createCategory.test.ts   create endpoint fail-closed matrix
+src/app/admin/api/reports/mergedCategoryGuards.test.ts       assign/mapping accept DB leaves; picker
+                                          source (categoryLeaves) carries them in section order
+src/app/report/reportPage.test.ts         /report renders a published DB-leaf txn under its section
 ```
 
 Test files are excluded from the production TypeScript build (`tsconfig` +

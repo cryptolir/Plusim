@@ -17,6 +17,7 @@ vi.mock("@/lib/db", () => {
     __tx: tx,
     db: {
       reportJob: { findUnique: vi.fn(), updateMany: vi.fn() },
+      reportCategory: { findMany: vi.fn(async () => []) },
       merchantMapping: { upsert: vi.fn() },
       $transaction: vi.fn(async (fn: (t: typeof tx) => unknown) => fn(tx)),
     },

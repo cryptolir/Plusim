@@ -6,8 +6,13 @@
  * reported per source. Any mismatch, invalid category, bad month, or duplicate
  * dedupKey demotes the job to needs_review — the report is stored either way
  * so the admin can inspect what came back.
+ *
+ * Category membership is checked against a REQUIRED `validLeaves` set (the
+ * merged base ∪ ReportCategory taxonomy, from getValidLeafSet()). There is
+ * deliberately NO default: a caller that forgets to pass the merged set is a
+ * typecheck error, never a silent base-only fallback that would turn a legit
+ * admin-added leaf into a false FATAL (plan Rev 3/4).
  */
-import { isTaxonomyLeaf } from "@/config/reportTaxonomy";
 
 export interface AgentTxn {
   month: string; // "2026-06"
@@ -55,7 +60,7 @@ function intAgorot(v: unknown): number | null {
 }
 
 /** Parse + structurally validate the callback body. Throws with a reason on malformed input. */
-export function parseAgentResult(body: unknown): AgentResult {
+export function parseAgentResult(body: unknown, validLeaves: Set<string>): AgentResult {
   if (!isRecord(body)) throw new Error("body is not an object");
   const status = body.status === "ok" || body.status === "needs_review" ? body.status : null;
   if (!status) throw new Error("status must be ok|needs_review");
@@ -113,7 +118,7 @@ export function parseAgentResult(body: unknown): AgentResult {
         if (!isRecord(raw)) return [];
         const merchant = str(raw.merchant, 200);
         const category = str(raw.category, 200);
-        if (!merchant || !category || !isTaxonomyLeaf(category)) return [];
+        if (!merchant || !category || !validLeaves.has(category)) return [];
         return [{ merchant, category, evidence: typeof raw.evidence === "string" ? raw.evidence.slice(0, MAX_STR) : undefined }];
       })
     : [];
@@ -151,12 +156,12 @@ export interface VerificationOutcome {
 }
 
 /** Independently verify the parsed result. Never trusts the agent's own sums. */
-export function verifyAgentResult(result: AgentResult): VerificationOutcome {
+export function verifyAgentResult(result: AgentResult, validLeaves: Set<string>): VerificationOutcome {
   const problems: string[] = [];
 
   // Category validity (structural pass already ensured presence).
   for (const t of result.transactions) {
-    if (!t.uncategorized && t.category && !isTaxonomyLeaf(t.category)) {
+    if (!t.uncategorized && t.category && !validLeaves.has(t.category)) {
       problems.push(`unknown category "${t.category}" (${t.merchant})`);
     }
     if (!t.date.startsWith(t.month)) {
