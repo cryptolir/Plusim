@@ -1,7 +1,14 @@
 # Plusim — Report workbook sub-reports (ניתוח תוצאות · התפלגות ההוצאות · טופס עזר למיפוי · חישוב יעדים)
 
-> **Status:** Draft — **Rev 1**, awaiting adversarial review (plan-review protocol,
-> `openclaw-dashboard/docs/PLAN_REVIEW_PROTOCOL.md`). Nothing implemented yet.
+> **Status:** Draft — **Rev 2**, Codex round-1 findings folded in; awaiting re-review.
+> Nothing implemented yet.
+>
+> **Process** (self-contained — the canonical plan-review protocol doc lives outside
+> this repo, and AGENTS.md rule 0 forbids following cross-repo pointers, so the rules
+> are summarized here): plan PR → adversarial review → each review round becomes a new
+> Rev on this branch with resolution notes (never silently rewrite reviewed text) →
+> every caught hole becomes a named test the implementation PR must carry → once
+> approved, implement exactly the plan; deviations require going back to the owner.
 >
 > **Review log:**
 > - Rev 1 — authored from the demo workbook `מיפוי כהן חופית ומני 2026 (1).xlsx` and a
@@ -12,6 +19,13 @@
 >   (it does not render `#DIV/0!`); the template's income-comparison block has a swapped
 >   month order vs. its expense block; income totals sit one column left of the expense
 >   total column. The last two are now flagged as explicit normalizations (A2, B1).
+> - Rev 2 — Codex review round 1 (PR #14): **P1** — the distribution sheet must consume
+>   the analysis sheet's *dynamic* average column (it moves with month count:
+>   single-month ⇒ C, six months ⇒ H), not the template's `F`. Resolved: B1 now returns
+>   an analysis-sheet geometry map, B2 consumes it, and the hole is banked as
+>   `test_distribution_follows_dynamic_average_column`. **P2** — the status header
+>   pointed at a protocol file in a sibling repo that Plusim's hard boundary forbids
+>   reading. Resolved: replaced with the self-contained Process summary above.
 
 ## Context
 
@@ -170,11 +184,16 @@ All changes in `agent/skills/plusim-reports/` unless noted.
   `מצבנו` block: `הכנסות`=income average, `הוצאות`=expense average, `יתרה`=their sum.
   Both blocks use the **same** month-column order (normalizing the template's swapped
   income columns and shifted header dates — see Context 4). Works for any month count
-  ≥ 1 (`AVERAGE` over a single column is valid).
+  ≥ 1 (`AVERAGE` over a single column is valid). Like `_month_sheet()`, the analysis
+  builder returns its own geometry map — average column letter plus per-section/leaf/
+  income row numbers — because the **average column moves with month count**
+  (single-month ⇒ C, six months ⇒ H); B2 consumes that map and nothing downstream may
+  assume the template's `F`.
 - **B2. `התפלגות ההוצאות`.** One row per section: name by reference
-  (`='ניתוח תוצאות'!A<r>`), value = the section's average cell, except `שונות` =
-  average minus the business/tax leaf averages (Decision 3), emitted only for leaves
-  present in the manifest taxonomy. Native `openpyxl.chart.PieChart` over the two
+  (`='ניתוח תוצאות'!A<r>`), value = the section's average cell addressed via the
+  analysis geometry map from B1 (`<avg col><section row>` — never a hardcoded `F`
+  column), except `שונות` = average minus the business/tax leaf averages (Decision 3),
+  emitted only for leaves present in the manifest taxonomy. Native `openpyxl.chart.PieChart` over the two
   columns, data labels showing **category name + percentage**
   (`DataLabelList(showCatName=True, showPercent=True)`), **legend removed**
   (`chart.legend = None`) — matching the template's chart XML — anchored beside the
@@ -281,6 +300,9 @@ Unit (`scripts/test_build_report_xlsx.py`, synthetic transactions, runs with ven
   non-default taxonomy (e.g. 8 sections, missing `עסק`) still builds correctly.
 - `test_distribution_business_exclusion_formula` — `שונות` subtracts exactly the
   present business/tax leaf averages.
+- `test_distribution_follows_dynamic_average_column` — 1-month and 6-month builds:
+  every distribution value cell references the analysis sheet's **actual** average
+  column (C and H respectively) and the pie ranges stay aligned. (Codex round-1 P1.)
 - `test_distribution_pie_chart` — a PieChart exists on the sheet, series over the
   name/value columns, `dataLabels.showCatName` and `.showPercent` both true, legend
   removed.
