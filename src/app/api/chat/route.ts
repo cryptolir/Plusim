@@ -9,6 +9,12 @@ import { buildLinkedFolderContext } from "@/lib/pastMeeting";
 const MAX_MESSAGE_LENGTH = 3000;
 
 export async function POST(req: NextRequest) {
+  // Phase 0: total timer starts at request ENTRY (before auth/rate-limit/parse)
+  // so `totalMs` captures the full server-visible wait and `authMs` stays
+  // recoverable as totalMs minus the named segments (Codex P2). The pre-agent
+  // DB segment is marked separately below (`tDbStart`).
+  const tStart = performance.now();
+
   const userId = await getCurrentUser();
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
@@ -42,11 +48,9 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Phase 0 latency instrumentation: mark segment boundaries and emit exactly
-  // one `chat_latency` JSON line per turn (or `chat_latency_error` on agent
-  // failure). Greppable in Coolify logs; no behavior change. `authMs` is not
-  // logged — it's recoverable as totalMs minus the named segments.
-  const tStart = performance.now();
+  // Pre-agent DB segment starts here (after auth/rate-limit/parse/validate,
+  // which are captured in totalMs via the entry-time `tStart` above).
+  const tDbStart = performance.now();
 
   let conversation;
   if (conversationId) {
@@ -105,7 +109,7 @@ export async function POST(req: NextRequest) {
     : message;
 
   const tPreAgent = performance.now();
-  const dbBeforeAgentMs = Math.round(tPreContext - tStart);
+  const dbBeforeAgentMs = Math.round(tPreContext - tDbStart);
   const contextMs = Math.round(tPreAgent - tPreContext);
 
   let agentReply: string;
@@ -122,6 +126,7 @@ export async function POST(req: NextRequest) {
         conversationId: conversation.id,
         isFirstMessage,
         hasContext: Boolean(hint),
+        contextTimedOut: false,
         dbBeforeAgentMs,
         contextMs,
         agentMs: Math.round(performance.now() - tPreAgent),
