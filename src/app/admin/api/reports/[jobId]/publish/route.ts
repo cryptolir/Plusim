@@ -26,6 +26,7 @@
  * (trashing the stale one), and if BOTH fail the stale `sheetUrl` is cleared.
  */
 import { NextRequest, NextResponse } from "next/server";
+import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { authorizeReportsRequest } from "@/lib/reportsAdminAuth";
 import {
@@ -51,29 +52,38 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
   if (auth instanceof NextResponse) return auth;
 
   const { jobId } = await ctx.params;
-  // ONE consistent snapshot of the job AND the artifact it will export. The
-  // result callback rewrites both in a single transaction, so this read sees
-  // either all of a run or none of it — and every guard below, plus the Drive
-  // write, then refers to the SAME state. Re-reading the artifact at export time
-  // would let a callback landing mid-publish push an unreviewed (or fatal)
-  // workbook into the client's bookmarked Sheet, which the conditional write
-  // below cannot undo because Drive is not part of that transaction.
-  const [job, artifact] = await db.$transaction([
-    db.reportJob.findUnique({
-      where: { id: jobId },
-      select: {
-        id: true,
-        status: true,
-        targetUserId: true,
-        title: true,
-        sheetUrl: true,
-        verification: true,
-        dispatchedAt: true,
-        completedAt: true,
-      },
-    }),
-    db.reportArtifact.findFirst({ where: { jobId }, orderBy: { createdAt: "desc" } }),
-  ]);
+  // ONE consistent snapshot of the job AND the artifact it will export, so every
+  // guard below and the Drive write all refer to the SAME state. Reading the
+  // artifact separately at export time would let a callback landing mid-publish
+  // push an unreviewed (or fatal) workbook into the client's bookmarked Sheet —
+  // which the conditional write below cannot undo, because Drive is not part of
+  // that transaction.
+  //
+  // REPEATABLE READ is load-bearing, not decoration: Postgres defaults to READ
+  // COMMITTED, where every statement takes its OWN snapshot, so a plain batch
+  // could still read the job from before a result callback and the artifact from
+  // after it. The result callback writes job + transactions + artifact in one
+  // transaction, so under a transaction-wide snapshot this read sees all of a
+  // run or none of it.
+  const [job, artifact] = await db.$transaction(
+    [
+      db.reportJob.findUnique({
+        where: { id: jobId },
+        select: {
+          id: true,
+          status: true,
+          targetUserId: true,
+          title: true,
+          sheetUrl: true,
+          verification: true,
+          dispatchedAt: true,
+          completedAt: true,
+        },
+      }),
+      db.reportArtifact.findFirst({ where: { jobId }, orderBy: { createdAt: "desc" } }),
+    ],
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  );
   if (!job) return NextResponse.json({ error: "not found" }, { status: 404 });
   if (!PUBLISHABLE.includes(job.status)) {
     return NextResponse.json({ error: `cannot publish a ${job.status} job` }, { status: 409 });

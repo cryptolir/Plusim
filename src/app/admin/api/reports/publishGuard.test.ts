@@ -407,12 +407,17 @@ describe("sheet export on re-publish", () => {
     expect(updateSheet).toHaveBeenCalledWith({ fileId: "sheet-1", xlsx: VERIFIED.bytes });
   });
 
-  it("the job and its artifact are read as ONE snapshot", async () => {
+  it("the job and its artifact are read as ONE snapshot, under REPEATABLE READ", async () => {
+    // Postgres defaults to READ COMMITTED, where each statement takes its own
+    // snapshot — a plain batch would still let the job and the artifact come
+    // from different states, which is the race this read exists to close
+    // (code review #25 round 4).
     withDrive();
     jobFind.mockResolvedValue(job());
     await publishPOST(req(), params);
-    const batch = (db.$transaction as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const [batch, opts] = (db.$transaction as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(batch).toHaveLength(2);
+    expect(opts).toMatchObject({ isolationLevel: "RepeatableRead" });
   });
 
   it("first publish with no prior sheet creates one (unchanged behaviour)", async () => {
