@@ -330,6 +330,54 @@ describe("sheet export on re-publish", () => {
     );
   });
 
+  // A skip is not a success: if this publish did not put the current workbook in
+  // Drive, an existing link points at the PREVIOUS one and must go (code review
+  // #25 round 2 — the clearing rule originally covered only the throw path).
+  describe("republish_skip_paths_clear_stale_sheet_url", () => {
+    const STALE = "https://docs.google.com/spreadsheets/d/sheet-1/edit";
+
+    it("Drive disconnected", async () => {
+      driveConnected.mockResolvedValue(false);
+      jobFind.mockResolvedValue(job({ status: "published", sheetUrl: STALE }));
+      const res = await publishPOST(req(), params);
+      expect(res.status).toBe(200);
+      expect(jobUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ sheetUrl: null }) }),
+      );
+      await expect(res.json()).resolves.toMatchObject({ sheetUrl: null });
+    });
+
+    it("user has no assigned folder", async () => {
+      withDrive();
+      folderFind.mockResolvedValue(null);
+      jobFind.mockResolvedValue(job({ status: "published", sheetUrl: STALE }));
+      const res = await publishPOST(req(), params);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.sheetUrl).toBeNull();
+      expect(body.exportNote).toMatch(/stale sheet link cleared/);
+    });
+
+    it("no xlsx artifact to export", async () => {
+      withDrive();
+      artifactFind.mockResolvedValue(null);
+      jobFind.mockResolvedValue(job({ status: "published", sheetUrl: STALE }));
+      const res = await publishPOST(req(), params);
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toMatchObject({ sheetUrl: null });
+    });
+
+    it("a skip with NO prior link stays null and notes the skip (unchanged)", async () => {
+      driveConnected.mockResolvedValue(false);
+      jobFind.mockResolvedValue(job()); // sheetUrl null
+      const res = await publishPOST(req(), params);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.sheetUrl).toBeNull();
+      expect(body.exportNote).toBe("Drive not connected — sheet export skipped");
+    });
+  });
+
   it("first publish with no prior sheet creates one (unchanged behaviour)", async () => {
     withDrive();
     jobFind.mockResolvedValue(job());

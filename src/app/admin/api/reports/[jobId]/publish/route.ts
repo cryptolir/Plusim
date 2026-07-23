@@ -116,6 +116,10 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
   // write to, and trashing is a write. Cleanup happens after the publish
   // commits, so a raced publish never trashes a sheet that stays in use.
   let containedExistingId: string | null = null;
+  // True only once THIS publish has put the current workbook in Drive (updated
+  // in place or created anew). Every other outcome — an exception, or any of the
+  // skip paths (no Drive, no folder, no artifact) — leaves it false.
+  let exportedCurrent = false;
   try {
     if (!(await isDriveConnected())) {
       exportNote = "Drive not connected — sheet export skipped";
@@ -146,6 +150,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
             containedExistingId = existingId;
             await updateXlsxSpreadsheet({ fileId: existingId, xlsx });
             updatedInPlace = true;
+            exportedCurrent = true;
           } catch (e) {
             console.warn(
               `[admin/reports] job=${jobId} in-place sheet update failed, creating a new sheet: ${e instanceof Error ? e.message : String(e)}`,
@@ -161,18 +166,22 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
             appProperties: { plusimReport: "true", plusimJobId: jobId },
           });
           sheetUrl = `https://docs.google.com/spreadsheets/d/${entry.id}/edit`;
+          exportedCurrent = true;
         }
       }
     }
   } catch (e) {
     exportNote = `sheet export failed: ${e instanceof Error ? e.message : String(e)}`;
     console.error(`[admin/reports] job=${jobId} ${exportNote}`);
-    // Neither path produced a current sheet. Never keep serving a link to the
-    // previous workbook next to updated tables — drop it until an export works.
-    if (job.sheetUrl) {
-      sheetUrl = null;
-      exportNote += " — stale sheet link cleared";
-    }
+  }
+
+  // ONE post-condition covering every way this publish failed to produce a
+  // current workbook — a thrown export AND each skip path. The client must never
+  // be handed a link to the previous workbook beside freshly published tables;
+  // no link is the honest state, and the next successful publish restores one.
+  if (!exportedCurrent && job.sheetUrl) {
+    sheetUrl = null;
+    exportNote = `${exportNote ?? "no current workbook was exported"} — stale sheet link cleared`;
   }
 
   // Conditional publish: re-assert everything the pre-check validated. Both
