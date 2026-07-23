@@ -261,7 +261,7 @@ describe("sheet export on re-publish", () => {
     expect(jobUpdateMany.mock.invocationCallOrder[0]).toBeLessThan(trash.mock.invocationCallOrder[0]);
   });
 
-  it("a raced publish (0 rows) trashes nothing — the old sheet stays live", async () => {
+  it("a raced publish (0 rows) never trashes the OLD live sheet", async () => {
     withDrive();
     updateSheet.mockRejectedValue(new Error("drive 404"));
     jobUpdateMany.mockResolvedValue({ count: 0 });
@@ -270,6 +270,35 @@ describe("sheet export on re-publish", () => {
     );
     const res = await publishPOST(req(), params);
     expect(res.status).toBe(409);
+    expect(trash).not.toHaveBeenCalledWith("sheet-1");
+  });
+
+  it("republish_lost_claim_trashes_the_unadopted_sheet", async () => {
+    // The claim lost, so the replacement was never adopted by the DB — leaving it
+    // would put an untracked duplicate workbook in the client's folder
+    // (code review #25 round 5).
+    withDrive();
+    updateSheet.mockRejectedValue(new Error("drive 404")); // forces create-new
+    jobUpdateMany.mockResolvedValue({ count: 0 });
+    jobFind.mockResolvedValue(
+      job({ status: "published", sheetUrl: "https://docs.google.com/spreadsheets/d/sheet-1/edit" }),
+    );
+    const res = await publishPOST(req(), params);
+    expect(res.status).toBe(409);
+    expect(createSheet).toHaveBeenCalled();
+    expect(trash).toHaveBeenCalledWith("sheet-new");
+    expect(trash).not.toHaveBeenCalledWith("sheet-1");
+  });
+
+  it("a lost claim with no sheet created trashes nothing at all", async () => {
+    withDrive();
+    jobUpdateMany.mockResolvedValue({ count: 0 });
+    jobFind.mockResolvedValue(
+      job({ status: "published", sheetUrl: "https://docs.google.com/spreadsheets/d/sheet-1/edit" }),
+    );
+    const res = await publishPOST(req(), params); // in-place update succeeds
+    expect(res.status).toBe(409);
+    expect(createSheet).not.toHaveBeenCalled();
     expect(trash).not.toHaveBeenCalled();
   });
 

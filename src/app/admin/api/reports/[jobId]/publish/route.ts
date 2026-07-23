@@ -140,6 +140,10 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
   // in place or created anew). Every other outcome — an exception, or any of the
   // skip paths (no Drive, no folder, no artifact) — leaves it false.
   let exportedCurrent = false;
+  // A replacement spreadsheet this request created. Only the DB claim below makes
+  // it the client's sheet; if that claim loses, it is an untracked duplicate and
+  // gets trashed.
+  let createdSheetId: string | null = null;
   try {
     if (!(await isDriveConnected())) {
       exportNote = "Drive not connected — sheet export skipped";
@@ -182,6 +186,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
             xlsx,
             appProperties: { plusimReport: "true", plusimJobId: jobId },
           });
+          createdSheetId = entry.id;
           sheetUrl = `https://docs.google.com/spreadsheets/d/${entry.id}/edit`;
           exportedCurrent = true;
         }
@@ -223,6 +228,19 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
   });
   if (upd.count === 0) {
     console.warn(`[admin/reports] job=${jobId} publish raced a run/append — nothing published`);
+    // The claim lost, so the sheet this request created was never adopted: the DB
+    // still points at the old one (or at nothing). Leaving it would put an
+    // untracked duplicate workbook in the client's folder. The OLD live sheet is
+    // never touched here — only the replacement nobody references.
+    if (createdSheetId) {
+      try {
+        await trashFile(createdSheetId);
+      } catch (e) {
+        console.warn(
+          `[admin/reports] job=${jobId} could not trash the unadopted sheet ${createdSheetId}: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
     return NextResponse.json(
       { error: "the job changed while publishing (a run or an upload landed) — re-check it and publish again" },
       { status: 409 },
