@@ -14,7 +14,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeReportsRequest } from "@/lib/reportsAdminAuth";
 import { trashFile } from "@/lib/googleDrive";
-import { prepareStatements, resolveTargetFolder, uploadStatements } from "@/lib/reportStatementUpload";
+import {
+  prepareStatements,
+  resolveTargetFolder,
+  uploadStatements,
+  type WrittenStatement,
+} from "@/lib/reportStatementUpload";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -50,7 +55,7 @@ export async function POST(req: NextRequest) {
     select: { id: true },
   });
 
-  const written: { driveFileId: string; rowId: string }[] = [];
+  const written: WrittenStatement[] = [];
   try {
     await uploadStatements({ jobId: job.id, folderId, prepared, written });
   } catch (e) {

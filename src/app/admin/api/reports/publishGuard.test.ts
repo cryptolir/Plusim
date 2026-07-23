@@ -220,7 +220,7 @@ describe("sheet export on re-publish", () => {
     });
   });
 
-  it("republish_sheet_outside_user_folder_falls_back — no in-place write, old sheet trashed", async () => {
+  it("republish_sheet_outside_user_folder_falls_back — no in-place write, and NO trash of an uncontained id", async () => {
     withDrive();
     assertFolder.mockRejectedValue(new Error("not under the user's folder"));
     jobFind.mockResolvedValue(
@@ -230,10 +230,39 @@ describe("sheet export on re-publish", () => {
     expect(res.status).toBe(200);
     expect(updateSheet).not.toHaveBeenCalled();
     expect(createSheet).toHaveBeenCalledWith(expect.objectContaining({ parentFolderId: "folder-1" }));
-    expect(trash).toHaveBeenCalledWith("sheet-1");
+    // A sheet that failed containment may sit in ANOTHER client's folder.
+    // Trashing is a write — never against an id we just refused (code review #25).
+    expect(trash).not.toHaveBeenCalled();
     await expect(res.json()).resolves.toMatchObject({
       sheetUrl: "https://docs.google.com/spreadsheets/d/sheet-new/edit",
     });
+  });
+
+  it("republish_trashes_superseded_sheet_only_after_the_publish_commits", async () => {
+    withDrive();
+    updateSheet.mockRejectedValue(new Error("drive 404")); // contained, but unwritable
+    jobFind.mockResolvedValue(
+      job({ status: "published", sheetUrl: "https://docs.google.com/spreadsheets/d/sheet-1/edit" }),
+    );
+    const res = await publishPOST(req(), params);
+    expect(res.status).toBe(200);
+    expect(assertFolder).toHaveBeenCalledWith("sheet-1", "folder-1");
+    expect(trash).toHaveBeenCalledWith("sheet-1");
+    // Order matters: the DB write commits first, so a raced publish cannot trash
+    // a sheet that is still the live one.
+    expect(jobUpdateMany.mock.invocationCallOrder[0]).toBeLessThan(trash.mock.invocationCallOrder[0]);
+  });
+
+  it("a raced publish (0 rows) trashes nothing — the old sheet stays live", async () => {
+    withDrive();
+    updateSheet.mockRejectedValue(new Error("drive 404"));
+    jobUpdateMany.mockResolvedValue({ count: 0 });
+    jobFind.mockResolvedValue(
+      job({ status: "published", sheetUrl: "https://docs.google.com/spreadsheets/d/sheet-1/edit" }),
+    );
+    const res = await publishPOST(req(), params);
+    expect(res.status).toBe(409);
+    expect(trash).not.toHaveBeenCalled();
   });
 
   it("republish_sheet_update_falls_back_to_create — update throws", async () => {
@@ -254,6 +283,7 @@ describe("sheet export on re-publish", () => {
     withDrive();
     updateSheet.mockRejectedValue(new Error("drive 404"));
     trash.mockRejectedValue(new Error("drive 403"));
+    jobUpdateMany.mockResolvedValue({ count: 1 });
     jobFind.mockResolvedValue(
       job({ status: "published", sheetUrl: "https://docs.google.com/spreadsheets/d/sheet-1/edit" }),
     );

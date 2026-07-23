@@ -111,6 +111,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
   // client's bookmarked link stays valid and current.
   let sheetUrl = job.sheetUrl;
   let exportNote: string | null = null;
+  // Set ONLY when the previous sheet passed folder containment. A sheet that
+  // failed containment may sit in another client's folder — it is not ours to
+  // write to, and trashing is a write. Cleanup happens after the publish
+  // commits, so a raced publish never trashes a sheet that stays in use.
+  let containedExistingId: string | null = null;
   try {
     if (!(await isDriveConnected())) {
       exportNote = "Drive not connected — sheet export skipped";
@@ -136,6 +141,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
         if (existingId) {
           try {
             await assertEntryUnderFolder(existingId, folder.folderId);
+            // Contained: this id is now a legitimate write target, so it may
+            // also be trashed if the update fails and we create a replacement.
+            containedExistingId = existingId;
             await updateXlsxSpreadsheet({ fileId: existingId, xlsx });
             updatedInPlace = true;
           } catch (e) {
@@ -152,18 +160,6 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
             xlsx,
             appProperties: { plusimReport: "true", plusimJobId: jobId },
           });
-          // The stale sheet would otherwise sit next to the new one showing old
-          // numbers; trashing is recoverable and strictly best-effort — it must
-          // never escape and discard the link we just created.
-          if (existingId) {
-            try {
-              await trashFile(existingId);
-            } catch (e) {
-              console.warn(
-                `[admin/reports] job=${jobId} could not trash the superseded sheet ${existingId}: ${e instanceof Error ? e.message : String(e)}`,
-              );
-            }
-          }
           sheetUrl = `https://docs.google.com/spreadsheets/d/${entry.id}/edit`;
         }
       }
@@ -205,6 +201,20 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
       { error: "the job changed while publishing (a run or an upload landed) — re-check it and publish again" },
       { status: 409 },
     );
+  }
+
+  // The publish committed and sheetUrl now points at the replacement, so the old
+  // sheet is genuinely superseded — otherwise it would sit beside the new one
+  // showing stale numbers. Only ever a contained id, only after the commit, and
+  // strictly best-effort (trash is recoverable).
+  if (containedExistingId && sheetUrl && !sheetUrl.includes(containedExistingId)) {
+    try {
+      await trashFile(containedExistingId);
+    } catch (e) {
+      console.warn(
+        `[admin/reports] job=${jobId} could not trash the superseded sheet ${containedExistingId}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   }
 
   console.log(

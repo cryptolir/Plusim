@@ -138,6 +138,20 @@ it("append_folder_mismatch_409 — existing rows in a previously assigned folder
   expect(fileCreate).not.toHaveBeenCalled();
 });
 
+it("append_orphan_drive_file_trashed_when_row_insert_fails — the id is recorded before the insert", async () => {
+  // Upload succeeds, the row insert does not: without recording the Drive id
+  // first, rollback cannot reach the file and it stays in the client's folder.
+  uploadBin.mockResolvedValue({ id: "drive-orphan" });
+  fileCreate.mockRejectedValue(new Error("unique constraint"));
+
+  const res = await appendPOST(appendReq(), params);
+  expect(res.status).toBe(502);
+  expect(trash).toHaveBeenCalledWith("drive-orphan");
+  // No row was created, so nothing to delete — and never a delete of every row.
+  expect(fileDeleteMany).not.toHaveBeenCalled();
+  expect(jobDelete).not.toHaveBeenCalled();
+});
+
 it("append_rollback_preserves_job — mid-loop failure removes ONLY what it added", async () => {
   uploadBin
     .mockResolvedValueOnce({ id: "drive-1" })

@@ -26,7 +26,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeReportsRequest } from "@/lib/reportsAdminAuth";
 import { trashFile } from "@/lib/googleDrive";
-import { prepareStatements, resolveTargetFolder, uploadStatements } from "@/lib/reportStatementUpload";
+import {
+  prepareStatements,
+  resolveTargetFolder,
+  uploadStatements,
+  type WrittenStatement,
+} from "@/lib/reportStatementUpload";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -75,15 +80,17 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     );
   }
 
-  const written: { driveFileId: string; rowId: string }[] = [];
+  const written: WrittenStatement[] = [];
   try {
     await uploadStatements({ jobId, folderId, prepared, written });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error(`[admin/reports] job=${jobId} append failed, rolling back ${written.length}: ${msg}`);
+    // Every uploaded file is trashed — including one whose row insert failed.
     await Promise.allSettled(written.map((w) => trashFile(w.driveFileId)));
+    const rowIds = written.map((w) => w.rowId).filter((id): id is string => id !== null);
     try {
-      await db.statementFile.deleteMany({ where: { id: { in: written.map((w) => w.rowId) } } });
+      if (rowIds.length > 0) await db.statementFile.deleteMany({ where: { id: { in: rowIds } } });
     } catch (e) {
       // Rows without their Drive files are dead weight, but the job is intact
       // and a re-append is safe — never turn cleanup into a second failure.

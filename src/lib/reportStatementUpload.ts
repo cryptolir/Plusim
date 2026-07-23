@@ -95,16 +95,26 @@ export async function resolveTargetFolder(targetUserId: string): Promise<string 
   return folder.folderId;
 }
 
+export interface WrittenStatement {
+  driveFileId: string;
+  /** null until the row insert succeeds — the Drive file can outlive a failed insert. */
+  rowId: string | null;
+}
+
 /**
  * Write each statement into the folder and record a StatementFile row.
- * Throws on the first Drive failure — the caller rolls back using `written`,
- * which is mutated in place so a partial run is still fully known.
+ * Throws on the first failure — the caller rolls back using `written`, which is
+ * mutated in place so a partial run is still fully known.
+ *
+ * The Drive id is recorded BEFORE the row insert: an upload that succeeds while
+ * its insert fails would otherwise leave a statement in the client's folder that
+ * no rollback can reach.
  */
 export async function uploadStatements(opts: {
   jobId: string;
   folderId: string;
   prepared: PreparedStatement[];
-  written: { driveFileId: string; rowId: string }[];
+  written: WrittenStatement[];
 }): Promise<void> {
   for (const p of opts.prepared) {
     const entry = await uploadBinaryFile({
@@ -114,6 +124,8 @@ export async function uploadStatements(opts: {
       bytes: p.bytes,
       appProperties: { plusimStatement: "true", plusimJobId: opts.jobId },
     });
+    const written: WrittenStatement = { driveFileId: entry.id, rowId: null };
+    opts.written.push(written);
     const row = await db.statementFile.create({
       data: {
         jobId: opts.jobId,
@@ -125,6 +137,6 @@ export async function uploadStatements(opts: {
       },
       select: { id: true },
     });
-    opts.written.push({ driveFileId: entry.id, rowId: row.id });
+    written.rowId = row.id;
   }
 }
