@@ -40,3 +40,14 @@ export const CONTEXT_TIMEOUT_MS = 2_500;
  * context via the outer race; admin → a bounded error).
  */
 export const TOKEN_REFRESH_TIMEOUT_MS = 4_000;
+
+/**
+ * Bounds the bare-load `/api/chat/new-session` bootstrap fetch (ms). The `/chat`
+ * render gate holds the send surface hidden until this settles, so a request
+ * that *hangs* (never resolves — distinct from a reject or non-OK) would leave a
+ * bare `/chat` load permanently inert. On timeout the fetch aborts → rejects →
+ * falls into the same fallback branch as a network error (surface enabled, first
+ * send lazy-creates). Comfortably above one insert+prune, well under any user's
+ * patience. See docs/plans/chat-bootstrap.md (P1c, Rev 18).
+ */
+export const NEW_SESSION_TIMEOUT_MS = 4_000;

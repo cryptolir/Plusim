@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { getAgentInfo, makeSessionKey } from "@/lib/agentglob";
+import { makeSessionKey } from "@/lib/agentglob";
 
 export async function POST(req: NextRequest) {
   const userId = await getCurrentUser();
@@ -42,12 +42,9 @@ export async function POST(req: NextRequest) {
     // non-fatal
   }
 
-  let agentInfo = null;
-  try {
-    agentInfo = await getAgentInfo();
-  } catch {
-    // non-fatal
-  }
-
-  return NextResponse.json({ conversationId: conversation.id, agentInfo });
+  // P3 (Rev 2): the awaited `getAgentInfo()` was dropped — new-session's only
+  // caller (`chat/page.tsx`) reads `conversationId` and discards `agentInfo`, so
+  // blocking the bootstrap response on an external AgentGlob round trip only
+  // widened the bare-load gate window for no consumer.
+  return NextResponse.json({ conversationId: conversation.id });
 }

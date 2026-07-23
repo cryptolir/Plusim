@@ -21,7 +21,7 @@ vi.mock("@/lib/appSettings", () => ({ getSetting: vi.fn(async () => null) }));
 vi.mock("@/lib/pastMeeting", () => ({ buildLinkedFolderContext: vi.fn(async () => null) }));
 
 const dbMock = vi.hoisted(() => ({
-  conversation: { findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
+  conversation: { findUnique: vi.fn(), create: vi.fn(), updateMany: vi.fn() },
   message: { create: vi.fn() },
   conversationView: { upsert: vi.fn() },
   $executeRaw: vi.fn(),
@@ -42,7 +42,8 @@ function post(body: object) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  dbMock.conversation.update.mockResolvedValue({});
+  // P1b: the title fill is now an atomic `updateMany` (where title:null).
+  dbMock.conversation.updateMany.mockResolvedValue({ count: 1 });
   dbMock.conversationView.upsert.mockResolvedValue({});
   dbMock.$executeRaw.mockResolvedValue(1);
   dbMock.message.create.mockImplementation(async (a: { data: Record<string, unknown> }) => ({
@@ -57,7 +58,7 @@ it("T7: a bookkeeping failure still returns the persisted reply (200)", async ()
     id: "c1", userId: "user-1", sessionKey: "app:plusim:user-1:c1",
     sectionContext: null, title: null, _count: { messages: 0 },
   });
-  dbMock.conversation.update.mockRejectedValue(new Error("db down"));
+  dbMock.conversation.updateMany.mockRejectedValue(new Error("db down"));
   dbMock.$executeRaw.mockRejectedValue(new Error("db down"));
   dbMock.conversationView.upsert.mockRejectedValue(new Error("db down"));
 
@@ -87,9 +88,9 @@ it("T4: null-title first message → title update precedes the bump, and bump==v
   const order: string[] = [];
   let rawNow: Date | undefined;
   let viewNow: Date | undefined;
-  dbMock.conversation.update.mockImplementation(async () => {
+  dbMock.conversation.updateMany.mockImplementation(async () => {
     order.push("title");
-    return {};
+    return { count: 1 };
   });
   dbMock.$executeRaw.mockImplementation(async (_s: unknown, ...values: unknown[]) => {
     order.push("bump");
@@ -119,5 +120,27 @@ it("T4b: a conversation that already has a title skips the title write", async (
     sectionContext: null, title: "existing", _count: { messages: 0 },
   });
   await post({ conversationId: "c1", message: "hello" });
-  expect(dbMock.conversation.update).not.toHaveBeenCalled();
+  expect(dbMock.conversation.updateMany).not.toHaveBeenCalled();
+});
+
+it("T9: an unknown supplied conversationId 404s — /api/chat stays lookup-only", async () => {
+  // A supplied id that doesn't resolve must NOT create-if-missing (constraint #1).
+  dbMock.conversation.findUnique.mockResolvedValue(null);
+  const res = await post({ conversationId: "does-not-exist", message: "hi" });
+  expect(res.status).toBe(404);
+  expect(dbMock.conversation.create).not.toHaveBeenCalled();
+});
+
+it("T4c: the title fill is atomic — updateMany carries the title:null guard", async () => {
+  dbMock.conversation.findUnique.mockResolvedValue({
+    id: "c1", userId: "user-1", sessionKey: "app:plusim:user-1:c1",
+    sectionContext: null, title: null, _count: { messages: 0 },
+  });
+  await post({ conversationId: "c1", message: "hello there" });
+  expect(dbMock.conversation.updateMany).toHaveBeenCalledWith(
+    expect.objectContaining({
+      where: { id: "c1", title: null },
+      data: { title: "hello there" },
+    }),
+  );
 });
