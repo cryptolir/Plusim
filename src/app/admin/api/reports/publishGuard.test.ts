@@ -20,6 +20,10 @@ import { NextRequest } from "next/server";
 vi.mock("@/lib/reportsAdminAuth", () => ({ authorizeReportsRequest: vi.fn() }));
 vi.mock("@/lib/db", () => ({
   db: {
+    // The job + artifact snapshot is read as one $transaction batch; resolving
+    // the queries it was handed keeps every findUnique/findFirst mock below
+    // working exactly as it would for a direct call.
+    $transaction: vi.fn((ops: Promise<unknown>[]) => Promise.all(ops)),
     reportJob: { findUnique: vi.fn(), updateMany: vi.fn() },
     reportTransaction: { count: vi.fn() },
     reportArtifact: { findFirst: vi.fn() },
@@ -78,7 +82,11 @@ function job(over: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  (db.$transaction as unknown as ReturnType<typeof vi.fn>).mockImplementation((ops: Promise<unknown>[]) =>
+    Promise.all(ops),
+  );
   auth.mockResolvedValue({ actor: "admin@plusim.xyz" });
+  artifactFind.mockResolvedValue(null);
   txCount.mockResolvedValue(0);
   fileCount.mockResolvedValue(0); // no files newer than the dispatch
   jobUpdateMany.mockResolvedValue({ count: 1 });
@@ -376,6 +384,35 @@ describe("sheet export on re-publish", () => {
       expect(body.sheetUrl).toBeNull();
       expect(body.exportNote).toBe("Drive not connected — sheet export skipped");
     });
+  });
+
+  it("publish_exports_the_prechecked_artifact_not_a_later_one", async () => {
+    // A re-run callback commits between the pre-check and the Drive write. The
+    // export must carry the artifact belonging to the state that was verified —
+    // Drive is outside the conditional write's transaction, so an unreviewed
+    // workbook pushed to the bookmarked Sheet could not be taken back (code
+    // review #25 round 3).
+    withDrive();
+    const VERIFIED = { id: "art-1", filename: "report.xlsx", bytes: Buffer.from("VERIFIED") };
+    const UNREVIEWED = { id: "art-2", filename: "report.xlsx", bytes: Buffer.from("UNREVIEWED") };
+    artifactFind.mockResolvedValueOnce(VERIFIED).mockResolvedValue(UNREVIEWED);
+    jobFind.mockResolvedValue(
+      job({ status: "published", sheetUrl: "https://docs.google.com/spreadsheets/d/sheet-1/edit" }),
+    );
+
+    const res = await publishPOST(req(), params);
+    expect(res.status).toBe(200);
+    // Read once, inside the snapshot — never again at export time.
+    expect(artifactFind).toHaveBeenCalledTimes(1);
+    expect(updateSheet).toHaveBeenCalledWith({ fileId: "sheet-1", xlsx: VERIFIED.bytes });
+  });
+
+  it("the job and its artifact are read as ONE snapshot", async () => {
+    withDrive();
+    jobFind.mockResolvedValue(job());
+    await publishPOST(req(), params);
+    const batch = (db.$transaction as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(batch).toHaveLength(2);
   });
 
   it("first publish with no prior sheet creates one (unchanged behaviour)", async () => {

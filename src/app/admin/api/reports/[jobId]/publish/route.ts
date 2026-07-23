@@ -51,19 +51,29 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
   if (auth instanceof NextResponse) return auth;
 
   const { jobId } = await ctx.params;
-  const job = await db.reportJob.findUnique({
-    where: { id: jobId },
-    select: {
-      id: true,
-      status: true,
-      targetUserId: true,
-      title: true,
-      sheetUrl: true,
-      verification: true,
-      dispatchedAt: true,
-      completedAt: true,
-    },
-  });
+  // ONE consistent snapshot of the job AND the artifact it will export. The
+  // result callback rewrites both in a single transaction, so this read sees
+  // either all of a run or none of it — and every guard below, plus the Drive
+  // write, then refers to the SAME state. Re-reading the artifact at export time
+  // would let a callback landing mid-publish push an unreviewed (or fatal)
+  // workbook into the client's bookmarked Sheet, which the conditional write
+  // below cannot undo because Drive is not part of that transaction.
+  const [job, artifact] = await db.$transaction([
+    db.reportJob.findUnique({
+      where: { id: jobId },
+      select: {
+        id: true,
+        status: true,
+        targetUserId: true,
+        title: true,
+        sheetUrl: true,
+        verification: true,
+        dispatchedAt: true,
+        completedAt: true,
+      },
+    }),
+    db.reportArtifact.findFirst({ where: { jobId }, orderBy: { createdAt: "desc" } }),
+  ]);
   if (!job) return NextResponse.json({ error: "not found" }, { status: 404 });
   if (!PUBLISHABLE.includes(job.status)) {
     return NextResponse.json({ error: `cannot publish a ${job.status} job` }, { status: 409 });
@@ -125,9 +135,6 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
       exportNote = "Drive not connected — sheet export skipped";
     } else {
       const folder = await db.userDriveFolder.findUnique({ where: { userId: job.targetUserId } });
-      const artifact = folder
-        ? await db.reportArtifact.findFirst({ where: { jobId }, orderBy: { createdAt: "desc" } })
-        : null;
       if (!folder) {
         exportNote = "user has no assigned Drive folder — sheet export skipped";
       } else if (!artifact) {
