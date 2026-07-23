@@ -31,8 +31,18 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     select: { id: true, status: true, _count: { select: { files: true } } },
   });
   if (!job) return NextResponse.json({ error: "not found" }, { status: 404 });
+  // A published job may be re-run to absorb newly appended statements, but only
+  // deliberately: the caller must opt in with {"confirmUpdate":true}. Without the
+  // flag the old refusal stands, so no accidental or legacy call can pull a live
+  // report out of the client's view. The job LEAVES `published` until the admin
+  // re-publishes; publishedAt + sheetUrl are kept (history + in-place re-export).
   if (job.status === "published") {
-    return NextResponse.json({ error: "job already published" }, { status: 409 });
+    const body = await req.json().catch(() => null);
+    const confirmed =
+      body !== null && typeof body === "object" && (body as { confirmUpdate?: unknown }).confirmUpdate === true;
+    if (!confirmed) {
+      return NextResponse.json({ error: "job already published" }, { status: 409 });
+    }
   }
   if (job._count.files === 0) {
     return NextResponse.json({ error: "job has no statement files" }, { status: 400 });

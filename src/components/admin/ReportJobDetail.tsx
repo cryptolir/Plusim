@@ -119,6 +119,36 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
     }
   }
 
+  // Re-running a PUBLISHED report is the "update a ready report" path: it pulls
+  // the report out of the client's view until it is re-published, and the agent
+  // rebuilds every row — so manual category assignments that were not saved with
+  // "לזכור" are recomputed. Both consequences are stated before we send.
+  async function runAgent() {
+    const published = job?.status === "published";
+    if (
+      published &&
+      !window.confirm(
+        "הרצה מחדש של דוח שפורסם:\n\n" +
+          "• הדוח ייעלם מהתצוגה של הלקוח עד לפרסום מחדש.\n" +
+          "• הסוכן יבנה מחדש את כל השורות — סיווגים ידניים שלא נשמרו עם סימון “לזכור” יחושבו מחדש.\n\n" +
+          "להמשיך?",
+      )
+    ) {
+      return;
+    }
+    await action("run", `/admin/api/reports/${jobId}/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(published ? { confirmUpdate: true } : {}),
+    });
+  }
+
+  async function addFiles(files: FileList) {
+    const form = new FormData();
+    for (const f of Array.from(files)) form.append("files", f);
+    await action("addFiles", `/admin/api/reports/${jobId}/files`, { method: "POST", body: form });
+  }
+
   async function assignCategory(txId: string, category: string, remember: boolean) {
     if (!category) return;
     await action("assign", `/admin/api/reports/${jobId}/transactions/${txId}`, {
@@ -148,8 +178,8 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
 
       <div className="flex flex-wrap gap-2">
         <button
-          onClick={() => action("run", `/admin/api/reports/${jobId}/run`, { method: "POST" })}
-          disabled={busy !== null || job.status === "published"}
+          onClick={() => runAgent()}
+          disabled={busy !== null || running}
           className="min-h-11 rounded-lg border px-4 disabled:opacity-50"
         >
           {busy === "run" ? "שולח…" : job.status === "uploaded" ? "שליחה לסוכן" : "הרצה מחדש של הסוכן"}
@@ -178,6 +208,32 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
             </li>
           ))}
         </ul>
+        {/* Adding files to a job that already has a report is the update flow:
+            upload here, then re-run the agent over the whole set. Hidden while
+            the agent is working — the server refuses those appends anyway. */}
+        {!running && (
+          <label className="mt-3 flex flex-wrap items-center gap-2 text-sm">
+            <span className="text-muted-foreground">הוספת דפי חשבון (.xlsx / .pdf)</span>
+            <input
+              type="file"
+              multiple
+              accept=".xlsx,.pdf"
+              disabled={busy !== null}
+              onChange={(e) => {
+                const files = e.target.files;
+                if (files && files.length > 0) void addFiles(files);
+                e.target.value = "";
+              }}
+              className="min-h-11 rounded-lg border bg-background px-2 py-2 disabled:opacity-50"
+            />
+            {busy === "addFiles" && <span className="text-muted-foreground">מעלה…</span>}
+            {job.files.length > 0 && (
+              <span className="text-xs text-muted-foreground">
+                לאחר ההוספה יש להריץ את הסוכן מחדש כדי לעדכן את הדוח.
+              </span>
+            )}
+          </label>
+        )}
       </section>
 
       {v && (

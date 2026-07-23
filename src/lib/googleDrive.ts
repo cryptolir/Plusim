@@ -347,6 +347,27 @@ export async function uploadXlsxAsSpreadsheet(opts: {
 }
 
 /**
+ * Replace an EXISTING native Google Spreadsheet's content with a new xlsx
+ * (media PATCH; Drive re-converts in place, the file id and mimeType survive).
+ * Used by report re-publish so the client's bookmarked Sheet link keeps working
+ * and shows the current workbook instead of the first run's.
+ * Callers must contain the id first — assertEntryUnderRoot(folder) AND
+ * assertEntryUnderFolder(fileId, folder); this helper trusts neither.
+ */
+export async function updateXlsxSpreadsheet(opts: { fileId: string; xlsx: Buffer }): Promise<DriveEntry> {
+  const params = new URLSearchParams({ uploadType: "media", fields: FIELDS, supportsAllDrives: "true" });
+  const res = await driveFetch(`${DRIVE_UPLOAD}/files/${encodeURIComponent(opts.fileId)}?${params.toString()}`, {
+    method: "PATCH",
+    headers: {
+      "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    },
+    body: new Uint8Array(opts.xlsx),
+  });
+  if (!res.ok) throw new Error(`drive sheet update ${res.status}: ${await res.text()}`);
+  return toEntry((await res.json()) as DriveApiFile);
+}
+
+/**
  * Upload a raw binary file (statement pdf/xlsx) into a Drive folder, preserving
  * the ORIGINAL mime — no Google-Docs conversion. Used by the reports upload flow
  * to store raw statements in the client's folder. Tagged with appProperties.
