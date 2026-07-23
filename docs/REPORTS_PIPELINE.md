@@ -32,6 +32,27 @@ the processed report in `/report`. Agent-side skill + ops runbook:
    → /report shows published reports: native RTL tables + xlsx download + Sheet link
 ```
 
+**Updating a ready report** (many statements arrive in batches — one report, not
+several):
+
+```
+/admin/reports/<id> on a completed | needs_review | published job
+   → POST /admin/api/reports/:id/files   (multipart, same containment as create;
+        refused while the agent is running, or if existing rows point at a
+        previously assigned folder)
+   → Re-run (a published job requires {"confirmUpdate":true}; the job LEAVES
+        `published`, so the client stops seeing it until re-published)
+   → the agent re-parses the UNION of files, dedups by dedupKey, rebuilds the
+        whole workbook; the result callback replaces transactions + artifact
+   → review as usual → Publish again: the SAME Google Sheet is updated in place,
+        so the client's bookmarked link stays valid and current
+```
+
+The merge is free: the result callback already full-replaces a job's rows and
+artifact, and the manifest already lists every `StatementFile` of the job — so
+"add data to a ready report" is append rows + re-dispatch, with no new report
+format, no schema change, and no agent-skill change.
+
 ## Key properties
 
 - **Money is agorot integers** end to end; floats only at render time.
@@ -65,11 +86,29 @@ the processed report in `/report`. Agent-side skill + ops runbook:
   `status in (dispatched|processing)` + the authorizing token hash — 0 rows ⇒
   409, nothing written (closes the publish/result race).
 - **Drive confinement**: raw statements live in the client's folder. On upload
-  the parent is the DB `UserDriveFolder` (never the request), re-contained with
+  (create AND append — one shared module, `lib/reportStatementUpload.ts`) the
+  parent is the DB `UserDriveFolder` (never the request), re-contained with
   `assertEntryUnderRoot` at write time. On agent download, the read is bound to
   the job user's CURRENT folder — the row's `driveFolderId` must match and
   `assertEntryUnderFolder(driveFileId, folderId)` must pass — so a stale or
-  cross-linked file in another user's folder is rejected.
+  cross-linked file in another user's folder is rejected. The Sheet export runs
+  **both** assertions: `assertEntryUnderFolder` proves the sheet belongs to this
+  client but walks only as far as `folderId` and never consults the root, so the
+  assigned folder itself is re-contained too.
+- **A publish only ever ships the result it verified, from the newest run.**
+  Beyond the fatal-verification gate, publish asserts — at the pre-check AND
+  inside a conditional `updateMany` — that `completedAt >= dispatchedAt` (a
+  rejected callback writes `status`/`error` and leaves `completedAt` alone, so a
+  failed re-run must not publish the previous artifact) and that no
+  `StatementFile.createdAt >= dispatchedAt` (files the run cannot be proven to
+  have seen; `>=` because both are `TIMESTAMP(3)` and a same-millisecond tie must
+  fail closed). The write pins both watermarks and the file set, so a run or
+  callback landing mid-publish yields 0 rows ⇒ 409, nothing published.
+- **Re-publish never leaves a stale Sheet link**: the existing spreadsheet is
+  updated in place when still contained; otherwise a fresh one is created and the
+  superseded one trashed (best-effort, and a trash failure can never discard the
+  new link); if both export paths fail, `sheetUrl` is cleared rather than serving
+  the previous workbook next to updated tables.
 - **Fail closed**: re-verification tags integrity failures (per-source total
   mismatch, unknown category, date-outside-month, duplicate dedupKey, non-xlsx)
   as **fatal**, distinct from reviewable uncategorized rows. Publish refuses any
@@ -101,7 +140,9 @@ src/lib/reportResult.ts                   result parsing + independent verificat
 src/lib/reportsAdminAuth.ts               dual-auth for admin reports APIs (scope "reports")
 src/app/api/agent/jobs/[jobId]/…          manifest | files/[fileId] | result
 src/app/admin/api/reports/…               create+list | [jobId] detail | run | publish |
-                                          transactions/[txId] review
+                                          [jobId]/files append | transactions/[txId] review
+src/lib/reportStatementUpload.ts          shared statement validation + contained upload
+                                          (create and append apply identical rules)
 src/app/admin/api/report-mappings/[id]    approve/reject proposed mappings
 src/app/admin/api/report-categories       add a custom category (POST; Hebrew errors)
 src/app/admin/(dash)/reports/…            admin UI (upload form, job list, job detail)
@@ -110,7 +151,8 @@ src/app/report/page.tsx                   client report section (published only)
 src/app/api/reports/[jobId]/download      xlsx download (Clerk + ownership)
 src/lib/googleDrive.ts                    + uploadBinaryFile() (raw statement upload),
                                           getFileBytes() (agent download), uploadXlsxAsSpreadsheet()
-                                          (publish export), assertEntryUnderFolder() (read confinement)
+                                          (publish export), updateXlsxSpreadsheet() (in-place
+                                          re-publish), assertEntryUnderFolder() (read confinement)
 agent/skills/plusim-reports/              the onlyclaw skill (source of truth);
                                           workbook layout: reference/layout-spec.md +
                                           scripts/build_report_xlsx.py (+ its
@@ -128,8 +170,13 @@ src/lib/reportResult.test.ts              verifyAgentResult fatal-vs-reviewable 
 src/lib/agentRuntimeAuth.test.ts          both auth layers (bearer + per-job token) — 401/404 matrix
 src/app/api/agent/agentRoutes.test.ts     each public route invokes the guard; files/ folder-confinement
 src/app/api/agent/resultRace.test.ts      conditional write: 0 rows ⇒ 409, nothing persisted
-src/app/admin/api/reports/publishGuard.test.ts    every fatal class ⇒ publish 409; non-fatal ⇒ publishes
+src/app/admin/api/reports/publishGuard.test.ts    every fatal class ⇒ publish 409; non-fatal ⇒ publishes;
+                                          result freshness + file coverage + both race pins;
+                                          Sheet in-place update / fallback / cleared-on-failure
 src/app/admin/api/reports/uploadContainment.test.ts   no folder / not connected / moved-or-deleted ⇒ 409
+src/app/admin/api/reports/appendFiles.test.ts     append: mid-run 409, published stays visible,
+                                          containment matrix, folder mismatch, rollback keeps the job
+src/app/admin/api/reports/runUpdateGuard.test.ts  re-running a published job needs confirmUpdate
 src/app/api/agent/reportRulesManifest.test.ts     manifest carries report_rules (set ⇒ value; blank ⇒ "")
 src/config/reportTaxonomy.test.ts         pure merge: section append, invalid-section drop, set≡merge
 src/config/taxonomyInvariants.test.ts     manifest leaves ≡ getValidLeafSet (same rows, malformed too);

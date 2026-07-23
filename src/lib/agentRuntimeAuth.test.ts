@@ -96,4 +96,26 @@ describe("mintJobToken", () => {
     expect(sha256Hex(token)).toBe(tokenHash);
     expect(expiresAt.getTime()).toBeGreaterThan(Date.now());
   });
+
+  it("remint_invalidates_prior_token — a re-run's mint locks out the previous run", async () => {
+    // Update-a-ready-report re-dispatches an already-completed job; the mint
+    // rotates agentTokenHash, so a straggler callback from the earlier run
+    // cannot reach the job any more (plan review PR #23).
+    const first = mintJobToken();
+    const second = mintJobToken();
+    expect(second.tokenHash).not.toBe(first.tokenHash);
+
+    findUnique.mockResolvedValue(jobRow({ agentTokenHash: second.tokenHash }));
+    const stale = await authorizeAgentJobRequest(
+      reqFor("jobA", { bearer: RUNTIME, t: first.token }),
+      "jobA",
+    );
+    expect((stale as Response).status).toBe(404);
+
+    const current = await authorizeAgentJobRequest(
+      reqFor("jobA", { bearer: RUNTIME, t: second.token }),
+      "jobA",
+    );
+    expect(current).not.toBeInstanceOf(Response);
+  });
 });
