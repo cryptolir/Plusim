@@ -53,7 +53,16 @@ import {
 } from "lucide-react";
 import { useEffect, useState, type FC } from "react";
 
-export const Thread: FC<{ firstName?: string | null }> = ({ firstName }) => {
+// `sendEnabled` gates every send entry point while the `/chat` page is still
+// bootstrapping (bare load: awaiting the minted id; `?cid` load: awaiting the
+// initial history hydrate). When false, the welcome suggestions are not rendered
+// and the live Composer is swapped for a non-interactive placeholder, so no send
+// — composer OR suggestion — can fire before the conversation id / history is
+// ready. See docs/plans/chat-bootstrap.md (P1c/P1e).
+export const Thread: FC<{ firstName?: string | null; sendEnabled?: boolean }> = ({
+  firstName,
+  sendEnabled = true,
+}) => {
   return (
     <ThreadPrimitive.Root
       className="aui-root aui-thread-root bg-card @container flex h-full flex-col"
@@ -70,7 +79,7 @@ export const Thread: FC<{ firstName?: string | null }> = ({ firstName }) => {
       >
         <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col px-4 pt-4">
           <AuiIf condition={(s) => s.thread.isEmpty}>
-            <ThreadWelcome firstName={firstName} />
+            <ThreadWelcome firstName={firstName} sendEnabled={sendEnabled} />
           </AuiIf>
 
           <div
@@ -87,11 +96,27 @@ export const Thread: FC<{ firstName?: string | null }> = ({ firstName }) => {
 
           <ThreadPrimitive.ViewportFooter className="aui-thread-viewport-footer bg-card sticky bottom-0 mt-auto flex flex-col gap-4 overflow-visible rounded-t-(--composer-radius) pb-4 md:pb-6">
             <ThreadScrollToBottom />
-            <Composer />
+            {sendEnabled ? <Composer /> : <ComposerPlaceholder />}
           </ThreadPrimitive.ViewportFooter>
         </div>
       </ThreadPrimitive.Viewport>
     </ThreadPrimitive.Root>
+  );
+};
+
+// Non-interactive stand-in shown while the page gates sends. Visually matches the
+// composer shell so the `?cid` view doesn't reflow when the real composer swaps
+// in, but has no input and no send/suggestion affordance — structurally inert.
+const ComposerPlaceholder: FC = () => {
+  return (
+    <div
+      aria-hidden
+      className="aui-composer-root bg-background flex w-full items-center rounded-(--composer-radius) border p-(--composer-padding) opacity-60"
+    >
+      <span className="text-muted-foreground/80 px-1.75 py-2 text-base sm:text-sm">
+        כתבו הודעה…
+      </span>
+    </div>
   );
 };
 
@@ -149,7 +174,10 @@ const ThreadScrollToBottom: FC = () => {
   );
 };
 
-const ThreadWelcome: FC<{ firstName?: string | null }> = ({ firstName }) => {
+const ThreadWelcome: FC<{ firstName?: string | null; sendEnabled?: boolean }> = ({
+  firstName,
+  sendEnabled = true,
+}) => {
   return (
     <div className="aui-thread-welcome-root my-auto flex grow flex-col">
       <div className="aui-thread-welcome-center flex w-full grow flex-col items-center justify-center">
@@ -165,7 +193,10 @@ const ThreadWelcome: FC<{ firstName?: string | null }> = ({ firstName }) => {
           </div>
         </div>
       </div>
-      <ThreadSuggestions />
+      {/* Suggestions are a send entry point (SuggestionPrimitive.Trigger send) —
+          withhold them until the page enables sending, or a click could fire a
+          send before the conversation id / history is ready. */}
+      {sendEnabled && <ThreadSuggestions />}
     </div>
   );
 };

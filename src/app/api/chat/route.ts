@@ -53,9 +53,16 @@ export async function POST(req: NextRequest) {
   // which are captured in totalMs via the entry-time `tStart` above).
   const tDbStart = performance.now();
 
-  // C3: fields the route actually uses, plus the message count folded into the
+  // C3: fields the route actually uses, plus a message count folded into the
   // same fetch (`_count`) so no separate `message.count` query runs (−1 round
   // trip/turn). Selecting `title` lets the post-agent title write be conditional.
+  //
+  // P1d (Rev 22): the count is filtered to `assistant` rows so `isFirstMessage`
+  // means "no reply has been persisted yet", NOT "no messages exist". A first
+  // turn that 502s persists its user row (below), so a plain message count would
+  // make the retry look non-first and drop the first-turn Drive/past_meeting
+  // context on the first *successful* agent call. Keying on assistant rows makes
+  // the retry re-inject context (and normal 2nd+ turns still skip it).
   let conversation: {
     id: string;
     userId: string;
@@ -73,17 +80,17 @@ export async function POST(req: NextRequest) {
         sessionKey: true,
         sectionContext: true,
         title: true,
-        _count: { select: { messages: true } },
+        _count: { select: { messages: { where: { role: "assistant" } } } },
       },
     });
     if (!found || found.userId !== userId) {
       return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
     }
-    // Prod always selects `_count`; the precedence test mocks findUnique without
-    // it, so default to 0 (a first message) rather than throwing — keeps
-    // isFirstMessage semantics identical to the old `message.count === 0`.
-    const priorMessages = found._count?.messages ?? 0;
-    isFirstMessage = priorMessages === 0;
+    // Prod always selects the filtered `_count`; the precedence test mocks
+    // findUnique without it, so default to 0 (no reply yet → a first turn) rather
+    // than throwing.
+    const priorAssistantReplies = found._count?.messages ?? 0;
+    isFirstMessage = priorAssistantReplies === 0;
     conversation = {
       id: found.id,
       userId: found.userId,
@@ -203,9 +210,17 @@ export async function POST(req: NextRequest) {
     // legacy null-title row (e.g. one created by /api/chat/new-session). It runs
     // BEFORE the raw bump because its @updatedAt side-effect would otherwise
     // race the explicit `now` and could leave updatedAt != lastViewedAt.
-    if (isFirstMessage && !conversation.title) {
-      await db.conversation.update({
-        where: { id: conversation.id },
+    //
+    // P1b (Rev 6): the fill drops the `isFirstMessage &&` guard (a failed first
+    // turn would otherwise leave the title permanently null — the retry is no
+    // longer "first") and is DB-ATOMIC. The `title: null` filter is what enforces
+    // first-writer-wins: two overlapping requests on a still-null-title row both
+    // read `!conversation.title`, but only the first `updateMany` matches a row;
+    // the second matches zero, so an existing title is never overwritten. The
+    // in-memory `!conversation.title` check stays only as a cheap early-out.
+    if (!conversation.title) {
+      await db.conversation.updateMany({
+        where: { id: conversation.id, title: null },
         data: { title: message.slice(0, 80) },
       });
     }
