@@ -1,7 +1,9 @@
 # Plusim — Update a ready report (append statements + re-run the same job)
 
-> **Status:** Draft — **Rev 4**, Codex round-3 findings folded; awaiting re-review.
-> Nothing implemented yet.
+> **Status:** **Rev 5** — round-4 findings folded; owner-approved for
+> implementation (2026-07-23, protocol §3c escalation answered: "fold a final
+> Rev and move to implementation"). The implementation PR carries its own
+> adversarial review.
 >
 > **Process** (self-contained, per protocol): plan PR → adversarial review → each
 > review round becomes a new Rev on this branch with resolution notes (never
@@ -67,6 +69,28 @@
 >   `publish_same_millisecond_append_409`. Two threads (`3632830672`,
 >   `3632947421`) were re-anchored unchanged by the bot and are already resolved
 >   in Rev 2 / Rev 3.
+> - Rev 5 — Codex review round 4 (PR #23), the protocol's round bound: both
+>   findings verified real, folded, and escalated to the owner, who chose "fold
+>   a final Rev and move to implementation". **P1** — a rejected callback that
+>   landed BEFORE the publish pre-check leaves every Rev-4 pin satisfied
+>   (`needs_review` is publishable, `dispatchedAt` is the latest run's, and the
+>   rejection never touched `completedAt`), so publish could ship the previous
+>   artifact while the newest run had failed — precisely the "report missing the
+>   files the admin just appended" failure this plan exists to prevent, since
+>   those files predate that dispatch and clear the file guard. Resolved: a new
+>   **result-freshness invariant `completedAt >= dispatchedAt`** ("the stored
+>   result is at least as new as the latest run"), computed in JS at the
+>   pre-check and carried into the conditional write by the already-pinned pair.
+>   Banked as `publish_after_rejected_rerun_409`. **P2** — Rev 2 *swapped*
+>   `assertEntryUnderRoot` for `assertEntryUnderFolder` on the export path
+>   instead of doing both; `assertEntryUnderFolder` walks the parent chain only
+>   until it reaches `folderId` and never consults `DRIVE_ROOT_FOLDER_ID`
+>   (`googleDrive.ts:488-497`), so an assigned folder that was moved outside the
+>   root would let the owner token write spreadsheets outside the boundary — a
+>   regression this plan introduced against the create path's own rule
+>   (`reports/route.ts:87-90`). Resolved: **both** assertions run before both
+>   the in-place update and the fallback create. Banked as
+>   `republish_folder_outside_root_409`.
 
 ## Problem
 
@@ -224,20 +248,29 @@ rejected below.
 Replace the `if (!sheetUrl)` skip (`publish/route.ts:51-53`) with:
 
 - `sheetUrl` set → parse the spreadsheet id from the URL (publish itself minted
-  it as `https://docs.google.com/spreadsheets/d/<id>/edit`, `:70`), then
-  **`assertEntryUnderFolder(id, currentFolder.folderId)`** — the user's CURRENT
-  `UserDriveFolder`, the same binding the statement-read route enforces
-  (Context 7); root containment alone would allow updating a sheet that was
-  moved into another client's folder (Rev 2 — Codex P2). Only then **update the
-  same spreadsheet in place** via a new `googleDrive.ts` helper
+  it as `https://docs.google.com/spreadsheets/d/<id>/edit`, `:70`), then run
+  **both** containment checks, in this order (Rev 5 — Codex P2):
+  1. `assertEntryUnderRoot(currentFolder.folderId)` — the assigned folder itself
+     must still be under `PLUSIM_DRIVE_ROOT_FOLDER_ID`, exactly as the create
+     path re-contains it at write time (`reports/route.ts:87-90`). Without this,
+     a folder moved outside the root would let the owner token write outside the
+     boundary, because…
+  2. `assertEntryUnderFolder(sheetId, currentFolder.folderId)` — …this one only
+     walks the parent chain until it reaches `folderId` and never consults the
+     root (`googleDrive.ts:488-497`). It is the tighter *cross-client* check
+     (Context 7): root containment alone would allow updating a sheet that was
+     moved into another client's folder (Rev 2 — Codex P2).
+
+  Neither check subsumes the other; both run before the in-place update **and**
+  before the fallback create. Only then **update the same spreadsheet in place** via a new `googleDrive.ts` helper
   `updateXlsxSpreadsheet({ fileId, xlsx })` — a `files.update` media upload
   (PATCH) with the xlsx body, mirroring `uploadXlsxAsSpreadsheet`
   (`googleDrive.ts:315`) which already does the create-side conversion. The
   user's bookmarked link stays valid and current. (Verify the
   convert-on-update semantics against the Drive API during implementation; the
   fallback below covers a refusal.)
-- In-place path fails for any reason (not under the user's folder, deleted,
-  API refusal) → fall back to the existing create-new path in the assigned
+- In-place path fails for any reason (folder no longer under the root, sheet
+  not under the user's folder, deleted, API refusal) → fall back to the existing create-new path in the assigned
   folder, overwrite `sheetUrl`, and **best-effort trash the old spreadsheet**
   (a stale sheet next to the new one is the same confusion as a stale link;
   trash failure is ignored).
@@ -267,7 +300,26 @@ processed — the remedy is the same visible re-run). Enforced twice:
    nothing published — closing the pre-check→update TOCTOU the same way the
    result route closes the publish/result race (`result/route.ts:39-43`).
 
-**Conditional predicate, exactly (Rev 3):**
+**Result-freshness pre-check (Rev 5).** Before anything else, refuse with 409
+when the stored result is older than the latest run:
+
+```
+if (!job.completedAt || (job.dispatchedAt && job.completedAt < job.dispatchedAt))
+  → 409 "the latest run has not produced a result — re-run before publishing"
+```
+
+A **rejected** callback writes `status`/`error` and deliberately leaves
+`completedAt` alone (`result/route.ts:129-132`), so after a failed re-run the
+job sits at `needs_review` holding the PREVIOUS run's artifact with every other
+pin satisfied — and any files appended before that dispatch clear the file
+guard, so publish would ship a report missing exactly the statements the admin
+just added (Rev 5 — Codex P1). `completedAt >= dispatchedAt` is the invariant
+that says "the artifact I am about to publish came from the newest run". It is
+computed in JS, not in the `where` (Prisma cannot compare two columns of one
+row); the conditional write then carries it forward for free, because both
+values are already pinned there.
+
+**Conditional predicate, exactly (Rev 3, watermarks per Rev 4):**
 
 ```
 updateMany({ where: {
@@ -342,15 +394,19 @@ the same shapes as today.
 
 ## Invariants (what review should attack)
 
-0. **A publish only ever publishes the exact result it verified** — status,
-   run watermark (`dispatchedAt`), result watermark (`completedAt`) and file set
-   are all re-asserted in the write, so no run or callback landing mid-publish —
-   successful, rejected, or still in flight — can be published unverified.
+0. **A publish only ever publishes the exact result it verified, and only if
+   that result is the newest run's.** Status, run watermark (`dispatchedAt`),
+   result watermark (`completedAt`), freshness (`completedAt >= dispatchedAt`)
+   and the file set are all asserted at the pre-check and re-asserted in the
+   write, so neither a run/callback landing mid-publish (successful, rejected,
+   or in flight) nor a failed run that already landed can reach the client.
 1. **No stale callback ever mutates a report the client can see.** Published ⇒
    token null ⇒ 404. Updated-then-republished ⇒ old tokens fail the hash check;
    only the current run's token passes auth AND the conditional write.
-2. **Append writes are contained exactly like create writes:** DB-owned parent
-   folder, `assertEntryUnderRoot` at write time, rollback leaves no orphan
+2. **Every Drive write is contained exactly like a create write:** DB-owned
+   parent folder, `assertEntryUnderRoot` at write time (append AND both export
+   paths), `assertEntryUnderFolder` additionally binding the sheet to the
+   client, rollback leaves no orphan
    Drive files, no orphan rows, and never deletes the job or old files.
 3. **What the client sees is always an admin-published, verified artifact:**
    fatal verification still blocks publish; appended-but-unprocessed files now
@@ -417,6 +473,14 @@ New `runUpdateGuard.test.ts`:
 - `publish_same_millisecond_append_409` — a `StatementFile.createdAt` exactly
   equal to `dispatchedAt` ⇒ `gte` trips ⇒ 409; the tie is never treated as
   covered.
+- `publish_after_rejected_rerun_409` — a rejected callback landed BEFORE the
+  pre-check (`needs_review`, `completedAt < dispatchedAt`, no new files) ⇒ 409;
+  the previous run's artifact is not published while the newest run has failed.
+  Its sibling: a job whose FIRST result was rejected (`completedAt` null) ⇒ 409.
+- `republish_folder_outside_root_409` — the assigned folder has been moved
+  outside `PLUSIM_DRIVE_ROOT_FOLDER_ID` ⇒ neither the in-place update nor the
+  fallback create runs (no Drive write at all); publish reports the export
+  failure per the Rev-2 rules.
 - `publish_partial_append_during_dispatch_409` — a file row created after
   `dispatchedAt` while the agent run is in flight ⇒ 409, regardless of whether
   the row predates the callback's `completedAt`.
