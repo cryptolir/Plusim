@@ -25,6 +25,12 @@ from pypdf import PdfReader
 DATE_RE = re.compile(r"\b(\d{2})\.(\d{2})\.(\d{2})(?!\d\d)")
 AMOUNT_RE = re.compile(r"(-?)₪\s?([\d,]+\.\d{2})")
 TOTAL_LABEL = "סה״כ"
+# The monthly charge-summary line ("… <dd.mm.yyyy> חיוב ב₪<total>") repeats the
+# statement total. It has no "סה״כ" label, and it trails the last row's real
+# charge, so the last-token rule would otherwise read that total as the row's
+# amount — doubling the section sum. "חיוב ב" glued to ₪ is unique to this line
+# (the legal boilerplate says "החיוב בפועל"/"חיוב בריבית", never followed by ₪).
+CHARGE_SUMMARY_RE = re.compile(r"חיוב ב\s*₪")
 
 SECTIONS = {
     "עסקאות שאושרו וטרם נקלטו": "pending",
@@ -123,6 +129,13 @@ def parse_max_pdf(path: str, label: str) -> ParseResult:
         start = dm.end()
         end = dates[i + 1].start() if i + 1 < len(dates) else len(text)
         chunk = text[start:end]
+        # Drop the monthly charge-summary total ("… חיוב ב₪<total>") when it lands
+        # in this chunk (the last row before MAX's "you'll be charged X on <date>"
+        # line). It carries the statement total and trails the real charge, so
+        # without this the last-token rule reads the total as the row's amount.
+        sm = CHARGE_SUMMARY_RE.search(chunk)
+        if sm:
+            chunk = chunk[: sm.start()]
         # Keep totals/section-summary amounts out of the row's amount list. MAX
         # prints "₪<total>\nסה״כ …", so the total amount sits BEFORE the label:
         # cut at the label, then drop a trailing amount separated from it by
