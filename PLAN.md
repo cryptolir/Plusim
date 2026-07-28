@@ -43,6 +43,7 @@ Dev server: `204.168.223.245`. Prod (Coolify): `178.104.184.3`. Live URL: `https
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — AgentGlob API, route map, data model, design patterns
 - [DEPLOY.md](./DEPLOY.md) — deployment protocol, env vars, rollback
 - [AGENTS.md](./AGENTS.md) — working rules for agents (human and AI)
+- [docs/guides/](./docs/guides/) — **Hebrew user guides** (client + admin); keep them current with every user-facing change
 - [docs/REPORTS_PIPELINE.md](./docs/REPORTS_PIPELINE.md) — the statement-categorization pipeline
 - [docs/DRIVE_INTEGRATION.md](./docs/DRIVE_INTEGRATION.md) — the admin Drive integration
 - [docs/archive/](./docs/archive/) — historical Havaya-era planning docs
