@@ -51,6 +51,14 @@ The dev server (`ssh -i ~/.ssh/hetzner-openclaw root@204.168.223.245`, project a
 
 If you need to view or test changes from your laptop, SSH-tunnel into the dev server (`ssh -i ~/.ssh/hetzner-openclaw -L 3000:localhost:3000 root@204.168.223.245 -N`) — do not pull the repo down.
 
+## 4. User-facing changes update the Hebrew guides
+
+The end-user documentation lives in [`docs/guides/`](./docs/guides/) — one guide for clients, one for admins, both in Hebrew (RTL), versioned with the code so they ship together.
+
+**If a change alters what a person sees or clicks, update the matching guide in the same PR.** A new page, a renamed button, a new setting in `/admin/settings`, a change to the report workflow or the `/report` view — all of it belongs in the guide before the PR is done. Quote the app's real Hebrew labels, and bump the "עודכן לאחרונה" date.
+
+Full contract (what counts as user-facing, style rules): [`docs/guides/README.md`](./docs/guides/README.md).
+
 ---
 
 ## Infrastructure reference

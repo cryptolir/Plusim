@@ -29,6 +29,12 @@ Session keys are namespaced as:
 app:plusim:<userId>:<conversationId>
 ```
 
+## Documentation
+
+- **User guides (Hebrew):** [`docs/guides/`](./docs/guides/) — [client](./docs/guides/CLIENT_GUIDE.he.md) · [admin](./docs/guides/ADMIN_GUIDE.he.md). Keep them current with every user-facing change ([contract](./docs/guides/README.md)).
+- **Technical:** [ARCHITECTURE](./ARCHITECTURE.md) · [PLAN](./PLAN.md) · [ROADMAP](./ROADMAP.md) · [DEPLOY](./DEPLOY.md) · [reports pipeline](./docs/REPORTS_PIPELINE.md) · [Drive integration](./docs/DRIVE_INTEGRATION.md)
+- **Working rules for agents:** [AGENTS.md](./AGENTS.md)
+
 ## Source of truth
 
 The canonical source repo is `cryptolir/Plusim`. All development happens on the
