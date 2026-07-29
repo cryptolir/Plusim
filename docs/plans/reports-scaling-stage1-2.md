@@ -1,7 +1,16 @@
 # Plan: Reports scaling — Stage 1 (queue + worker) and Stage 2 (safe parallelism)
 
-**Rev 2** — 2026-07-29. Source analysis: [`docs/REPORTS_SCALING.md`](../REPORTS_SCALING.md)
+**Rev 3** — 2026-07-29. Source analysis: [`docs/REPORTS_SCALING.md`](../REPORTS_SCALING.md)
 (incl. its Code-verified findings section). Scope: stages 1–2 only; stages 3–4 are separate plans.
+
+> **Rev 3 (Codex round 2, 2 findings folded):** both P1s attacked Rev 2's dual-arbiter design
+> (route-side `singletonKey` + worker-side claim guard). Rev 3 deletes the singleton entirely:
+> the route's status write becomes a **CAS** (`updateMany` conditioned on the prior status), so a
+> concurrent double-POST loses the CAS and 409s instead of racing the revert (F7); the CAS also
+> **clears `agentTokenHash`**, so a delayed callback from the previous run no-matches the result
+> route's `acceptingWhere` (`result/route.ts:38–43`) during the queued window (F8). The worker's
+> claim CAS is now the single execution arbiter; duplicate queue entries no-op. Net: less
+> machinery than Rev 2, two named tests added.
 
 > **Rev 2 (Codex round 1, 6 findings folded):** status commit now precedes enqueue with
 > compensation + re-run-from-`dispatched` recovery (F1); suppressed singleton send → 409, never a
@@ -51,35 +60,45 @@
    `callAgent`, `db`) import `@/lib/*` transitively. Deployed as a **second Coolify service from
    the same repo**, start command `pnpm worker`, replicas = 1. Deploy gate: smoke-test
    `pnpm worker` boots in the built deployment image (test 9).
-3. **`run` route becomes enqueue-only.** Keep `authorizeReportsRequest`, the published+`confirmUpdate`
-   guard, and the zero-files guard exactly where they are. Then, in this order (F1 — the worker
-   must never see a queue entry before the status is committed):
-   1. Commit `status="dispatched"` + `dispatchedAt` + `queueJobId=null`.
-   2. `const qid = await boss.send('report-dispatch', { jobId }, { singletonKey: jobId })`.
-   3. `qid === null` means an active singleton suppressed the send (a previous run's queue entry
-      is still live — possible because the agent posts its callback *before* replying, per
-      `SKILL.md`). **Revert the status to its prior value and return
-      `409 { error: "previous run still finishing — retry shortly" }`** (F2). Never leave
-      `dispatched` with no queue entry behind it.
-   4. Enqueue threw → revert status, return 502.
-   5. Success → return **`202 { ok, status: "dispatched" }`**.
+3. **`run` route becomes enqueue-only, with a CAS status write (Rev 3).** Keep
+   `authorizeReportsRequest`, the published+`confirmUpdate` guard, and the zero-files guard
+   exactly where they are. Then:
+   1. **CAS to `dispatched`** — one `updateMany` conditioned on the status the request is
+      entitled to leave: `where { id, status: { in: ["uploaded", "completed", "needs_review",
+      "failed"] } }` (plus the published path when `confirmUpdate` was given), `data
+      { status: "dispatched", dispatchedAt: now, agentTokenHash: null, agentTokenExpiresAt: null,
+      queueJobId: null }`. Count 0 → **`409 { error: "dispatch already in flight or state
+      changed" }`** — a concurrent double-POST loses here, before any queue write (F7).
+      Clearing the token hash closes the stale-callback window: the result route only accepts a
+      callback whose token hash **equals** the stored one (`result/route.ts:38–43`), so a delayed
+      callback from the previous run no-matches while the new run is queued (F8).
+   2. `await boss.send('report-dispatch', { jobId })` — **no `singletonKey`** (Rev 3 removes it;
+      the worker claim CAS in §4 is the single arbiter, and duplicate entries no-op there).
+   3. Send threw → **conditional revert**: `updateMany where { id, status: "dispatched",
+      queueJobId: null, agentTokenHash: null }` (matches only the pristine row this request just
+      wrote — never a row a worker has claimed) → 502 (F7: no unconditional revert exists).
+   4. Success → return **`202 { ok, status: "dispatched" }`**.
 
-   Recovery backstop for any remaining crash window (status committed, revert also lost): the
-   route's dispatchable set now **includes `dispatched`**, so re-POSTing run on a stuck job is
-   always a legal, idempotent repair — no janitor process (F1).
-   Delete `maxDuration = 320` and the `callAgent` import. Token minting moves to the worker so the
-   24 h TTL starts at actual dispatch, not enqueue.
+   Residual double-fault (send threw AND revert lost): job sits in `dispatched` with
+   `queueJobId=null`. Recovery rule, race-safe by the same CAS pattern: the route also accepts
+   `status="dispatched" AND queueJobId=null AND dispatchedAt < now−2min` in its CAS set — a
+   visibly stale dispatch is reclaimable by pressing run again; a fresh one is not (F1, F7).
+   Delete `maxDuration = 320` and the `callAgent` import. Token minting stays with the worker so
+   the 24 h TTL starts at actual dispatch, not enqueue.
 4. **Worker handler for `report-dispatch`:**
    - **Attempt ownership (F3):** new nullable column `ReportJob.queueJobId String?` (Prisma
-     migration — the one schema change in this plan). On claim, the handler stamps its pg-boss job
-     id into `queueJobId` alongside `status="processing"` in one update.
-   - **Claim guard:** proceed if `status="dispatched"`, **or** `status="processing" AND
-     queueJobId === this pg-boss job id` — a retry may reclaim *its own* interrupted attempt
-     (crash after `processing` was written, before AgentGlob accepted), re-minting the token
-     (re-dispatch is safe per `run/route.ts:11`). Anything else (published meanwhile, deleted,
-     another attempt's `processing`) → skip with a loud log, complete the queue entry. Fail closed.
-   - Mint the per-job token (same `mintJobToken()`), `callAgent` with the same 300 s timeout
-     semantics as today: timeout → leave `processing` (callback completes).
+     migration — the one schema change in this plan).
+   - **Claim is a CAS — the single execution arbiter (Rev 3):** one `updateMany` with
+     `where { id, OR: [ { status: "dispatched" }, { status: "processing", queueJobId: thisPgBossJobId } ] }`,
+     `data { status: "processing", queueJobId: thisPgBossJobId, agentTokenHash: freshHash,
+     agentTokenExpiresAt }` — claim, attempt ownership, and token mint land atomically. The
+     `processing`+same-id arm lets a retry reclaim *its own* interrupted attempt (crash after
+     claim, before AgentGlob accepted), re-minting (re-dispatch is safe per `run/route.ts:11`).
+     Count 0 → another entry claimed first, the job was published/deleted meanwhile, or this is a
+     duplicate queue entry — skip with a loud log, complete the entry. Fail closed. Duplicate
+     entries are harmless by construction, which is what lets Rev 3 drop `singletonKey`.
+   - `callAgent` with the same 300 s timeout semantics as today: timeout → leave `processing`
+     (callback completes).
    - **Non-timeout error (F3):** on a non-final attempt, rethrow WITHOUT touching status — pg-boss
      retries and the reclaim rule above lets the retry through. Write `status="failed"` + error
      text only when `job.retryCount >= retryLimit` (final attempt). `retryLimit: 1`. No dead-letter
@@ -130,9 +149,10 @@
 
 ## Invariants — review asks (attack these)
 
-- **I1 — single execution:** no path lets one job dispatch twice concurrently. Route guard +
-  `singletonKey` + claim-time re-check. Is there a window between callback completion (status
-  leaves `processing`) and a re-run enqueue where two queue entries for one job can both run?
+- **I1 — single execution (Rev 3):** the worker claim CAS is the only arbiter — two queue entries
+  for one job cannot both win `dispatched → processing`. Attack: any interleaving of route CAS,
+  duplicate entries, retries, and callbacks where two `callAgent` dispatches happen for one
+  `dispatched` generation?
 - **I2 — published-job protection survives the async move:** `confirmUpdate` is consumed at
   enqueue time, but the job can be published between enqueue and claim. The claim re-check
   (`status="dispatched"` only) must close this. Can any ordering make a queued entry dispatch a
@@ -159,13 +179,19 @@
 5. `retry reclaims its own processing attempt via queueJobId and re-mints` (F3, I5)
 6. `first-attempt transient error rethrows without writing failed; final attempt writes failed + error` (F3)
 7. `dispatch timeout leaves processing for the callback` (parity with today's `:80–85`)
-8. `double POST run while queued yields one execution` (singletonKey, I1)
+8. `concurrent double POST from the same prior status: exactly one 202, one 409, one queue entry,
+   no revert` (F7 — must exercise the overlapping-read ordering Codex named)
 9. `pnpm worker boots in the built deployment image` (smoke, F4)
-10. `enqueue failure reverts status; a stuck dispatched job accepts a re-run` (F1)
-11. `send suppressed by active singleton returns 409 and preserves prior status` (F2 — the
-    callback-before-reply rerun window)
+10. `send failure reverts only a pristine dispatched row (queueJobId and token hash still null)`
+    (F7 — conditional revert can never clobber a claimed run)
+11. `stale dispatched (queueJobId null, older than 2 min) is reclaimable by run; a fresh one 409s`
+    (F1/F7 residual recovery)
 12. `driveFetch: non-GET consumes the bucket, GET does not` (covers all six mutating helpers by
     construction, F6; spacing checked with a fake clock)
+13. `delayed callback carrying the previous run's token is rejected after a rerun is enqueued`
+    (F8 — cleared `agentTokenHash` no-matches `acceptingWhere`, `result/route.ts:38–43`)
+14. `duplicate queue entries for one job: exactly one claims, the rest no-op` (I1, replaces the
+    Rev 2 singleton test)
 
 ## Deliberately NOT building
 
@@ -182,7 +208,7 @@
 
 1. **PR A** — this plan → Codex adversarial review → merge.
 2. **PR B (all the code)** — pg-boss + worker + `queueJobId` migration + route change + the
-   `driveFetch` bucket + tests 1–12. The bucket is ~15 lines and harmless at concurrency 1, so it
+   `driveFetch` bucket + tests 1–14. The bucket is ~15 lines and harmless at concurrency 1, so it
    doesn't earn a separate PR/review round. Deploy worker at 1 replica, dispatch concurrency 1.
 3. **Stage 2 gate (owner + measurement)** — run the agent-concurrency probe (§8): dispatch 3 jobs,
    confirm overlap in the `onlyclaw` runtime; measure the runtime host's memory peak and cap it
