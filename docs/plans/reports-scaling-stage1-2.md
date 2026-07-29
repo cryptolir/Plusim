@@ -1,7 +1,19 @@
 # Plan: Reports scaling — Stage 1 (queue + worker) and Stage 2 (safe parallelism)
 
-**Rev 3** — 2026-07-29. Source analysis: [`docs/REPORTS_SCALING.md`](../REPORTS_SCALING.md)
+**Rev 4** — 2026-07-29. Source analysis: [`docs/REPORTS_SCALING.md`](../REPORTS_SCALING.md)
 (incl. its Code-verified findings section). Scope: stages 1–2 only; stages 3–4 are separate plans.
+
+> **Rev 4 (Codex round 3, 5 findings folded):** the token is now minted **once per dispatch
+> generation** in the claim CAS and never rotated by a retry; a `dispatchAttemptedAt` marker
+> written just before `callAgent` splits retries into "never sent → safe to send" vs "ambiguously
+> accepted → do NOT re-send, keep the token, let the callback finish" (F9). The dead-letter queue
+> returns — with an actual consumer this time: a `report-dispatch-dead` handler reconciles
+> `processing` rows whose queue entry exhausted retries or expired to `failed` (F10); worker
+> deaths without a catch are covered by pg-boss expiration feeding the same path
+> (`expireInSeconds` ≈ 600 > the 300 s `callAgent` hold). The send-failure revert is bound to its
+> own dispatch generation via exact `dispatchedAt` equality (F11). The route CAS re-includes
+> `error: null`, preserving today's reset (F12). `driveFetch` normalizes an omitted method to GET
+> before bucket gating (F13).
 
 > **Rev 3 (Codex round 2, 2 findings folded):** both P1s attacked Rev 2's dual-arbiter design
 > (route-side `singletonKey` + worker-side claim guard). Rev 3 deletes the singleton entirely:
@@ -71,12 +83,19 @@
       changed" }`** — a concurrent double-POST loses here, before any queue write (F7).
       Clearing the token hash closes the stale-callback window: the result route only accepts a
       callback whose token hash **equals** the stored one (`result/route.ts:38–43`), so a delayed
-      callback from the previous run no-matches while the new run is queued (F8).
+      callback from the previous run no-matches while the new run is queued (F8). The CAS data
+      also includes **`error: null`** — today's route resets the error on dispatch
+      (`run/route.ts:57`) and a rerun from `failed` must not show the stale failure through
+      `dispatched`/`processing` (`ReportJobDetail.tsx` renders `job.error` regardless of status)
+      (F12).
    2. `await boss.send('report-dispatch', { jobId })` — **no `singletonKey`** (Rev 3 removes it;
       the worker claim CAS in §4 is the single arbiter, and duplicate entries no-op there).
-   3. Send threw → **conditional revert**: `updateMany where { id, status: "dispatched",
-      queueJobId: null, agentTokenHash: null }` (matches only the pristine row this request just
-      wrote — never a row a worker has claimed) → 502 (F7: no unconditional revert exists).
+   3. Send threw → **conditional revert bound to this dispatch generation**: `updateMany where
+      { id, status: "dispatched", queueJobId: null, agentTokenHash: null, dispatchedAt:
+      exactValueThisRequestWrote }` → 502. The `dispatchedAt` equality is what stops a stalled
+      send (> 2 min) from reverting a *second* generation that stale-reclaimed in the meantime —
+      the reclaim CAS rewrote `dispatchedAt`, so the first request's predicate no-matches (F11;
+      F7: no unconditional revert exists).
    4. Success → return **`202 { ok, status: "dispatched" }`**.
 
    Residual double-fault (send threw AND revert lost): job sits in `dispatched` with
@@ -86,23 +105,42 @@
    Delete `maxDuration = 320` and the `callAgent` import. Token minting stays with the worker so
    the 24 h TTL starts at actual dispatch, not enqueue.
 4. **Worker handler for `report-dispatch`:**
-   - **Attempt ownership (F3):** new nullable column `ReportJob.queueJobId String?` (Prisma
-     migration — the one schema change in this plan).
+   - **Attempt ownership (F3):** two new nullable columns on `ReportJob` (the plan's only schema
+     change): `queueJobId String?` and `dispatchAttemptedAt DateTime?` (F9).
    - **Claim is a CAS — the single execution arbiter (Rev 3):** one `updateMany` with
-     `where { id, OR: [ { status: "dispatched" }, { status: "processing", queueJobId: thisPgBossJobId } ] }`,
-     `data { status: "processing", queueJobId: thisPgBossJobId, agentTokenHash: freshHash,
-     agentTokenExpiresAt }` — claim, attempt ownership, and token mint land atomically. The
-     `processing`+same-id arm lets a retry reclaim *its own* interrupted attempt (crash after
-     claim, before AgentGlob accepted), re-minting (re-dispatch is safe per `run/route.ts:11`).
-     Count 0 → another entry claimed first, the job was published/deleted meanwhile, or this is a
-     duplicate queue entry — skip with a loud log, complete the entry. Fail closed. Duplicate
-     entries are harmless by construction, which is what lets Rev 3 drop `singletonKey`.
+     `where { id, OR: [ { status: "dispatched" }, { status: "processing", queueJobId: thisPgBossJobId } ] }`.
+     On the `dispatched` arm, `data { status: "processing", queueJobId: thisPgBossJobId,
+     agentTokenHash: freshHash, agentTokenExpiresAt, dispatchAttemptedAt: null }` — claim,
+     attempt ownership, and token mint land atomically. **The token is minted once per dispatch
+     generation and a retry NEVER rotates it** (F9). Count 0 → another entry claimed first, the
+     job was published/deleted meanwhile, or this is a duplicate queue entry — skip with a loud
+     log, complete the entry. Fail closed. Duplicate entries are harmless by construction, which
+     is what lets Rev 3 drop `singletonKey`.
+   - **Send is phase-marked (F9):** set `dispatchAttemptedAt = now` in its own write immediately
+     before `callAgent`. On a retry that reclaims its own `processing` row:
+     - `dispatchAttemptedAt IS NULL` → the crash happened between claim and send — AgentGlob never
+       saw the request. Safe: send now, keeping the already-minted token.
+     - `dispatchAttemptedAt IS NOT NULL` → **ambiguous** — AgentGlob may have accepted and the run
+       may be live. Do NOT send again and do NOT touch the token (the live run's callback must
+       still validate). Log loudly, complete the queue entry, and let the callback — or the
+       stale-processing reconciliation below — finish the job. One dispatch generation can never
+       produce two agent runs.
    - `callAgent` with the same 300 s timeout semantics as today: timeout → leave `processing`
      (callback completes).
    - **Non-timeout error (F3):** on a non-final attempt, rethrow WITHOUT touching status — pg-boss
      retries and the reclaim rule above lets the retry through. Write `status="failed"` + error
-     text only when `job.retryCount >= retryLimit` (final attempt). `retryLimit: 1`. No dead-letter
-     queue — `ReportJob.status="failed"` is already the record the admin sees and acts on.
+     text only when `job.retryCount >= retryLimit` (final attempt). `retryLimit: 1`.
+   - **Crash recovery via dead-letter reconciliation (F10):** the queue is created with
+     `deadLetter: 'report-dispatch-dead'` and `expireInSeconds: 600` (> the 300 s `callAgent`
+     hold, so a live handler is never expired mid-flight). A worker death leaves no catch block —
+     pg-boss expiration fails the attempt, retries feed back through the reclaim rules above, and
+     exhaustion delivers the entry to the dead-letter queue, whose handler performs one CAS:
+     `where { id, status: "processing", queueJobId: deadEntryId } → { status: "failed",
+     error: "worker crashed or expired" }`. Rev 1 dropped the DLQ as a queue nobody consumes;
+     Rev 4 reinstates it *with* a consumer, because a final-attempt crash otherwise strands
+     `processing` forever — unreachable by the run route and invisible to the callback.
+     Pre-existing and unchanged: an agent run that is accepted but never calls back leaves
+     `processing` until an admin intervenes — exactly today's behavior on dispatch timeout.
 5. **Admin UI: no change needed.** The reports page already polls while `processing`; `dispatched`
    already renders as an in-flight state. Only the run button's success handler stops expecting an
    `agentReply` field.
@@ -137,9 +175,11 @@
     `driveFetch(url, init)` (`src/lib/googleDrive.ts:208`) — every helper routes through it,
     including the four mutating helpers Rev 1 missed (`updateTextFile`, `trashFile`,
     `updateXlsxSpreadsheet`, `uploadXlsxAsSpreadsheet`, used by rollback and both publish paths).
-    A ~15-line token bucket (~3 writes/s, small burst) applied inside `driveFetch` **when
-    `init.method` is anything other than GET** — reads stay unthrottled, every mutation present
-    and future consumes the bucket by construction. In-process is sufficient **because every
+    A ~15-line token bucket (~3 writes/s, small burst) applied inside `driveFetch` when the
+    **normalized** method — `(init?.method ?? "GET").toUpperCase()` — is not `GET` (F13: most
+    read calls pass no `init` or only `{ signal }`, and a literal non-GET check would throttle
+    `listChildren`, `getEntry`, and statement downloads). Reads stay unthrottled; every mutation
+    present and future consumes the bucket by construction. In-process is sufficient **because every
     Drive write stays in the single-replica web app** — the worker never touches Drive.
     <!-- ponytail: in-process bucket; move to a Postgres-backed bucket the day any second process writes to Drive -->
 11. **OpenAI RPM is capped indirectly** by the replica count (3 concurrent jobs ⇒ ≤3 concurrent
@@ -162,10 +202,11 @@
 - **I4 — token lifecycle:** minting moves to the worker; re-dispatch overwrites
   `agentTokenHash`. Can an older token (from a previous dispatch) still authenticate against
   `/api/agent/jobs/*` after a newer dispatch minted a new one?
-- **I5 — crash windows (Rev 2):** a retry may reclaim its own `processing` attempt via
-  `queueJobId`; a stuck `dispatched` is repairable by re-POSTing run. Remaining window to attack:
-  worker dies on the FINAL attempt after AgentGlob accepted — job sits in `processing` until the
-  callback lands (status quo today). Is any window still unrecoverable?
+- **I5 — crash windows (Rev 4):** unstarted attempts re-send safely (`dispatchAttemptedAt` null);
+  ambiguous attempts never re-send and never rotate the token; exhausted/expired entries are
+  dead-letter-reconciled to `failed`. The only surviving stall is an accepted agent run that
+  never calls back — today's behavior, explicitly out of scope. Attack: is any crash point
+  neither re-sendable, nor DL-reconciled, nor covered by that documented residual?
 - **I6 — limiter coverage:** the bucket gates the write functions themselves inside
   `googleDrive.ts`, so no Drive write can bypass it by construction. Attack: is there any Drive
   write that does NOT go through those functions (raw `fetch` to the Drive API anywhere)?
@@ -186,12 +227,22 @@
     (F7 — conditional revert can never clobber a claimed run)
 11. `stale dispatched (queueJobId null, older than 2 min) is reclaimable by run; a fresh one 409s`
     (F1/F7 residual recovery)
-12. `driveFetch: non-GET consumes the bucket, GET does not` (covers all six mutating helpers by
-    construction, F6; spacing checked with a fake clock)
+12. `driveFetch: explicit non-GET consumes the bucket; explicit GET and OMITTED method do not`
+    (covers all six mutating helpers by construction, F6; omitted-method case per F13; spacing
+    checked with a fake clock)
 13. `delayed callback carrying the previous run's token is rejected after a rerun is enqueued`
     (F8 — cleared `agentTokenHash` no-matches `acceptingWhere`, `result/route.ts:38–43`)
 14. `duplicate queue entries for one job: exactly one claims, the rest no-op` (I1, replaces the
     Rev 2 singleton test)
+15. `retry with dispatchAttemptedAt null re-sends with the SAME token; with it set, does not send
+    and does not rotate` (F9 — the ambiguous-accept window; the first run's callback must still
+    validate)
+16. `dead-letter delivery reconciles processing→failed only for the matching queueJobId` (F10 —
+    final-attempt crash; the CAS must not touch a row a newer generation owns)
+17. `send stalled past 2 min, second POST stale-reclaims, first send then throws: revert
+    no-matches the second generation` (F11 — dispatchedAt-bound compensation)
+18. `rerun from failed clears error at dispatch CAS time` (F12 — no stale failure shown during
+    dispatched/processing)
 
 ## Deliberately NOT building
 
@@ -200,7 +251,10 @@
 - Moving upload Drive writes or callback verification off the request path (thresholds in §6–7).
 - Postgres-backed shared token bucket (trigger in §10).
 - New job statuses, Redis/BullMQ, web-app replicas, worker replicas (Rev 2 — the dispatcher is
-  I/O-bound; see §8). One schema exception: the nullable `ReportJob.queueJobId` column (§4).
+  I/O-bound; see §8). Schema exception: the two nullable `ReportJob` columns `queueJobId` and
+  `dispatchAttemptedAt` (§4).
+- A stale-`processing` janitor for agent runs that were accepted but never call back — that is
+  today's behavior on dispatch timeout, unchanged by this plan (§4, F10 note).
 - Any change to the agent skill's parsing or the parser-dispatch bug (`run_job.py:225`) — separate,
   unrelated fix.
 
@@ -208,7 +262,7 @@
 
 1. **PR A** — this plan → Codex adversarial review → merge.
 2. **PR B (all the code)** — pg-boss + worker + `queueJobId` migration + route change + the
-   `driveFetch` bucket + tests 1–14. The bucket is ~15 lines and harmless at concurrency 1, so it
+   `driveFetch` bucket + tests 1–18. The bucket is ~15 lines and harmless at concurrency 1, so it
    doesn't earn a separate PR/review round. Deploy worker at 1 replica, dispatch concurrency 1.
 3. **Stage 2 gate (owner + measurement)** — run the agent-concurrency probe (§8): dispatch 3 jobs,
    confirm overlap in the `onlyclaw` runtime; measure the runtime host's memory peak and cap it
