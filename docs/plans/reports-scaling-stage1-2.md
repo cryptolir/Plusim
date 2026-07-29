@@ -1,7 +1,17 @@
 # Plan: Reports scaling — Stage 1 (queue + worker) and Stage 2 (safe parallelism)
 
-**Rev 6** — 2026-07-29. Source analysis: [`docs/REPORTS_SCALING.md`](../REPORTS_SCALING.md)
+**Rev 7** — 2026-07-29. Source analysis: [`docs/REPORTS_SCALING.md`](../REPORTS_SCALING.md)
 (incl. its Code-verified findings section). Scope: stages 1–2 only; stages 3–4 are separate plans.
+
+> **Rev 7 (Codex round 6, 1 finding folded):** the enqueue-failure revert (Design §3.3) now
+> restores the **pre-CAS snapshot** — `{ status, dispatchedAt, error }` — not just the status.
+> The publish route keys BOTH its guards on the dispatch watermark (result freshness
+> `completedAt < dispatchedAt` at `publish/route.ts:106`; file coverage at `:113–115`), so a
+> status-only revert that left the new `dispatchedAt` behind would mark an existing completed
+> result stale and block re-publishing until some later rerun succeeded. The route's existing
+> pre-guard read (`run/route.ts:29–32`) widens its select to capture the snapshot; token fields
+> stay null after revert (fail closed — no new run exists to authenticate). Test 10 extended to
+> assert the restore (F20).
 
 > **Rev 6 (Codex round 5, 3 findings folded):** dead-letter jobs carry a **new** pg-boss id, so
 > reconciliation can't key on `queueJobId` — the queue payload now carries the **generation key**
@@ -123,7 +133,17 @@
       worker claim CAS in §4 is the single arbiter, and duplicate entries no-op there).
    3. Send threw → **conditional revert bound to this dispatch generation**: `updateMany where
       { id, status: "dispatched", queueJobId: null, agentTokenHash: null, dispatchedAt:
-      exactValueThisRequestWrote }` → 502. The `dispatchedAt` equality is what stops a stalled
+      exactValueThisRequestWrote } data { status: prevStatus, dispatchedAt: prevDispatchedAt,
+      error: prevError }` → 502. The `data` is the **pre-CAS snapshot** (F20): the route's
+      existing pre-guard read (`run/route.ts:29–32`) widens its select to capture
+      `{ status, dispatchedAt, error }` before step 1. Restoring the watermark matters because
+      the publish route keys BOTH its guards on it — result freshness (`completedAt <
+      dispatchedAt`, `publish/route.ts:106`) and file coverage (`:113–115`) — so reverting only
+      the status would leave the aborted generation's `dispatchedAt` behind, marking an existing
+      `completed`/`needs_review`/`published` result stale and blocking re-publish until some
+      later rerun succeeded. Token fields stay null after revert: no new run exists, and a
+      delayed callback from the previous run staying rejected is fail-closed, not a loss.
+      The `dispatchedAt` equality in the predicate is what stops a stalled
       send (> 2 min) from reverting a *second* generation that stale-reclaimed in the meantime —
       the reclaim CAS rewrote `dispatchedAt`, so the first request's predicate no-matches (F11;
       F7: no unconditional revert exists).
@@ -279,8 +299,11 @@
    no revert` (F7 — must exercise the overlapping-read ordering Codex named)
 9. `pnpm worker boots in the built deployment image and dies loudly, naming the var, when a
    required env var is missing` (smoke, F4 + F19)
-10. `send failure reverts only a pristine dispatched row (queueJobId and token hash still null)`
-    (F7 — conditional revert can never clobber a claimed run)
+10. `send failure reverts only a pristine dispatched row (queueJobId and token hash still null)
+    and restores the pre-CAS snapshot — status, dispatchedAt, error — so a completed job still
+    publishes after a failed rerun enqueue` (F7 — conditional revert can never clobber a claimed
+    run; F20 — the publish freshness guard `completedAt < dispatchedAt` must never see the
+    aborted generation's watermark)
 11. `stale dispatched (queueJobId null, older than 2 min) is reclaimable by run; a fresh one 409s`
     (F1/F7 residual recovery)
 12. `driveFetch: explicit non-GET consumes the bucket; explicit GET and OMITTED method do not`
