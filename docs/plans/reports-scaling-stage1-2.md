@@ -1,7 +1,17 @@
 # Plan: Reports scaling — Stage 1 (queue + worker) and Stage 2 (safe parallelism)
 
-**Rev 5** — 2026-07-29. Source analysis: [`docs/REPORTS_SCALING.md`](../REPORTS_SCALING.md)
+**Rev 6** — 2026-07-29. Source analysis: [`docs/REPORTS_SCALING.md`](../REPORTS_SCALING.md)
 (incl. its Code-verified findings section). Scope: stages 1–2 only; stages 3–4 are separate plans.
+
+> **Rev 6 (Codex round 5, 3 findings folded):** dead-letter jobs carry a **new** pg-boss id, so
+> reconciliation can't key on `queueJobId` — the queue payload now carries the **generation key**
+> `{ jobId, gen: dispatchedAt }` (known to the route before send, unlike the entry id), and both
+> the claim CAS and the DLQ CAS match on it; this also stops a stale duplicate entry from an old
+> generation claiming a newer `dispatched` row (F17). `tsx` is declared as what it is — a second
+> direct dependency, not a lockfile accident (F18). The worker service gets an explicit
+> environment: audit every `process.env` read in the reused helpers (`db`, `agentglob`,
+> `agentRuntimeAuth`), provision exactly that list on the Coolify worker service, and assert each
+> at boot so a misprovisioned worker fails at startup, not at first dispatch (F19).
 
 > **Rev 5 (Codex round 4, 3 findings folded; owner chose "keep folding" at the §3c round
 > bound):** the claim is no longer one `updateMany` with an OR — Prisma applies one `data` object
@@ -75,13 +85,21 @@
 
 ### Stage 1 — queue + dedicated worker
 
-1. **One new dependency: `pg-boss`.** Runs on the existing `DATABASE_URL`; creates and migrates its
+1. **Two new direct dependencies: `pg-boss` and `tsx`** (F18 — `tsx` appears in the lockfile only
+   transitively today; the worker script must declare it in `package.json`, not borrow it).
+   `pg-boss` runs on the existing `DATABASE_URL`; creates and migrates its
    own `pgboss` schema at startup. No Prisma schema change, no Redis.
 2. **New worker entrypoint** `src/worker/index.ts` + package script `"worker": "tsx src/worker/index.ts"`.
    `tsx` is required, not optional: Node's native TS support strips types but does **not**
    transform `tsconfig` `paths` aliases, and the helpers the worker reuses (`mintJobToken`,
    `callAgent`, `db`) import `@/lib/*` transitively. Deployed as a **second Coolify service from
-   the same repo**, start command `pnpm worker`, replicas = 1. Deploy gate: smoke-test
+   the same repo**, start command `pnpm worker`, replicas = 1. **The worker service does NOT
+   inherit the web service's environment (F19):** audit every `process.env` read in the reused
+   helpers (`src/lib/db.ts`, `src/lib/agentglob.ts`, `src/lib/agentRuntimeAuth.ts` — at least
+   `DATABASE_URL`, the AgentGlob agent name + authorization key, and the app base URL used in
+   manifest links), provision exactly that list on the Coolify worker service (owner step), and
+   **assert each at worker boot** so a misprovisioned worker dies at startup with a named missing
+   var, not at first dispatch. Deploy gate: smoke-test
    `pnpm worker` boots in the built deployment image (test 9).
 3. **`run` route becomes enqueue-only, with a CAS status write (Rev 3).** Keep
    `authorizeReportsRequest`, the published+`confirmUpdate` guard, and the zero-files guard
@@ -99,8 +117,10 @@
       (`run/route.ts:57`) and a rerun from `failed` must not show the stale failure through
       `dispatched`/`processing` (`ReportJobDetail.tsx` renders `job.error` regardless of status)
       (F12).
-   2. `await boss.send('report-dispatch', { jobId })` — **no `singletonKey`** (Rev 3 removes it;
-      the worker claim CAS in §4 is the single arbiter, and duplicate entries no-op there).
+   2. `await boss.send('report-dispatch', { jobId, gen: dispatchedAtValue })` — the payload
+      carries the **generation key** (the exact `dispatchedAt` this request wrote; known before
+      send, unlike the pg-boss entry id — F17). **No `singletonKey`** (Rev 3 removes it; the
+      worker claim CAS in §4 is the single arbiter, and duplicate entries no-op there).
    3. Send threw → **conditional revert bound to this dispatch generation**: `updateMany where
       { id, status: "dispatched", queueJobId: null, agentTokenHash: null, dispatchedAt:
       exactValueThisRequestWrote }` → 502. The `dispatchedAt` equality is what stops a stalled
@@ -122,9 +142,11 @@
      `updateMany` cannot apply different `data` per arm — Prisma would write the fresh token and
      `dispatchAttemptedAt: null` on the retry arm too, rotating a possibly-live run's token and
      making the retry look unsent (the exact F9 hole). So, two steps:
-     1. **Initial claim CAS:** `updateMany where { id, status: "dispatched" } data
-        { status: "processing", queueJobId: thisPgBossJobId, agentTokenHash: freshHash,
-        agentTokenExpiresAt, dispatchAttemptedAt: null }`. Count 1 → fresh dispatch: mark, send.
+     1. **Initial claim CAS:** `updateMany where { id, status: "dispatched", dispatchedAt:
+        payload.gen } data { status: "processing", queueJobId: thisPgBossJobId, agentTokenHash:
+        freshHash, agentTokenExpiresAt, dispatchAttemptedAt: null }`. The `dispatchedAt` match
+        stops a stale duplicate entry from an **older generation** claiming a newer `dispatched`
+        row (F17). Count 1 → fresh dispatch: mark, send.
      2. **Count 0 → ownership read:** `findUnique` — if the row is `processing` with
         `queueJobId === thisPgBossJobId`, this is our own retry (safe to branch on a read:
         only this entry's serial retries, the callback, or the DLQ handler can touch such a row).
@@ -161,11 +183,13 @@
      hold, so a live handler is never expired mid-flight). A worker death leaves no catch block —
      pg-boss expiration fails the attempt, retries feed back through the reclaim rules above, and
      exhaustion delivers the entry to the dead-letter queue, whose handler performs one CAS:
-     `where { id, status: "processing", queueJobId: deadEntryId } → { status: "failed",
-     error: "worker crashed or expired" }`. Rev 1 dropped the DLQ as a queue nobody consumes;
+     `where { id: payload.jobId, status: "processing", dispatchedAt: payload.gen } →
+     { status: "failed", error: "worker crashed or expired" }`. It CANNOT key on a queue entry
+     id: pg-boss creates the dead-letter job with a **new** id and copies only the payload, so
+     the original entry id is gone — the generation key in the payload is what survives (F17). Rev 1 dropped the DLQ as a queue nobody consumes;
      Rev 4 reinstates it *with* a consumer, because a final-attempt crash otherwise strands
      `processing` forever — unreachable by the run route and invisible to the callback.
-     The CAS keys on `queueJobId`, so it **inherently no-ops** when the callback already moved
+     The CAS keys on the generation, so it **inherently no-ops** when the callback already moved
      the row out of `processing` — that is the F16 "durable delayed reconciliation": ambiguous
      attempts end in exactly one of {callback completes the job, DLQ marks it failed}, never in
      a permanently stranded `processing`. Bounded residual (Rev 5): an agent run still live past
@@ -253,7 +277,8 @@
 7. `dispatch timeout leaves processing for the callback` (parity with today's `:80–85`)
 8. `concurrent double POST from the same prior status: exactly one 202, one 409, one queue entry,
    no revert` (F7 — must exercise the overlapping-read ordering Codex named)
-9. `pnpm worker boots in the built deployment image` (smoke, F4)
+9. `pnpm worker boots in the built deployment image and dies loudly, naming the var, when a
+   required env var is missing` (smoke, F4 + F19)
 10. `send failure reverts only a pristine dispatched row (queueJobId and token hash still null)`
     (F7 — conditional revert can never clobber a claimed run)
 11. `stale dispatched (queueJobId null, older than 2 min) is reclaimable by run; a fresh one 409s`
@@ -268,7 +293,8 @@
 15. `retry with dispatchAttemptedAt null re-mints under a marker-null CAS, then marks and sends;
     with the marker set it neither sends nor rotates` (F9/F15 — the raw token is unrecoverable
     from its hash, and a live run's callback must still validate)
-16. `dead-letter delivery reconciles processing→failed only for the matching queueJobId` (F10 —
+16. `dead-letter delivery reconciles processing→failed only for the matching generation key
+    (payload.gen === row.dispatchedAt)` (F10/F17 —
     final-attempt crash; the CAS must not touch a row a newer generation owns)
 17. `send stalled past 2 min, second POST stale-reclaims, first send then throws: revert
     no-matches the second generation` (F11 — dispatchedAt-bound compensation)
@@ -280,6 +306,8 @@
     failed when it did not` (F16 — both halves of delayed reconciliation)
 21. `a retry never writes a fresh token or clears the marker via the claim path` (F14 — the
     dispatched-arm CAS and the ownership read are separate operations; no OR-arm data bleed)
+22. `a duplicate entry carrying an older generation key cannot claim a newer dispatched row`
+    (F17 — claim CAS matches `dispatchedAt` against `payload.gen`)
 
 ## Deliberately NOT building
 
@@ -299,7 +327,7 @@
 
 1. **PR A** — this plan → Codex adversarial review → merge.
 2. **PR B (all the code)** — pg-boss + worker + `queueJobId` migration + route change + the
-   `driveFetch` bucket + tests 1–21. The bucket is ~15 lines and harmless at concurrency 1, so it
+   `driveFetch` bucket + tests 1–22. The bucket is ~15 lines and harmless at concurrency 1, so it
    doesn't earn a separate PR/review round. Deploy worker at 1 replica, dispatch concurrency 1.
 3. **Stage 2 gate (owner + measurement)** — run the agent-concurrency probe (§8): dispatch 3 jobs,
    confirm overlap in the `onlyclaw` runtime; measure the runtime host's memory peak and cap it
