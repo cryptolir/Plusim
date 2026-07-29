@@ -1,7 +1,17 @@
 # Plan: Reports scaling — Stage 1 (queue + worker) and Stage 2 (safe parallelism)
 
-**Rev 1** — 2026-07-29. Source analysis: [`docs/REPORTS_SCALING.md`](../REPORTS_SCALING.md)
+**Rev 2** — 2026-07-29. Source analysis: [`docs/REPORTS_SCALING.md`](../REPORTS_SCALING.md)
 (incl. its Code-verified findings section). Scope: stages 1–2 only; stages 3–4 are separate plans.
+
+> **Rev 2 (Codex round 1, 6 findings folded):** status commit now precedes enqueue with
+> compensation + re-run-from-`dispatched` recovery (F1); suppressed singleton send → 409, never a
+> silent `dispatched` (F2); retries reclaim their own attempt via a new `queueJobId` column and
+> `failed` is written only on the final attempt (F3); worker runs under `tsx` — Node's native TS
+> does not transform `tsconfig` `paths`, and the app's helpers use `@/lib/*` transitively (F4);
+> Stage 2 re-scoped — replicas parallelize only the dispatcher, so concurrency now comes from one
+> worker with in-process dispatch concurrency 3, gated on *verified* AgentGlob runtime concurrency
+> (F5); Drive bucket moved into `driveFetch` (`googleDrive.ts:208`), the single choke point all
+> six mutating helpers share, gating non-GET methods (F6).
 
 ## What exists (read, not remembered)
 
@@ -35,26 +45,45 @@
 
 1. **One new dependency: `pg-boss`.** Runs on the existing `DATABASE_URL`; creates and migrates its
    own `pgboss` schema at startup. No Prisma schema change, no Redis.
-2. **New worker entrypoint** `src/worker/index.ts` + package script `"worker"`. Run it with Node's
-   native TS support (`node --experimental-strip-types`, Node ≥ 22.6) if Coolify's Node allows;
-   only fall back to adding `tsx` if it doesn't. Deployed as a **second Coolify service from the
-   same repo**, start command `pnpm worker`, replicas = 1 in Stage 1.
+2. **New worker entrypoint** `src/worker/index.ts` + package script `"worker": "tsx src/worker/index.ts"`.
+   `tsx` is required, not optional: Node's native TS support strips types but does **not**
+   transform `tsconfig` `paths` aliases, and the helpers the worker reuses (`mintJobToken`,
+   `callAgent`, `db`) import `@/lib/*` transitively. Deployed as a **second Coolify service from
+   the same repo**, start command `pnpm worker`, replicas = 1. Deploy gate: smoke-test
+   `pnpm worker` boots in the built deployment image (test 9).
 3. **`run` route becomes enqueue-only.** Keep `authorizeReportsRequest`, the published+`confirmUpdate`
-   guard, and the zero-files guard exactly where they are. Replace the mint+`callAgent` block with:
-   `boss.send('report-dispatch', { jobId }, { singletonKey: jobId })`, set
-   `status="dispatched"` + `dispatchedAt`, return **`202 { ok, status: "dispatched" }`**.
+   guard, and the zero-files guard exactly where they are. Then, in this order (F1 — the worker
+   must never see a queue entry before the status is committed):
+   1. Commit `status="dispatched"` + `dispatchedAt` + `queueJobId=null`.
+   2. `const qid = await boss.send('report-dispatch', { jobId }, { singletonKey: jobId })`.
+   3. `qid === null` means an active singleton suppressed the send (a previous run's queue entry
+      is still live — possible because the agent posts its callback *before* replying, per
+      `SKILL.md`). **Revert the status to its prior value and return
+      `409 { error: "previous run still finishing — retry shortly" }`** (F2). Never leave
+      `dispatched` with no queue entry behind it.
+   4. Enqueue threw → revert status, return 502.
+   5. Success → return **`202 { ok, status: "dispatched" }`**.
+
+   Recovery backstop for any remaining crash window (status committed, revert also lost): the
+   route's dispatchable set now **includes `dispatched`**, so re-POSTing run on a stuck job is
+   always a legal, idempotent repair — no janitor process (F1).
    Delete `maxDuration = 320` and the `callAgent` import. Token minting moves to the worker so the
    24 h TTL starts at actual dispatch, not enqueue.
 4. **Worker handler for `report-dispatch`:**
-   - Re-load the job and **re-check state at claim**: proceed only if `status="dispatched"` and
-     file count > 0. Anything else (published meanwhile, deleted, already processing) → skip with a
-     loud log, complete the queue job. Fail closed — never dispatch on a stale claim.
-   - Mint the per-job token (same `mintJobToken()`), set `status="processing"`, `callAgent` with the
-     same 300 s timeout semantics as today: timeout → leave `processing` (callback completes);
-     non-timeout error → `status="failed"` + error text (mirrors `run/route.ts:78–91`).
-   - pg-boss options: `retryLimit: 1` (transient dispatch errors get one retry — safe per the
-     re-mint property), then `status="failed"` + error text. No dead-letter queue —
-     `ReportJob.status="failed"` is already the record the admin sees and acts on.
+   - **Attempt ownership (F3):** new nullable column `ReportJob.queueJobId String?` (Prisma
+     migration — the one schema change in this plan). On claim, the handler stamps its pg-boss job
+     id into `queueJobId` alongside `status="processing"` in one update.
+   - **Claim guard:** proceed if `status="dispatched"`, **or** `status="processing" AND
+     queueJobId === this pg-boss job id` — a retry may reclaim *its own* interrupted attempt
+     (crash after `processing` was written, before AgentGlob accepted), re-minting the token
+     (re-dispatch is safe per `run/route.ts:11`). Anything else (published meanwhile, deleted,
+     another attempt's `processing`) → skip with a loud log, complete the queue entry. Fail closed.
+   - Mint the per-job token (same `mintJobToken()`), `callAgent` with the same 300 s timeout
+     semantics as today: timeout → leave `processing` (callback completes).
+   - **Non-timeout error (F3):** on a non-final attempt, rethrow WITHOUT touching status — pg-boss
+     retries and the reclaim rule above lets the retry through. Write `status="failed"` + error
+     text only when `job.retryCount >= retryLimit` (final attempt). `retryLimit: 1`. No dead-letter
+     queue — `ReportJob.status="failed"` is already the record the admin sees and acts on.
 5. **Admin UI: no change needed.** The reports page already polls while `processing`; `dispatched`
    already renders as an in-flight state. Only the run button's success handler stops expecting an
    `agentReply` field.
@@ -68,20 +97,31 @@
 
 ### Stage 2 — parallelize safely
 
-8. **Concurrency = worker replicas, not in-process lanes.** Scale the worker service in Coolify to
-   3 replicas. pg-boss claims jobs with `SKIP LOCKED`, so exactly one replica owns each job;
-   `singletonKey: jobId` additionally makes enqueue idempotent while a job is queued/active.
-   Replicas get filesystem/memory isolation free; a dying job kills only its own container.
-9. **Memory limit before the first extra replica.** Set an explicit per-worker limit in Coolify
-   (start 768 MB) and measure one real job's peak (`docker stats --no-stream`) before choosing the
-   final number. Prerequisite, not tuning — an unbounded worker lets the OOM killer pick Postgres.
-   Coolify UI changes are owner-performed steps (infra, per act-vs-ask policy).
-10. **Drive token bucket, in-process, at the choke point.** A ~15-line token bucket (~3 writes/s,
-    small burst) **inside `src/lib/googleDrive.ts` itself**, gating its own write/export functions
-    (`uploadBinaryFile`, `createTextFile`, the Sheets export used by publish). Gating at the choke
-    point makes bypass structurally impossible — no call-site audit needed. In-process is
-    sufficient **because every Drive write stays in the single-replica web app** — the worker never
-    touches Drive (dispatch and callback don't do Drive I/O).
+8. **The dispatcher is not the work — Stage 2 is gated on agent-runtime concurrency (F5).** The
+   worker only holds `callAgent` HTTP calls open; parsing, LLM judgment, workbook build, scratch
+   dirs, and `vendor/` all live in the external `onlyclaw` AgentGlob runtime. So:
+   - **Concurrency lever = one worker, in-process dispatch concurrency 3** (pg-boss work option).
+     Holding 3 idle HTTP calls is I/O-bound; replicas of the dispatcher add nothing and are NOT
+     part of this plan. Worker stays at 1 replica.
+   - **Stage 2 gate (empirical, before raising concurrency above 1):** dispatch 3 jobs and confirm
+     the agent runtime actually overlaps them (overlapping `prepare` phases in agent logs / three
+     live `/tmp/plusim-job-*` dirs). `REPORTS_SCALING.md` explicitly leaves AgentGlob's session
+     concurrency unconfirmed. If the runtime serializes sessions, dispatch concurrency stays at 1
+     and adding agent runtimes becomes an owner decision outside this repo — the queue and route
+     changes above are still worth shipping on their own.
+9. **Memory controls go where the work runs (F5).** A Coolify memory limit on the worker
+   (256 MB is plenty — it holds HTTP calls) is hygiene. The real memory watch is the **onlyclaw
+   runtime host**: measure its peak during one real job (`docker stats --no-stream`) and cap it
+   there before allowing 3 overlapping jobs. Coolify/host changes are owner-performed steps
+   (infra, per act-vs-ask policy).
+10. **Drive token bucket inside `driveFetch` (F6).** The real choke point is
+    `driveFetch(url, init)` (`src/lib/googleDrive.ts:208`) — every helper routes through it,
+    including the four mutating helpers Rev 1 missed (`updateTextFile`, `trashFile`,
+    `updateXlsxSpreadsheet`, `uploadXlsxAsSpreadsheet`, used by rollback and both publish paths).
+    A ~15-line token bucket (~3 writes/s, small burst) applied inside `driveFetch` **when
+    `init.method` is anything other than GET** — reads stay unthrottled, every mutation present
+    and future consumes the bucket by construction. In-process is sufficient **because every
+    Drive write stays in the single-replica web app** — the worker never touches Drive.
     <!-- ponytail: in-process bucket; move to a Postgres-backed bucket the day any second process writes to Drive -->
 11. **OpenAI RPM is capped indirectly** by the replica count (3 concurrent jobs ⇒ ≤3 concurrent
     judgment calls). LLM calls live inside the `onlyclaw` agent, outside this repo. Not built here.
@@ -102,10 +142,10 @@
 - **I4 — token lifecycle:** minting moves to the worker; re-dispatch overwrites
   `agentTokenHash`. Can an older token (from a previous dispatch) still authenticate against
   `/api/agent/jobs/*` after a newer dispatch minted a new one?
-- **I5 — crash windows:** worker dies after setting `processing` but before/during `callAgent`.
-  pg-boss retry re-runs the handler — but the claim re-check refuses `processing`. Does that
-  strand the job in `processing` forever, and is that acceptable (status quo today on timeout) or
-  does it need a janitor?
+- **I5 — crash windows (Rev 2):** a retry may reclaim its own `processing` attempt via
+  `queueJobId`; a stuck `dispatched` is repairable by re-POSTing run. Remaining window to attack:
+  worker dies on the FINAL attempt after AgentGlob accepted — job sits in `processing` until the
+  callback lands (status quo today). Is any window still unrecoverable?
 - **I6 — limiter coverage:** the bucket gates the write functions themselves inside
   `googleDrive.ts`, so no Drive write can bypass it by construction. Attack: is there any Drive
   write that does NOT go through those functions (raw `fetch` to the Drive API anywhere)?
@@ -115,11 +155,17 @@
 1. `run route returns 202 and enqueues without calling the agent` (module no longer imports `callAgent`)
 2. `run route still 409s a published job without confirmUpdate` (regression)
 3. `worker claim re-check skips a job published after enqueue` (I2)
-4. `worker claim re-check skips a job already processing` (I1/I5)
-5. `dispatch error sets failed with error text` (parity with today's `:87–90`)
-6. `dispatch timeout leaves processing for the callback` (parity with today's `:80–85`)
-7. `double POST run while queued yields one execution` (singletonKey, I1)
-8. `drive write bucket spaces 10 concurrent writes to ≤3/s` (fake clock)
+4. `worker claim re-check skips another attempt's processing job` (I1/I5)
+5. `retry reclaims its own processing attempt via queueJobId and re-mints` (F3, I5)
+6. `first-attempt transient error rethrows without writing failed; final attempt writes failed + error` (F3)
+7. `dispatch timeout leaves processing for the callback` (parity with today's `:80–85`)
+8. `double POST run while queued yields one execution` (singletonKey, I1)
+9. `pnpm worker boots in the built deployment image` (smoke, F4)
+10. `enqueue failure reverts status; a stuck dispatched job accepts a re-run` (F1)
+11. `send suppressed by active singleton returns 409 and preserves prior status` (F2 — the
+    callback-before-reply rerun window)
+12. `driveFetch: non-GET consumes the bucket, GET does not` (covers all six mutating helpers by
+    construction, F6; spacing checked with a fake clock)
 
 ## Deliberately NOT building
 
@@ -127,16 +173,18 @@
   Stage 4 (SSE, chunking, DLQ UX) — separate plans; triggers live in `REPORTS_SCALING.md`.
 - Moving upload Drive writes or callback verification off the request path (thresholds in §6–7).
 - Postgres-backed shared token bucket (trigger in §10).
-- New job statuses, Prisma schema changes, Redis/BullMQ, web-app replicas, in-process worker lanes.
+- New job statuses, Redis/BullMQ, web-app replicas, worker replicas (Rev 2 — the dispatcher is
+  I/O-bound; see §8). One schema exception: the nullable `ReportJob.queueJobId` column (§4).
 - Any change to the agent skill's parsing or the parser-dispatch bug (`run_job.py:225`) — separate,
   unrelated fix.
 
 ## Sequencing
 
 1. **PR A** — this plan → Codex adversarial review → merge.
-2. **PR B (all the code)** — pg-boss + worker + route change + the inline Drive bucket + tests 1–8.
-   The bucket is ~15 lines and harmless at 1 replica, so it doesn't earn a separate PR/review round.
-   Deploy worker at 1 replica. Measure: worker peak memory during a real job, dispatch latency,
-   upload p95.
-3. **Owner step** — set worker memory limit in Coolify from the measurement; scale to 3 replicas.
-4. Watch Drive `403/429` and queue depth for a week before considering 5 replicas.
+2. **PR B (all the code)** — pg-boss + worker + `queueJobId` migration + route change + the
+   `driveFetch` bucket + tests 1–12. The bucket is ~15 lines and harmless at concurrency 1, so it
+   doesn't earn a separate PR/review round. Deploy worker at 1 replica, dispatch concurrency 1.
+3. **Stage 2 gate (owner + measurement)** — run the agent-concurrency probe (§8): dispatch 3 jobs,
+   confirm overlap in the `onlyclaw` runtime; measure the runtime host's memory peak and cap it
+   (owner performs host/Coolify changes). Only then raise dispatch concurrency to 3.
+4. Watch Drive `403/429` and queue depth for a week before considering concurrency 5.
