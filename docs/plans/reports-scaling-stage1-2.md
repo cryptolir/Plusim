@@ -1,7 +1,18 @@
 # Plan: Reports scaling — Stage 1 (queue + worker) and Stage 2 (safe parallelism)
 
-**Rev 4** — 2026-07-29. Source analysis: [`docs/REPORTS_SCALING.md`](../REPORTS_SCALING.md)
+**Rev 5** — 2026-07-29. Source analysis: [`docs/REPORTS_SCALING.md`](../REPORTS_SCALING.md)
 (incl. its Code-verified findings section). Scope: stages 1–2 only; stages 3–4 are separate plans.
+
+> **Rev 5 (Codex round 4, 3 findings folded; owner chose "keep folding" at the §3c round
+> bound):** the claim is no longer one `updateMany` with an OR — Prisma applies one `data` object
+> to any matching arm, which would have re-minted on the retry path and recreated the F9
+> double-dispatch (F14). It is now a **dispatched-arm CAS, then an ownership read** for the retry
+> path. A null-marker retry cannot reuse the old token (only its hash is persisted) — it
+> **re-mints under a marker-null CAS**, which is safe precisely because the marker precedes the
+> send (F15). An ambiguous retry (marker set) now **throws instead of completing**, so the entry
+> exhausts to the dead-letter queue and reconciliation runs on a delay (`retryDelay: 300`),
+> giving a live run's callback ~10 min to land first — the DLQ CAS inherently no-ops once the
+> callback has moved the row out of `processing` (F16).
 
 > **Rev 4 (Codex round 3, 5 findings folded):** the token is now minted **once per dispatch
 > generation** in the claim CAS and never rotated by a retry; a `dispatchAttemptedAt` marker
@@ -107,29 +118,44 @@
 4. **Worker handler for `report-dispatch`:**
    - **Attempt ownership (F3):** two new nullable columns on `ReportJob` (the plan's only schema
      change): `queueJobId String?` and `dispatchAttemptedAt DateTime?` (F9).
-   - **Claim is a CAS — the single execution arbiter (Rev 3):** one `updateMany` with
-     `where { id, OR: [ { status: "dispatched" }, { status: "processing", queueJobId: thisPgBossJobId } ] }`.
-     On the `dispatched` arm, `data { status: "processing", queueJobId: thisPgBossJobId,
-     agentTokenHash: freshHash, agentTokenExpiresAt, dispatchAttemptedAt: null }` — claim,
-     attempt ownership, and token mint land atomically. **The token is minted once per dispatch
-     generation and a retry NEVER rotates it** (F9). Count 0 → another entry claimed first, the
-     job was published/deleted meanwhile, or this is a duplicate queue entry — skip with a loud
-     log, complete the entry. Fail closed. Duplicate entries are harmless by construction, which
-     is what lets Rev 3 drop `singletonKey`.
-   - **Send is phase-marked (F9):** set `dispatchAttemptedAt = now` in its own write immediately
-     before `callAgent`. On a retry that reclaims its own `processing` row:
-     - `dispatchAttemptedAt IS NULL` → the crash happened between claim and send — AgentGlob never
-       saw the request. Safe: send now, keeping the already-minted token.
-     - `dispatchAttemptedAt IS NOT NULL` → **ambiguous** — AgentGlob may have accepted and the run
-       may be live. Do NOT send again and do NOT touch the token (the live run's callback must
-       still validate). Log loudly, complete the queue entry, and let the callback — or the
-       stale-processing reconciliation below — finish the job. One dispatch generation can never
-       produce two agent runs.
+   - **Claim: a dispatched-arm CAS, then an ownership read (Rev 5, F14).** A single OR
+     `updateMany` cannot apply different `data` per arm — Prisma would write the fresh token and
+     `dispatchAttemptedAt: null` on the retry arm too, rotating a possibly-live run's token and
+     making the retry look unsent (the exact F9 hole). So, two steps:
+     1. **Initial claim CAS:** `updateMany where { id, status: "dispatched" } data
+        { status: "processing", queueJobId: thisPgBossJobId, agentTokenHash: freshHash,
+        agentTokenExpiresAt, dispatchAttemptedAt: null }`. Count 1 → fresh dispatch: mark, send.
+     2. **Count 0 → ownership read:** `findUnique` — if the row is `processing` with
+        `queueJobId === thisPgBossJobId`, this is our own retry (safe to branch on a read:
+        only this entry's serial retries, the callback, or the DLQ handler can touch such a row).
+        Anything else → duplicate entry, another claimant, or state moved — skip with a loud log,
+        complete the entry. Fail closed. Duplicate entries stay harmless by construction (what
+        lets Rev 3 drop `singletonKey`).
+   - **Retry branches on the send marker (F9, Rev 5):** `dispatchAttemptedAt` is written in its
+     own update immediately before `callAgent`.
+     - **Marker null** → the crash happened after claim, before the marker — AgentGlob never saw
+       a request, and no live run exists. The raw token died with the old process (only its hash
+       is persisted), so reuse is impossible (F15) — instead **re-mint under a marker-null CAS**:
+       `updateMany where { id, status: "processing", queueJobId: thisPgBossJobId,
+       dispatchAttemptedAt: null } data { agentTokenHash: newHash, agentTokenExpiresAt }` —
+       then mark and send. Safe because the marker precedes every send: null marker ⇒ no run
+       whose callback the rotation could orphan.
+     - **Marker set** → **ambiguous** — AgentGlob may have accepted; the run may be live. Do NOT
+       send, do NOT touch the token — and do NOT complete the entry as success (F16: completing
+       it would dodge retry exhaustion and dead-letter delivery, stranding the row in
+       `processing` forever if no callback ever comes). **Throw.** The entry retries on a delay
+       and, exhausted, reaches the dead-letter reconciliation below — which no-ops if the
+       callback landed in the meantime. One dispatch generation still never produces two runs.
    - `callAgent` with the same 300 s timeout semantics as today: timeout → leave `processing`
      (callback completes).
    - **Non-timeout error (F3):** on a non-final attempt, rethrow WITHOUT touching status — pg-boss
      retries and the reclaim rule above lets the retry through. Write `status="failed"` + error
-     text only when `job.retryCount >= retryLimit` (final attempt). `retryLimit: 1`.
+     text only when `job.retryCount >= retryLimit` (final attempt). Queue options (Rev 5):
+     `retryLimit: 2`, `retryDelay: 300` — the delay is what makes ambiguous-attempt
+     reconciliation *delayed*: an ambiguous entry throws (F16), retries ~5 and ~10 minutes later,
+     and only then dead-letters, giving a live run's callback (which the agent posts before
+     replying, within the 300 s `callAgent` window) ample time to move the row out of
+     `processing` first.
    - **Crash recovery via dead-letter reconciliation (F10):** the queue is created with
      `deadLetter: 'report-dispatch-dead'` and `expireInSeconds: 600` (> the 300 s `callAgent`
      hold, so a live handler is never expired mid-flight). A worker death leaves no catch block —
@@ -139,8 +165,13 @@
      error: "worker crashed or expired" }`. Rev 1 dropped the DLQ as a queue nobody consumes;
      Rev 4 reinstates it *with* a consumer, because a final-attempt crash otherwise strands
      `processing` forever — unreachable by the run route and invisible to the callback.
-     Pre-existing and unchanged: an agent run that is accepted but never calls back leaves
-     `processing` until an admin intervenes — exactly today's behavior on dispatch timeout.
+     The CAS keys on `queueJobId`, so it **inherently no-ops** when the callback already moved
+     the row out of `processing` — that is the F16 "durable delayed reconciliation": ambiguous
+     attempts end in exactly one of {callback completes the job, DLQ marks it failed}, never in
+     a permanently stranded `processing`. Bounded residual (Rev 5): an agent run still live past
+     the whole retry window (~10+ min) gets marked `failed` and its late callback is then
+     rejected by `acceptingWhere` — a rerun rebuilds the report; noted as accepted, since the
+     alternative (waiting forever) is today's unbounded stall.
 5. **Admin UI: no change needed.** The reports page already polls while `processing`; `dispatched`
    already renders as an in-flight state. Only the run button's success handler stops expecting an
    `agentReply` field.
@@ -234,15 +265,21 @@
     (F8 — cleared `agentTokenHash` no-matches `acceptingWhere`, `result/route.ts:38–43`)
 14. `duplicate queue entries for one job: exactly one claims, the rest no-op` (I1, replaces the
     Rev 2 singleton test)
-15. `retry with dispatchAttemptedAt null re-sends with the SAME token; with it set, does not send
-    and does not rotate` (F9 — the ambiguous-accept window; the first run's callback must still
-    validate)
+15. `retry with dispatchAttemptedAt null re-mints under a marker-null CAS, then marks and sends;
+    with the marker set it neither sends nor rotates` (F9/F15 — the raw token is unrecoverable
+    from its hash, and a live run's callback must still validate)
 16. `dead-letter delivery reconciles processing→failed only for the matching queueJobId` (F10 —
     final-attempt crash; the CAS must not touch a row a newer generation owns)
 17. `send stalled past 2 min, second POST stale-reclaims, first send then throws: revert
     no-matches the second generation` (F11 — dispatchedAt-bound compensation)
 18. `rerun from failed clears error at dispatch CAS time` (F12 — no stale failure shown during
     dispatched/processing)
+19. `ambiguous retry (marker set) throws — never completes as success — and dead-letters after
+    the delayed retries` (F16 — completing would strand processing forever)
+20. `DLQ reconciliation no-ops when the callback moved the row out of processing first; marks
+    failed when it did not` (F16 — both halves of delayed reconciliation)
+21. `a retry never writes a fresh token or clears the marker via the claim path` (F14 — the
+    dispatched-arm CAS and the ownership read are separate operations; no OR-arm data bleed)
 
 ## Deliberately NOT building
 
@@ -262,7 +299,7 @@
 
 1. **PR A** — this plan → Codex adversarial review → merge.
 2. **PR B (all the code)** — pg-boss + worker + `queueJobId` migration + route change + the
-   `driveFetch` bucket + tests 1–18. The bucket is ~15 lines and harmless at concurrency 1, so it
+   `driveFetch` bucket + tests 1–21. The bucket is ~15 lines and harmless at concurrency 1, so it
    doesn't earn a separate PR/review round. Deploy worker at 1 replica, dispatch concurrency 1.
 3. **Stage 2 gate (owner + measurement)** — run the agent-concurrency probe (§8): dispatch 3 jobs,
    confirm overlap in the `onlyclaw` runtime; measure the runtime host's memory peak and cap it
