@@ -4,6 +4,7 @@
 - Today, an admin uploads bank/credit-card statements, they are stored in the target user's Google Drive, and a single AgentGlob agent named `onlyclaw` parses, deduplicates, deterministically categorizes, uses an LLM only to judge unknown merchants, builds an Excel workbook, and calls back a result that the app independently re-verifies before an admin reviews and publishes it to Google Sheets — the flow is already partly async (dispatch tolerates timeouts; a callback, not the chat reply, finishes the job).
 - The main scaling limits for many uploads at once are: one shared `onlyclaw` agent processing jobs largely sequentially, LLM latency for the unknown-merchant judgment, every re-run re-parsing the whole union of a job's files (no incremental processing), and synchronous Google Drive writes during the upload request — Google states plainly that you should "avoid exceeding 3 requests per second of sustained write or insert requests, per account" and that this limit "can't be increased," while all Plusim users share one owner OAuth account.
 - Highest-value fixes: put a real Postgres-backed job queue (pg-boss) with a dedicated Coolify worker, run several agent lanes in parallel with a concurrency cap, parse each file once and cache it (incremental re-runs), batch the merchant-judgment into one LLM call with a cached prompt prefix (or the OpenAI Batch API), dedupe files by content hash, and stream progress instead of polling.
+- Two things a code pass added (2026-07-29, see **Code-verified findings**): nothing in the repo declares a memory limit for any container, so an unbounded worker lets the OOM killer pick a victim — possibly Postgres — which makes setting a per-worker limit a prerequisite for parallelism rather than a tuning step; and parallelism is safer than assumed, because per-job sessions and per-job scratch dirs already exist, leaving job claiming and the lazily built shared `vendor/` as the real blockers.
 
 ## Key Findings
 - The pipeline is a trust-boundary design: the agent verifies before posting, and the app re-verifies from raw transactions before accepting — any mismatch becomes `needs_review`, never a silent partial report.
@@ -49,6 +50,16 @@
 - **Prompt caching** — per OpenAI, "By reusing recently seen input tokens, developers can get a 50% discount and faster prompt processing times," applied automatically "on prompts longer than 1,024 tokens" by caching "the longest prefix." OpenAI advises structuring prompts "with static or repeated content at the beginning and dynamic, user-specific content at the end" and using `prompt_cache_key` consistently — exactly the shape of Plusim's taxonomy + rules + dictionary prefix.
 - **OpenClaw/AgentGlob** supports multiple isolated sessions/agents, which is the lever for running report jobs in parallel lanes.
 
+### Code-verified findings (2026-07-29)
+The caveats below originally said "verify in code before implementation." This pass did that. Results:
+
+- **Dispatch really is synchronous and long.** `DISPATCH_TIMEOUT_MS = 300_000` in `src/app/admin/api/reports/[jobId]/run/route.ts:22`, awaited at line 72. Each in-flight job holds a request for up to five minutes, so N concurrent uploads hold N connections. Confirms Stage 1 is correctly ordered first.
+- **Job sessions are already isolated; the filesystem mostly is too.** Each job runs under `app:plusim:report-job:<jobId>` with no `appUserId`, and `SKILL.md` step 1 already scopes the scratch dir per job (`WD=/tmp/plusim-job-<jobId>`); `run_job.py` requires `--workdir` with no default. So parallel jobs do **not** collide on downloaded statements, and `cleanup` (`run_job.py:381`, `shutil.rmtree(args.workdir)`) only removes its own job's files. Parallelism is safer than first assumed.
+- **The one real shared-state race is `vendor/`.** `SKILL.md` says to rebuild it if missing (`pip install --target {baseDir}/vendor openpyxl pypdf`). Two jobs starting concurrently against a missing `vendor/` would both install into the same directory and can corrupt it. Bake `vendor/` into the deployed image (or build it once at container start) rather than lazily on job miss.
+- **Per-job memory is small; the fixed cost per lane is not.** `parse_max_pdf.py` uses `pypdf` (`:21`) and joins every page's text into one string (`:90`), but statements are text-only, so peak is tens of MB for seconds — no page rasterization. The meaningful cost of a parallel lane is the runtime baseline it duplicates, not the parse.
+- **Nothing caps memory anywhere.** There is no `Dockerfile` and no `docker-compose.yml` in the repo; Coolify builds with its default buildpack and no resource limits are declared. An unbounded worker means the Linux OOM killer chooses the victim, and Postgres is a plausible one. **Set an explicit per-worker memory limit before adding any replica** — this is a prerequisite for Stage 2, not a nice-to-have.
+- **Adjacent correctness bug (not a scaling issue, but blocks adding formats).** Parser choice in `agent/skills/plusim-reports/scripts/run_job.py:225` is `if file["mime"].endswith("pdf") → parse_max_pdf, else → parse_isracard_xlsx`. Any non-PDF statement that is not Isracard is silently parsed as Isracard — it produces wrong rows rather than failing. Replace the `else` with an explicit issuer→parser table that raises on an unknown issuer. New statement formats should stay as one more `parse_<issuer>_<ext>.py` inside the existing `plusim-reports` skill (all parsers already emit the same `transactions`/`sourceTotals`/`warnings` shape); a second skill would duplicate the manifest, dedupe, rules, and workbook steps.
+
 ## Recommendations
 Do these in order; each stage lists the signal that should push you to the next.
 
@@ -58,8 +69,11 @@ Do these in order; each stage lists the signal that should push you to the next.
 - *Move to Stage 2 when:* uploads no longer time out and the UI returns instantly, but throughput is still limited because jobs run one at a time.
 
 **Stage 2 — Parallelize safely.**
-- Run **several agent lanes** (multiple `onlyclaw` sessions/agents) and let the worker pull jobs concurrently, with a **concurrency cap** (start at 3–5) so you respect Drive and OpenAI limits.
-- Add a **token-bucket limiter and exponential backoff** for Google Drive writes (stay under Google's ~3 sustained writes/second per account) and for OpenAI RPM.
+- **Prefer worker container replicas over in-process lanes.** Scale the worker by replica count (start at 3) rather than running several `onlyclaw` lanes inside one process. Replicas get filesystem and memory isolation from the platform for free, and a job that dies takes only its own container with it. In-process lanes save the duplicated runtime baseline (~150–300 MB each) but buy back the isolation in code you have to write and debug.
+- **Set a per-worker memory limit first** (see Code-verified findings — nothing caps memory today). Without it, replicas multiply the chance the OOM killer picks Postgres. Measure one worker's peak during a real job (`docker stats`) before choosing the replica count.
+- **Replicas require the queue to land first.** Today `POST .../run` HTTP-calls a single agent, so nothing decides which copy owns a job; with N workers the same job can run twice. pg-boss's `SKIP LOCKED` claim gives exactly-one-worker-per-job. This is why Stage 1 is a hard prerequisite, not a preference.
+- Add a **token-bucket limiter and exponential backoff** for Google Drive writes (stay under Google's ~3 sustained writes/second per account) and for OpenAI RPM. **Keep the bucket in shared state (a Postgres table), not in process memory** — three replicas each holding a private 3/sec bucket permit 9/sec against one OAuth account and will hit `403`/`429`.
+- **Scale the worker only; leave the web app at one replica.** Users never connect to the worker, so replicating it is invisible client-side (no sticky sessions, no load balancer changes). The main user-visible win arrives in Stage 1 regardless: parsing and Drive I/O stop competing for CPU and RAM with the process serving plusim.xyz, so one heavy job no longer slows the site for everyone.
 - *Move to Stage 3 when:* several jobs run in parallel but each large re-run is still slow.
 
 **Stage 3 — Stop repeating work.**
@@ -70,6 +84,7 @@ Do these in order; each stage lists the signal that should push you to the next.
 
 **Stage 4 — Better UX and resilience.**
 - Replace client polling with **server-sent events (SSE)** or a worker-updated `progress` field (per-file progress).
+- *If the web app is ever scaled past one replica*, SSE breaks quietly: the browser's stream is held by app replica A while the worker's update lands on replica B, so the user sees a frozen page rather than an error. Fan updates out with Postgres `LISTEN/NOTIFY` (or read progress from the job row) so any replica can serve any stream. Not a problem while the app stays at one replica, which Stage 2 assumes.
 - For very large batches, optionally **chunk** into per-source sub-jobs processed in parallel and merged — but only if the full-replace merge semantics are preserved.
 - Add **retries with backoff and a dead-letter queue** (native to pg-boss) so a single bad statement or a transient Drive/OpenAI error doesn't fail the whole batch.
 
@@ -80,6 +95,7 @@ Do these in order; each stage lists the signal that should push you to the next.
 
 ## Caveats
 - This analysis is based on the repository's authoritative `REPORTS_PIPELINE.md` (the stated source of truth) and standard behavior of the named stack. Exact concurrency, timeout, and rate-limit constants in code should be verified directly before implementation.
-- Whether the `onlyclaw` agent is strictly one-at-a-time or can already fan out is described at the design level; confirm in code before sizing the concurrency cap.
+- ~~Whether the `onlyclaw` agent is strictly one-at-a-time or can already fan out is described at the design level; confirm in code before sizing the concurrency cap.~~ **Partly resolved (2026-07-29)** — see Code-verified findings: per-job session and scratch-dir isolation already exist, so the blocker to fanning out is job claiming (no queue) and the lazily built shared `vendor/`, not per-job state. The runtime's own concurrency behaviour still needs confirmation on the AgentGlob side before fixing a replica count.
+- Memory limits and replica sizing in this document are reasoned from the parsers' libraries, not measured. Take `docker stats` readings from one worker under a real job before setting the limit and the replica count.
 - Drive quota figures are Google's published defaults and can differ for a specific project; verify your project's actual quotas before tuning the token bucket.
 - The Batch API's 24-hour window is unsuitable for interactive, admin-is-waiting categorization — reserve it for bulk/backfill runs; keep synchronous or fast-batched calls for live report generation.
