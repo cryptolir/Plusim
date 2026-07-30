@@ -22,15 +22,15 @@ export async function PATCH(
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
+    return NextResponse.json({ error: "בקשה לא תקינה" }, { status: 400 });
   }
   const category = typeof body.category === "string" ? body.category : "";
   if (!(await getValidLeafSet()).has(category)) {
-    return NextResponse.json({ error: "unknown category" }, { status: 400 });
+    return NextResponse.json({ error: "קטגוריה לא מוכרת" }, { status: 400 });
   }
 
   const tx = await db.reportTransaction.findFirst({ where: { id: txId, jobId } });
-  if (!tx) return NextResponse.json({ error: "not found" }, { status: 404 });
+  if (!tx) return NextResponse.json({ error: "העסקה לא נמצאה" }, { status: 404 });
 
   await db.reportTransaction.update({
     where: { id: txId },

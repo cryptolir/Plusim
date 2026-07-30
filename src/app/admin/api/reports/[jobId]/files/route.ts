@@ -45,10 +45,10 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     where: { id: jobId },
     select: { id: true, status: true, targetUserId: true },
   });
-  if (!job) return NextResponse.json({ error: "not found" }, { status: 404 });
+  if (!job) return NextResponse.json({ error: "העבודה לא נמצאה" }, { status: 404 });
   if (["dispatched", "processing"].includes(job.status)) {
     return NextResponse.json(
-      { error: "the agent is running on this job — wait for it to finish before adding files" },
+      { error: "הסוכן עובד על העבודה הזו — יש להמתין לסיום לפני הוספת קבצים" },
       { status: 409 },
     );
   }
@@ -57,7 +57,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
   try {
     form = await req.formData();
   } catch {
-    return NextResponse.json({ error: "expected multipart/form-data" }, { status: 400 });
+    return NextResponse.json({ error: "פורמט הבקשה אינו נתמך" }, { status: 400 });
   }
   const prepared = await prepareStatements(form);
   if (prepared instanceof NextResponse) return prepared;
@@ -74,7 +74,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     return NextResponse.json(
       {
         error:
-          "this job's statement files live in a previously assigned Drive folder — reassign the original folder or create a new job",
+          "דפי החשבון של העבודה הזו נמצאים בתיקיית Drive קודמת — החזירו את התיקייה המקורית או צרו עבודה חדשה",
       },
       { status: 409 },
     );
@@ -98,7 +98,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
         `[admin/reports] job=${jobId} rollback left ${written.length} orphan row(s): ${e instanceof Error ? e.message : String(e)}`,
       );
     }
-    return NextResponse.json({ error: `Drive upload failed: ${msg}` }, { status: 502 });
+    return NextResponse.json({ error: `ההעלאה ל-Google Drive נכשלה: ${msg}` }, { status: 502 });
   }
 
   console.log(

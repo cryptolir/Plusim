@@ -35,7 +35,7 @@ beforeEach(() => {
 });
 
 it("denies when the auth gate rejects — before touching the body", async () => {
-  authz.mockResolvedValue(NextResponse.json({ error: "unauthorized" }, { status: 401 }));
+  authz.mockResolvedValue(NextResponse.json({ error: "נדרשת התחברות מחדש" }, { status: 401 }));
   const res = await put("chat_preamble", { value: "x" });
   expect(res.status).toBe(401);
   expect(setMock).not.toHaveBeenCalled();

@@ -15,16 +15,16 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
+    return NextResponse.json({ error: "בקשה לא תקינה" }, { status: 400 });
   }
 
   const mapping = await db.merchantMapping.findUnique({ where: { id } });
-  if (!mapping) return NextResponse.json({ error: "not found" }, { status: 404 });
+  if (!mapping) return NextResponse.json({ error: "המיפוי לא נמצא" }, { status: 404 });
 
   const category =
     typeof body.category === "string" && body.category ? body.category : mapping.category;
   if (!(await getValidLeafSet()).has(category)) {
-    return NextResponse.json({ error: "unknown category" }, { status: 400 });
+    return NextResponse.json({ error: "קטגוריה לא מוכרת" }, { status: 400 });
   }
 
   await db.merchantMapping.update({

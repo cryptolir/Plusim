@@ -30,7 +30,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     where: { id: jobId },
     select: { id: true, status: true, _count: { select: { files: true } } },
   });
-  if (!job) return NextResponse.json({ error: "not found" }, { status: 404 });
+  if (!job) return NextResponse.json({ error: "העבודה לא נמצאה" }, { status: 404 });
   // A published job may be re-run to absorb newly appended statements, but only
   // deliberately: the caller must opt in with {"confirmUpdate":true}. Without the
   // flag the old refusal stands, so no accidental or legacy call can pull a live
@@ -41,11 +41,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     const confirmed =
       body !== null && typeof body === "object" && (body as { confirmUpdate?: unknown }).confirmUpdate === true;
     if (!confirmed) {
-      return NextResponse.json({ error: "job already published" }, { status: 409 });
+      return NextResponse.json({ error: "העבודה כבר פורסמה — אשרו עדכון כדי להריץ מחדש" }, { status: 409 });
     }
   }
   if (job._count.files === 0) {
-    return NextResponse.json({ error: "job has no statement files" }, { status: 400 });
+    return NextResponse.json({ error: "לעבודה אין דפי חשבון" }, { status: 400 });
   }
 
   const { token, tokenHash, expiresAt } = mintJobToken();
@@ -86,8 +86,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     console.error(`[admin/reports] job=${jobId} dispatch failed: ${msg}`);
     await db.reportJob.update({
       where: { id: jobId },
-      data: { status: "failed", error: `dispatch failed: ${msg.slice(0, 500)}` },
+      data: { status: "failed", error: `השליחה לסוכן נכשלה: ${msg.slice(0, 500)}` },
     });
-    return NextResponse.json({ error: `dispatch failed: ${msg}` }, { status: 502 });
+    return NextResponse.json({ error: `השליחה לסוכן נכשלה: ${msg}` }, { status: 502 });
   }
 }

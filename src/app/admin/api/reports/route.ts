@@ -32,12 +32,12 @@ export async function POST(req: NextRequest) {
   try {
     form = await req.formData();
   } catch {
-    return NextResponse.json({ error: "expected multipart/form-data" }, { status: 400 });
+    return NextResponse.json({ error: "פורמט הבקשה אינו נתמך" }, { status: 400 });
   }
 
   const targetUserId = String(form.get("targetUserId") ?? "").trim();
   const title = String(form.get("title") ?? "").trim().slice(0, 120) || null;
-  if (!targetUserId) return NextResponse.json({ error: "targetUserId required" }, { status: 400 });
+  if (!targetUserId) return NextResponse.json({ error: "יש לבחור משתמש יעד" }, { status: 400 });
 
   const prepared = await prepareStatements(form);
   if (prepared instanceof NextResponse) return prepared;
@@ -63,7 +63,7 @@ export async function POST(req: NextRequest) {
     console.error(`[admin/reports] job=${job.id} upload failed, rolling back: ${msg}`);
     await Promise.allSettled(written.map((w) => trashFile(w.driveFileId)));
     await db.reportJob.delete({ where: { id: job.id } }).catch(() => {});
-    return NextResponse.json({ error: `Drive upload failed: ${msg}` }, { status: 502 });
+    return NextResponse.json({ error: `ההעלאה ל-Google Drive נכשלה: ${msg}` }, { status: 502 });
   }
 
   console.log(`[admin/reports] job=${job.id} created by=${auth.actor} files=${prepared.length} → drive`);

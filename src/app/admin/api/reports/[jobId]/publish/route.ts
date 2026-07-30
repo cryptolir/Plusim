@@ -84,9 +84,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     ],
     { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
   );
-  if (!job) return NextResponse.json({ error: "not found" }, { status: 404 });
+  if (!job) return NextResponse.json({ error: "העבודה לא נמצאה" }, { status: 404 });
   if (!PUBLISHABLE.includes(job.status)) {
-    return NextResponse.json({ error: `cannot publish a ${job.status} job` }, { status: 409 });
+    return NextResponse.json({ error: "לא ניתן לפרסם את העבודה במצב הנוכחי — רעננו את הדף ובדקו את הסטטוס" }, { status: 409 });
   }
   // Never publish a job with FATAL verification diagnostics — a total mismatch,
   // duplicate dedupKey, date-outside-month, unknown category, or non-xlsx payload
@@ -98,14 +98,14 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     (job.verification as { fatal?: unknown }).fatal === true;
   if (fatal) {
     return NextResponse.json(
-      { error: "cannot publish — the report has fatal verification diagnostics; re-run the job" },
+      { error: "לא ניתן לפרסם — באימות הדוח נמצאו בעיות חמורות; יש להריץ את הסוכן מחדש" },
       { status: 409 },
     );
   }
   // Result freshness: the stored artifact must come from the newest run.
   if (!job.completedAt || (job.dispatchedAt && job.completedAt < job.dispatchedAt)) {
     return NextResponse.json(
-      { error: "the latest run has not produced a result — re-run the agent before publishing" },
+      { error: "ההרצה האחרונה עדיין לא החזירה תוצאה — יש להריץ את הסוכן מחדש לפני הפרסום" },
       { status: 409 },
     );
   }
@@ -116,7 +116,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     });
     if (unprocessed > 0) {
       return NextResponse.json(
-        { error: `${unprocessed} statement file(s) were added after the last run — re-run the agent before publishing` },
+        { error: `נוספו ${unprocessed} דפי חשבון אחרי ההרצה האחרונה — יש להריץ את הסוכן מחדש לפני הפרסום` },
         { status: 409 },
       );
     }
@@ -242,7 +242,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
       }
     }
     return NextResponse.json(
-      { error: "the job changed while publishing (a run or an upload landed) — re-check it and publish again" },
+      { error: "העבודה השתנתה תוך כדי הפרסום (נכנסה הרצה או העלאה) — בדקו אותה ופרסמו שוב" },
       { status: 409 },
     );
   }

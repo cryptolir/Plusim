@@ -45,19 +45,19 @@ function sniffMime(name: string, buf: Buffer): string | null {
 /** Validate + read the multipart `files[]`. Returns a NextResponse to return as-is on refusal. */
 export async function prepareStatements(form: FormData): Promise<PreparedStatement[] | NextResponse> {
   const files = form.getAll("files").filter((f): f is File => f instanceof File);
-  if (files.length === 0) return NextResponse.json({ error: "no files" }, { status: 400 });
-  if (files.length > MAX_FILES) return NextResponse.json({ error: `max ${MAX_FILES} files` }, { status: 400 });
+  if (files.length === 0) return NextResponse.json({ error: "לא נבחרו קבצים" }, { status: 400 });
+  if (files.length > MAX_FILES) return NextResponse.json({ error: `אפשר להעלות עד ${MAX_FILES} קבצים` }, { status: 400 });
 
   const prepared: PreparedStatement[] = [];
   for (const f of files) {
     if (f.size > MAX_FILE_BYTES) {
-      return NextResponse.json({ error: `${f.name}: over 10MB` }, { status: 400 });
+      return NextResponse.json({ error: `${f.name}: הקובץ גדול מ-10MB` }, { status: 400 });
     }
     const bytes = Buffer.from(await f.arrayBuffer());
     const mime = sniffMime(f.name, bytes);
     if (!mime) {
       return NextResponse.json(
-        { error: `${f.name}: only .xlsx and .pdf statements are accepted` },
+        { error: `${f.name}: ניתן להעלות רק דפי חשבון בפורמט .xlsx או .pdf` },
         { status: 400 },
       );
     }
@@ -72,12 +72,12 @@ export async function prepareStatements(form: FormData): Promise<PreparedStateme
  */
 export async function resolveTargetFolder(targetUserId: string): Promise<string | NextResponse> {
   if (!(await isDriveConnected())) {
-    return NextResponse.json({ error: "Google Drive is not connected" }, { status: 409 });
+    return NextResponse.json({ error: "Google Drive לא מחובר" }, { status: 409 });
   }
   const folder = await db.userDriveFolder.findUnique({ where: { userId: targetUserId } });
   if (!folder) {
     return NextResponse.json(
-      { error: "target user has no assigned Drive folder — assign one first" },
+      { error: "למשתמש היעד לא הוקצתה תיקיית Drive — יש להקצות תיקייה תחילה" },
       { status: 409 },
     );
   }
@@ -85,10 +85,10 @@ export async function resolveTargetFolder(targetUserId: string): Promise<string 
     await assertEntryUnderRoot(folder.folderId);
   } catch (e) {
     if (e instanceof DriveNotConnectedError) {
-      return NextResponse.json({ error: "Google Drive is not connected" }, { status: 409 });
+      return NextResponse.json({ error: "Google Drive לא מחובר" }, { status: 409 });
     }
     return NextResponse.json(
-      { error: "assigned Drive folder is missing or outside the root — reassign it" },
+      { error: "תיקיית ה-Drive שהוקצתה חסרה או נמצאת מחוץ לתיקיית השורש — יש להקצות אותה מחדש" },
       { status: 409 },
     );
   }

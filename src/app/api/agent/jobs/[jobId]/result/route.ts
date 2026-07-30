@@ -128,7 +128,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     // or re-dispatched between auth and here.
     await db.reportJob.updateMany({
       where: acceptingWhere,
-      data: { status: "needs_review", error: `result rejected: ${msg}`.slice(0, 500) },
+      data: { status: "needs_review", error: `תוצאת הסוכן נדחתה: ${msg}`.slice(0, 500) },
     });
     return NextResponse.json({ error: msg }, { status: 400 });
   }

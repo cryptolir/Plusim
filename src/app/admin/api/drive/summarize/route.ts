@@ -66,18 +66,18 @@ export async function POST(req: NextRequest) {
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "bad request" }, { status: 400 });
+    return NextResponse.json({ error: "בקשה לא תקינה" }, { status: 400 });
   }
   if (typeof body.fileId !== "string" || !body.fileId) {
-    return NextResponse.json({ error: "missing fileId" }, { status: 400 });
+    return NextResponse.json({ error: "חסר מזהה קובץ" }, { status: 400 });
   }
   const fileId = body.fileId;
 
   try {
     const entry = await assertEntryUnderRoot(fileId); // rejects files outside the root tree
-    if (entry.isFolder) return NextResponse.json({ error: "selected item is a folder" }, { status: 400 });
+    if (entry.isFolder) return NextResponse.json({ error: "הפריט שנבחר הוא תיקייה" }, { status: 400 });
     const parentFolderId = entry.parents?.[0];
-    if (!parentFolderId) return NextResponse.json({ error: "file has no parent folder" }, { status: 400 });
+    if (!parentFolderId) return NextResponse.json({ error: "לקובץ אין תיקיית אב" }, { status: 400 });
 
     // Informational only — does a summary for this source already exist?
     const existing = (await listSummaries(parentFolderId)).find(
@@ -119,15 +119,15 @@ export async function POST(req: NextRequest) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error("[drive/summarize] OpenAI call failed:", msg);
       const friendly = /api key|OPENAI_API_KEY|401|unauthor/i.test(msg)
-        ? "OpenAI key missing or invalid — set OPENAI_API_KEY in the app config."
-        : "Summarization failed. Please try again in a moment.";
+        ? "מפתח OpenAI חסר או לא תקין — הגדירו את OPENAI_API_KEY בהגדרות האפליקציה."
+        : "יצירת הסיכום נכשלה. נסו שוב בעוד רגע.";
       return NextResponse.json({ error: friendly }, { status: 502 });
     }
     console.log(
       `[drive/summarize] fileId=${fileId} replyChars=${reply.length} head=${JSON.stringify(reply.slice(0, 100))}`,
     );
     if (!reply.trim()) {
-      return NextResponse.json({ error: "The model returned an empty summary. Please try again." }, { status: 502 });
+      return NextResponse.json({ error: "המודל החזיר סיכום ריק. נסו שוב." }, { status: 502 });
     }
 
     const parsed = parseTitleDate(reply);
@@ -146,10 +146,13 @@ export async function POST(req: NextRequest) {
       alreadyExists: existing ? { id: existing.id, name: existing.name } : null,
     });
   } catch (e) {
-    if (e instanceof DriveNotConnectedError) return NextResponse.json({ error: "not connected" }, { status: 409 });
-    if (e instanceof DriveOutsideRootError) return NextResponse.json({ error: "file outside root" }, { status: 403 });
+    if (e instanceof DriveNotConnectedError) return NextResponse.json({ error: "Google Drive לא מחובר" }, { status: 409 });
+    if (e instanceof DriveOutsideRootError) return NextResponse.json({ error: "הקובץ נמצא מחוץ לתיקיית השורש המוגדרת" }, { status: 403 });
     if (e instanceof UnsupportedTranscriptTypeError)
-      return NextResponse.json({ error: "unsupported file type" }, { status: 415 });
-    return NextResponse.json({ error: e instanceof Error ? e.message : "error" }, { status: 500 });
+      return NextResponse.json({ error: "סוג הקובץ אינו נתמך" }, { status: 415 });
+    return NextResponse.json(
+      { error: `יצירת הסיכום נכשלה: ${e instanceof Error ? e.message : "שגיאה לא ידועה"}` },
+      { status: 500 },
+    );
   }
 }
