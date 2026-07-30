@@ -33,6 +33,18 @@ export interface DispatchQueueEntry {
   retryLimit: number;
 }
 
+/**
+ * True when a callAgent failure carries an HTTP status ATTRIBUTABLE TO THE
+ * AGENTGLOB APP (callAgent throws `agentglob <status>: <body>` for non-ok
+ * responses). 502/504 are excluded — a gateway answered, and the backend may
+ * still hold (or be running) the request. Everything else (network reset,
+ * DNS, abort) has no status at all and stays ambiguous.
+ */
+export function isDefinitiveSendFailure(msg: string): boolean {
+  const status = /^agentglob (\d{3}):/.exec(msg)?.[1];
+  return status !== undefined && status !== "502" && status !== "504";
+}
+
 export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<void> {
   const { jobId } = entry.data;
   const gen = new Date(entry.data.gen);
@@ -54,8 +66,10 @@ export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<v
   });
 
   let token: string;
+  let tokenHash: string;
   if (claimed.count === 1) {
     token = fresh.token;
+    tokenHash = fresh.tokenHash;
   } else {
     // Ownership read — safe to branch on a read: only this entry's serial
     // retries, the callback, or the DLQ handler can touch a row we own.
@@ -90,16 +104,29 @@ export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<v
       return;
     }
     token = reminted.token;
+    tokenHash = reminted.tokenHash;
   }
 
   // The send marker precedes every send — that ordering is what makes a null
-  // marker PROOF that no run exists (F9). Ownership-conditioned like every write.
+  // marker PROOF that no run exists (F9). It is a ONE-SHOT claim (Codex round 1,
+  // F21): matching our own token hash + a still-null marker means a paused
+  // handler that resumes after pg-boss expired and redelivered its entry (same
+  // entry id!) no-matches here — the redelivery re-minted, so the zombie's hash
+  // is stale — and can never perform a second send for the generation (I1).
   const marked = await db.reportJob.updateMany({
-    where: { id: jobId, status: "processing", queueJobId: entry.id },
+    where: {
+      id: jobId,
+      status: "processing",
+      queueJobId: entry.id,
+      agentTokenHash: tokenHash,
+      dispatchAttemptedAt: null,
+    },
     data: { dispatchAttemptedAt: new Date() },
   });
   if (marked.count === 0) {
-    console.warn(`[worker] job=${jobId} entry=${entry.id} skipping — row moved before send marker`);
+    console.warn(
+      `[worker] job=${jobId} entry=${entry.id} skipping — lost the one-shot send claim (a newer attempt owns it)`,
+    );
     return;
   }
 
@@ -123,11 +150,23 @@ export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<v
     }
     console.error(`[worker] job=${jobId} dispatch failed (attempt=${entry.retryCount}): ${msg}`);
     if (entry.retryCount >= entry.retryLimit) {
-      // Final attempt only (F3) — earlier attempts rethrow untouched and the
-      // marker-set branch above decides whether the retry may re-send.
+      // Final attempt only (F3) — earlier attempts rethrow untouched.
       await db.reportJob.updateMany({
         where: { id: jobId, status: "processing", queueJobId: entry.id },
         data: { status: "failed", error: `dispatch failed: ${msg.slice(0, 500)}` },
+      });
+    } else if (isDefinitiveSendFailure(msg)) {
+      // The AgentGlob APP answered with an error status — THIS attempt's request
+      // terminated without an accepted run (and the agent posts its callback
+      // BEFORE replying, so any run that mattered already called back). Clearing
+      // the marker — scoped to our own token so it can never unmark a newer
+      // attempt — is what lets the retry re-mint and re-send; without it, every
+      // send-error retry hits the ambiguous branch and retryLimit provides no
+      // recovery at all (Codex round 1, F22). Gateway statuses (502/504) and
+      // transport errors stay ambiguous: the backend may have the request.
+      await db.reportJob.updateMany({
+        where: { id: jobId, status: "processing", queueJobId: entry.id, agentTokenHash: tokenHash },
+        data: { dispatchAttemptedAt: null },
       });
     }
     throw e instanceof Error ? e : new Error(msg);

@@ -33,10 +33,27 @@ export interface ReportDispatchPayload {
   gen: string;
 }
 
-/** Idempotent (INSERT … ON CONFLICT DO NOTHING); the dead-letter queue must exist first. */
+// Reconciliation must survive a DB outage longer than one attempt: dead-letter
+// entries take THIS queue's retry config (pg-boss dlq_jobs CTE joins the dead
+// queue's row), and the implicit default was retryDelay 0 — three back-to-back
+// attempts inside the same outage. Backoff spreads 6 attempts over ~30 minutes
+// (Codex round 1, F23).
+export const REPORT_DISPATCH_DEAD_QUEUE_OPTIONS = {
+  retryLimit: 5,
+  retryDelay: 60,
+  retryBackoff: true,
+} as const;
+
+/**
+ * Idempotent; the dead-letter queue must exist first. createQueue is
+ * INSERT … ON CONFLICT DO NOTHING, so options on an EXISTING queue row would
+ * silently stay stale — updateQueue converges them on every boot.
+ */
 export async function ensureReportQueues(boss: PgBoss): Promise<void> {
-  await boss.createQueue(REPORT_DISPATCH_DEAD_QUEUE);
+  await boss.createQueue(REPORT_DISPATCH_DEAD_QUEUE, REPORT_DISPATCH_DEAD_QUEUE_OPTIONS);
+  await boss.updateQueue(REPORT_DISPATCH_DEAD_QUEUE, REPORT_DISPATCH_DEAD_QUEUE_OPTIONS);
   await boss.createQueue(REPORT_DISPATCH_QUEUE, REPORT_DISPATCH_QUEUE_OPTIONS);
+  await boss.updateQueue(REPORT_DISPATCH_QUEUE, REPORT_DISPATCH_QUEUE_OPTIONS);
 }
 
 // Send-only singleton for the web app: no supervision or scheduling (the worker

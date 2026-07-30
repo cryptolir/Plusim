@@ -17,6 +17,9 @@ import {
   type ReportDispatchPayload,
 } from "@/lib/reportQueue";
 import { handleReportDispatch, handleReportDispatchDead } from "./dispatch";
+import { reconcileExpiredProcessing } from "./reconcile";
+
+const RECONCILE_INTERVAL_MS = 60 * 60 * 1000;
 
 async function main(): Promise<void> {
   assertWorkerEnv();
@@ -44,6 +47,12 @@ async function main(): Promise<void> {
   await boss.work<ReportDispatchPayload>(REPORT_DISPATCH_DEAD_QUEUE, async (jobs) => {
     for (const job of jobs) await handleReportDispatchDead(job.data);
   });
+
+  // Expired-token sweep: at boot (right after any outage ends) and hourly.
+  await reconcileExpiredProcessing().catch((e) => console.error("[worker] reconcile failed:", e));
+  setInterval(() => {
+    void reconcileExpiredProcessing().catch((e) => console.error("[worker] reconcile failed:", e));
+  }, RECONCILE_INTERVAL_MS).unref();
 
   console.log("[worker] report-dispatch worker started (concurrency 1)");
 

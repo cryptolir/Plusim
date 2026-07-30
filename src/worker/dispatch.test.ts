@@ -64,9 +64,16 @@ it("fresh dispatch: claim CAS on the dispatched arm only, mark, then send with t
     dispatchAttemptedAt: null,
   });
 
-  // Marker precedes the send (F9).
+  // Marker precedes the send (F9) and is a ONE-SHOT claim scoped to this
+  // attempt's token (F21).
   const marker = updateMany.mock.calls[1][0];
-  expect(marker.where).toEqual({ id: "jobA", status: "processing", queueJobId: "pgb-1" });
+  expect(marker.where).toEqual({
+    id: "jobA",
+    status: "processing",
+    queueJobId: "pgb-1",
+    agentTokenHash: "hash-1",
+    dispatchAttemptedAt: null,
+  });
   expect(marker.data.dispatchAttemptedAt).toBeInstanceOf(Date);
   expect(agent).toHaveBeenCalledTimes(1);
   expect(agent.mock.calls[0][0].message).toContain("t=tok-1");
@@ -142,6 +149,48 @@ it("ambiguous retry (marker set) throws — never sends, never rotates the token
   // scoped to the dispatched arm, so it wrote nothing on this retry.
   expect(tokenWrites()).toHaveLength(1);
   expect(tokenWrites()[0][0].where.status).toBe("dispatched");
+});
+
+// ---- Codex round 1, F21 -------------------------------------------------------
+it("a resumed zombie attempt loses the one-shot send claim and never sends (F21)", async () => {
+  // Zombie A claimed long ago; pg-boss expired + redelivered the SAME entry id,
+  // and the redelivery re-minted. A resumes: its marker write carries A's stale
+  // token hash → no-match → skip. Simulated from A's perspective: claim wins,
+  // but the marker CAS returns 0 (the hash no longer matches).
+  updateMany
+    .mockResolvedValueOnce({ count: 1 }) // claim (A's original)
+    .mockResolvedValueOnce({ count: 0 }); // one-shot marker claim lost
+  await expect(handleReportDispatch(entry())).resolves.toBeUndefined();
+  expect(agent).not.toHaveBeenCalled();
+});
+
+// ---- Codex round 1, F22 -------------------------------------------------------
+it("definitive send failure (app-attributed status) clears the marker so the retry re-sends", async () => {
+  agent.mockRejectedValue(new Error("agentglob 503: service unavailable"));
+  await expect(handleReportDispatch(entry({ retryCount: 0 }))).rejects.toThrow("agentglob 503");
+
+  const clears = updateMany.mock.calls.filter(([a]) => a.data?.dispatchAttemptedAt === null && !a.data?.status);
+  expect(clears).toHaveLength(1);
+  // Scoped to OUR token — can never unmark a newer attempt.
+  expect(clears[0][0].where).toEqual({
+    id: "jobA",
+    status: "processing",
+    queueJobId: "pgb-1",
+    agentTokenHash: "hash-1",
+  });
+  // No failed write on a non-final attempt (F3 unchanged).
+  expect(updateMany.mock.calls.filter(([a]) => a.data?.status === "failed")).toHaveLength(0);
+});
+
+it("ambiguous send failures (gateway status / transport error) keep the marker set", async () => {
+  for (const failure of ["agentglob 502: bad gateway", "fetch failed: socket hang up"]) {
+    vi.clearAllMocks();
+    updateMany.mockResolvedValue({ count: 1 });
+    agent.mockRejectedValue(new Error(failure));
+    await expect(handleReportDispatch(entry({ retryCount: 0 }))).rejects.toThrow();
+    const clears = updateMany.mock.calls.filter(([a]) => a.data?.dispatchAttemptedAt === null && !a.data?.status);
+    expect(clears, failure).toHaveLength(0);
+  }
 });
 
 // ---- plan test 6 (F3) -----------------------------------------------------------
