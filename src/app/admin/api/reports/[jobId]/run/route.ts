@@ -43,6 +43,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
       id: true,
       status: true,
       dispatchedAt: true,
+      queueJobId: true,
       error: true,
       _count: { select: { files: true } },
     },
@@ -67,20 +68,31 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
   }
 
   const now = new Date();
+  // F27: the CAS pins the status the pre-read SAW — not merely \"some dispatchable
+  // status\". Unpinned, a snapshot taken while the row was `processing` wins the
+  // CAS the moment a callback moves it to `completed`: it launches an unintended
+  // second generation, and on enqueue failure the revert restores `processing`
+  // with the token fields already nulled — a row reconcileExpiredProcessing can
+  // never recover, since its `lt` predicate skips NULL expiries. Reject a
+  // non-dispatchable snapshot up front so an intervening transition is a 409.
+  const preStale =
+    job.status === "dispatched" &&
+    job.queueJobId === null &&
+    job.dispatchedAt !== null &&
+    job.dispatchedAt.getTime() < now.getTime() - STALE_DISPATCH_MS;
+  const allowed = confirmedUpdate ? [...DISPATCHABLE, "published"] : DISPATCHABLE;
+  if (!allowed.includes(job.status) && !preStale) {
+    return NextResponse.json({ error: "dispatch already in flight or state changed" }, { status: 409 });
+  }
   const cas = await db.reportJob.updateMany({
     where: {
       id: jobId,
-      OR: [
-        { status: { in: confirmedUpdate ? [...DISPATCHABLE, "published"] : DISPATCHABLE } },
-        // Double-fault recovery (F1): a dispatched row whose enqueue died before
-        // writing a queue entry is reclaimable once it is VISIBLY stale; a fresh
-        // dispatch (or one a worker claimed — queueJobId set) is not.
-        {
-          status: "dispatched",
-          queueJobId: null,
-          dispatchedAt: { lt: new Date(now.getTime() - STALE_DISPATCH_MS) },
-        },
-      ],
+      status: job.status,
+      // Double-fault recovery (F1): a dispatched row whose enqueue died before
+      // writing a queue entry is reclaimable once it is VISIBLY stale; a fresh
+      // dispatch (or one a worker claimed — queueJobId set) is not. Pinning the
+      // snapshot own watermark makes a concurrent reclaim lose this CAS (F11).
+      ...(preStale ? { queueJobId: null, dispatchedAt: job.dispatchedAt } : {}),
     },
     data: {
       status: "dispatched",

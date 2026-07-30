@@ -69,7 +69,9 @@ it("run_published_with_confirm_dispatches — published joins the CAS set; publi
   // confirmUpdate is consumed at ENQUEUE time by widening the CAS status set —
   // the worker's claim re-check (status="dispatched" only) covers the window
   // after it (invariant I2).
-  expect(cas.where.OR[0].status.in).toContain("published");
+  // F27: the CAS pins the snapshot status, so "published joins the set" now
+  // means the pre-read guard admitted it and the CAS matches exactly it.
+  expect(cas.where.status).toBe("published");
   expect(cas.data).toMatchObject({ status: "dispatched", agentTokenHash: null });
   // History and the export target survive an update run.
   expect(cas.data).not.toHaveProperty("publishedAt");
@@ -88,5 +90,5 @@ it("a non-published job still runs with no body (unchanged behaviour)", async ()
   const res = await runPOST(runReq(), params);
   expect(res.status).toBe(202);
   const cas = jobUpdateMany.mock.calls[0][0];
-  expect(cas.where.OR[0].status.in).not.toContain("published");
+  expect(cas.where.status).toBe("completed");
 });

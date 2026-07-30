@@ -38,6 +38,7 @@ function snapshot(overrides: Record<string, unknown> = {}) {
     id: "jobA",
     status: "completed",
     dispatchedAt: PREV_DISPATCHED_AT,
+    queueJobId: null,
     error: null,
     _count: { files: 2 },
     ...overrides,
@@ -155,19 +156,50 @@ it("stale dispatched (queueJobId null, older than 2 min) is reclaimable; a fresh
   vi.useFakeTimers({ now: new Date("2026-07-30T12:00:00.000Z") });
   jobFind.mockResolvedValue(snapshot({ status: "dispatched" }));
 
-  // The CAS carries the reclaim arm with the 2-minute staleness bound…
+  // The CAS pins the stale snapshot own watermark, so a concurrent reclaim
+  // (which rewrote dispatchedAt) loses it (F11 + F27).
   jobUpdateMany.mockResolvedValueOnce({ count: 1 });
   const ok = await runPOST(runReq(), params);
   expect(ok.status).toBe(202);
-  const arm = jobUpdateMany.mock.calls[0][0].where.OR[1];
-  expect(arm).toMatchObject({ status: "dispatched", queueJobId: null });
-  expect(arm.dispatchedAt.lt).toEqual(new Date("2026-07-30T11:58:00.000Z"));
+  expect(jobUpdateMany.mock.calls[0][0].where).toMatchObject({
+    status: "dispatched",
+    queueJobId: null,
+    dispatchedAt: PREV_DISPATCHED_AT,
+  });
 
-  // …so a fresh dispatch (CAS no-match) 409s without touching the queue.
+  // …while a FRESH dispatch is refused by the pre-read guard itself: 409 with
+  // no CAS attempted at all, so it can never clear the live run token fields.
   send.mockClear();
-  jobUpdateMany.mockResolvedValueOnce({ count: 0 });
+  jobUpdateMany.mockClear();
+  jobFind.mockResolvedValue(
+    snapshot({ status: "dispatched", dispatchedAt: new Date("2026-07-30T11:59:30.000Z") }),
+  );
   const fresh = await runPOST(runReq(), params);
   expect(fresh.status).toBe(409);
+  expect(jobUpdateMany).not.toHaveBeenCalled();
+  expect(send).not.toHaveBeenCalled();
+});
+
+// ---- plan test 23 (F27, Codex round 5) --------------------------------------
+it("a snapshot read while processing never wins the CAS, even once a callback completes the job", async () => {
+  // The admin request is admitted only on what the pre-read SAW. `processing`
+  // is not dispatchable, so this returns 409 before any write — the row keeps
+  // its token fields, which is what leaves it recoverable by the worker sweep.
+  jobFind.mockResolvedValue(snapshot({ status: "processing" }));
+  const res = await runPOST(runReq(), params);
+  expect(res.status).toBe(409);
+  expect(jobUpdateMany).not.toHaveBeenCalled();
+  expect(send).not.toHaveBeenCalled();
+});
+
+it("the CAS pins the pre-read status, so an intervening transition no-matches", async () => {
+  jobFind.mockResolvedValue(snapshot({ status: "failed" }));
+  jobUpdateMany.mockResolvedValueOnce({ count: 0 });
+  const res = await runPOST(runReq(), params);
+  // Row moved on between read and CAS → 409, no queue entry.
+  expect(res.status).toBe(409);
+  expect(jobUpdateMany.mock.calls[0][0].where.status).toBe("failed");
+  expect(jobUpdateMany.mock.calls[0][0].where).not.toHaveProperty("OR");
   expect(send).not.toHaveBeenCalled();
 });
 
