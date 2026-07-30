@@ -66,13 +66,13 @@ describe("verifyAgentResult — fatal classification (fail closed)", () => {
     r.sourceTotals[0].statementTotalAgorot = 9999; // != recomputed 1579
     const v = verifyAgentResult(r, BASE_LEAVES);
     expect(v.fatal).toBe(true);
-    expect(v.problems.join(" ")).toMatch(/recomputed .* ≠ statement/);
+    expect(v.problems.join(" ")).toMatch(/הסכום המחושב .* ≠ הסכום בדף החשבון/);
   });
 
   it("unknown category → fatal", () => {
     const v = verifyAgentResult(result({ transactions: [tx({ category: "not-a-real-leaf" })] }), BASE_LEAVES);
     expect(v.fatal).toBe(true);
-    expect(v.problems.join(" ")).toMatch(/unknown category/);
+    expect(v.problems.join(" ")).toMatch(/קטגוריה לא מוכרת/);
   });
 
   it("DB category in the passed valid set → NOT fatal (test_verify_accepts_db_category_when_in_valid_set)", () => {
@@ -84,7 +84,7 @@ describe("verifyAgentResult — fatal classification (fail closed)", () => {
   it("leaf in neither base nor the passed set → fatal (test_verify_unknown_category_still_fatal)", () => {
     const v = verifyAgentResult(result({ transactions: [tx({ category: "לא-קיימת" })] }), MERGED_LEAVES);
     expect(v.fatal).toBe(true);
-    expect(v.problems.join(" ")).toMatch(/unknown category/);
+    expect(v.problems.join(" ")).toMatch(/קטגוריה לא מוכרת/);
   });
 
   it("the valid set is a required arg — inclusion decides, no hidden fallback (test_verify_requires_explicit_valid_set)", () => {
@@ -102,7 +102,7 @@ describe("verifyAgentResult — fatal classification (fail closed)", () => {
   it("date outside its month → fatal", () => {
     const v = verifyAgentResult(result({ transactions: [tx({ date: "2026-07-02" })] }), BASE_LEAVES);
     expect(v.fatal).toBe(true);
-    expect(v.problems.join(" ")).toMatch(/outside its month/);
+    expect(v.problems.join(" ")).toMatch(/אינו בחודש/);
   });
 
   it("duplicate dedupKey → fatal", () => {
@@ -116,7 +116,7 @@ describe("verifyAgentResult — fatal classification (fail closed)", () => {
       BASE_LEAVES,
     );
     expect(v.fatal).toBe(true);
-    expect(v.problems.join(" ")).toMatch(/duplicate dedupKey/);
+    expect(v.problems.join(" ")).toMatch(/עסקה כפולה/);
   });
 
   it("a source with transactions but no reported total → fatal", () => {
@@ -126,7 +126,7 @@ describe("verifyAgentResult — fatal classification (fail closed)", () => {
     // sourceTotals only covers isracard-4962; "max" is orphaned.
     const v = verifyAgentResult(r, BASE_LEAVES);
     expect(v.fatal).toBe(true);
-    expect(v.problems.join(" ")).toMatch(/no reported statement total/);
+    expect(v.problems.join(" ")).toMatch(/אין סכום מדווח בדף החשבון/);
   });
 });
 

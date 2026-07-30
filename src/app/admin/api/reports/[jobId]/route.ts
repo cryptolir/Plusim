@@ -44,7 +44,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
       },
     },
   });
-  if (!job) return NextResponse.json({ error: "not found" }, { status: 404 });
+  if (!job) return NextResponse.json({ error: "העבודה לא נמצאה" }, { status: 404 });
 
   const pendingMappings = await db.merchantMapping.findMany({
     where: { approved: false },

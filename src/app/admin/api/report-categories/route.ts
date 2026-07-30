@@ -29,7 +29,7 @@ export async function POST(req: NextRequest) {
         ? (parsed as { name?: unknown; section?: unknown })
         : {};
   } catch {
-    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
+    return NextResponse.json({ error: "בקשה לא תקינה" }, { status: 400 });
   }
 
   const name =
