@@ -15,15 +15,15 @@ export async function DELETE(req: NextRequest) {
   if (denied) return denied;
 
   const fileId = new URL(req.url).searchParams.get("fileId");
-  if (!fileId) return NextResponse.json({ error: "missing fileId" }, { status: 400 });
+  if (!fileId) return NextResponse.json({ error: "חסר מזהה קובץ" }, { status: 400 });
 
   try {
     await assertEntryUnderRoot(fileId); // reject anything outside the root tree
     await trashFile(fileId);
     return NextResponse.json({ ok: true });
   } catch (e) {
-    if (e instanceof DriveNotConnectedError) return NextResponse.json({ error: "not connected" }, { status: 409 });
-    if (e instanceof DriveOutsideRootError) return NextResponse.json({ error: "file outside root" }, { status: 403 });
+    if (e instanceof DriveNotConnectedError) return NextResponse.json({ error: "Google Drive לא מחובר" }, { status: 409 });
+    if (e instanceof DriveOutsideRootError) return NextResponse.json({ error: "הקובץ נמצא מחוץ לתיקיית השורש המוגדרת" }, { status: 403 });
     return NextResponse.json({ error: e instanceof Error ? e.message : "error" }, { status: 500 });
   }
 }

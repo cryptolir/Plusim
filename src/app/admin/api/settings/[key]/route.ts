@@ -21,20 +21,20 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ key: string
 
   const { key } = await ctx.params;
   if (!isSettingKey(key)) {
-    return NextResponse.json({ error: "unknown setting" }, { status: 400 });
+    return NextResponse.json({ error: "הגדרה לא מוכרת" }, { status: 400 });
   }
 
   let body: { value?: unknown };
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "bad request" }, { status: 400 });
+    return NextResponse.json({ error: "בקשה לא תקינה" }, { status: 400 });
   }
   if (typeof body.value !== "string") {
-    return NextResponse.json({ error: "missing value" }, { status: 400 });
+    return NextResponse.json({ error: "חסר ערך" }, { status: 400 });
   }
   if (body.value.length > MAX_CHARS) {
-    return NextResponse.json({ error: "value too long" }, { status: 413 });
+    return NextResponse.json({ error: "הערך ארוך מדי" }, { status: 413 });
   }
 
   await setSetting(key, body.value);

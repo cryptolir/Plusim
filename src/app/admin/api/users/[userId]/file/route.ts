@@ -20,8 +20,8 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ user
     const check = await checkAdmin();
     if (!check.ok) {
       return check.reason === "no-session"
-        ? NextResponse.json({ error: "unauthorized" }, { status: 401 })
-        : NextResponse.json({ error: "forbidden" }, { status: 403 });
+        ? NextResponse.json({ error: "נדרשת התחברות מחדש" }, { status: 401 })
+        : NextResponse.json({ error: "אין הרשאה לפעולה הזו" }, { status: 403 });
     }
     actorEmail = check.identity.email;
   }
@@ -30,10 +30,10 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ user
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "bad request" }, { status: 400 });
+    return NextResponse.json({ error: "בקשה לא תקינה" }, { status: 400 });
   }
   if (typeof body.content !== "string") {
-    return NextResponse.json({ error: "bad request" }, { status: 400 });
+    return NextResponse.json({ error: "בקשה לא תקינה" }, { status: 400 });
   }
   const etag = typeof body.etag === "string" ? body.etag : "";
   const force = body.force === true;
@@ -47,7 +47,7 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ user
     return NextResponse.json({ ok: true, etag: result.etag, fileUpdatedAt: result.fileUpdatedAt });
   }
   if (result.conflict) {
-    return NextResponse.json({ error: "conflict", currentEtag: result.currentEtag }, { status: 409 });
+    return NextResponse.json({ error: "הקובץ השתנה מאז שנפתח", currentEtag: result.currentEtag }, { status: 409 });
   }
-  return NextResponse.json({ error: result.error ?? "save failed" }, { status: result.status });
+  return NextResponse.json({ error: result.error ?? "השמירה נכשלה" }, { status: result.status });
 }

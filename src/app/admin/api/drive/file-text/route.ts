@@ -15,10 +15,10 @@ const MAX_PREVIEW = 200_000;
 const MAX_EDIT_CHARS = 500_000;
 
 function errorResponse(e: unknown): NextResponse {
-  if (e instanceof DriveNotConnectedError) return NextResponse.json({ error: "not connected" }, { status: 409 });
-  if (e instanceof DriveOutsideRootError) return NextResponse.json({ error: "file outside root" }, { status: 403 });
+  if (e instanceof DriveNotConnectedError) return NextResponse.json({ error: "Google Drive לא מחובר" }, { status: 409 });
+  if (e instanceof DriveOutsideRootError) return NextResponse.json({ error: "הקובץ נמצא מחוץ לתיקיית השורש המוגדרת" }, { status: 403 });
   if (e instanceof UnsupportedTranscriptTypeError)
-    return NextResponse.json({ error: "this file type can't be edited here" }, { status: 415 });
+    return NextResponse.json({ error: "לא ניתן לערוך כאן קובץ מסוג זה" }, { status: 415 });
   return NextResponse.json({ error: e instanceof Error ? e.message : "error" }, { status: 500 });
 }
 
@@ -27,7 +27,7 @@ export async function GET(req: NextRequest) {
   if (denied) return denied;
 
   const fileId = new URL(req.url).searchParams.get("fileId");
-  if (!fileId) return NextResponse.json({ error: "missing fileId" }, { status: 400 });
+  if (!fileId) return NextResponse.json({ error: "חסר מזהה קובץ" }, { status: 400 });
 
   try {
     const entry = await assertEntryUnderRoot(fileId); // also rejects files outside the root tree
@@ -47,16 +47,16 @@ export async function PUT(req: NextRequest) {
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "bad request" }, { status: 400 });
+    return NextResponse.json({ error: "בקשה לא תקינה" }, { status: 400 });
   }
   if (typeof body.fileId !== "string" || !body.fileId) {
-    return NextResponse.json({ error: "missing fileId" }, { status: 400 });
+    return NextResponse.json({ error: "חסר מזהה קובץ" }, { status: 400 });
   }
   if (typeof body.text !== "string") {
-    return NextResponse.json({ error: "missing text" }, { status: 400 });
+    return NextResponse.json({ error: "חסר תוכן לשמירה" }, { status: 400 });
   }
   if (body.text.length > MAX_EDIT_CHARS) {
-    return NextResponse.json({ error: "text too large" }, { status: 413 });
+    return NextResponse.json({ error: "הטקסט ארוך מדי" }, { status: 413 });
   }
 
   try {

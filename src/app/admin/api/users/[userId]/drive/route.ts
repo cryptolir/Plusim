@@ -13,8 +13,8 @@ async function authorize(req: NextRequest, userId: string): Promise<NextResponse
   const check = await checkAdmin();
   if (check.ok) return null;
   return check.reason === "no-session"
-    ? NextResponse.json({ error: "unauthorized" }, { status: 401 })
-    : NextResponse.json({ error: "forbidden" }, { status: 403 });
+    ? NextResponse.json({ error: "נדרשת התחברות מחדש" }, { status: 401 })
+    : NextResponse.json({ error: "אין הרשאה לפעולה הזו" }, { status: 403 });
 }
 
 export async function PUT(req: NextRequest, { params }: { params: Promise<{ userId: string }> }) {
@@ -26,21 +26,21 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ user
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "bad request" }, { status: 400 });
+    return NextResponse.json({ error: "בקשה לא תקינה" }, { status: 400 });
   }
   if (typeof body.folderId !== "string" || !body.folderId) {
-    return NextResponse.json({ error: "missing folderId" }, { status: 400 });
+    return NextResponse.json({ error: "חסר מזהה תיקייה" }, { status: 400 });
   }
   const folderName = typeof body.folderName === "string" ? body.folderName : null;
 
   // Containment guard: the folder must live under the configured transcripts root.
   try {
     const entry = await assertEntryUnderRoot(body.folderId);
-    if (!entry.isFolder) return NextResponse.json({ error: "not a folder" }, { status: 400 });
+    if (!entry.isFolder) return NextResponse.json({ error: "הפריט שנבחר אינו תיקייה" }, { status: 400 });
   } catch (e) {
-    if (e instanceof DriveNotConnectedError) return NextResponse.json({ error: "not connected" }, { status: 409 });
+    if (e instanceof DriveNotConnectedError) return NextResponse.json({ error: "Google Drive לא מחובר" }, { status: 409 });
     if (e instanceof DriveOutsideRootError)
-      return NextResponse.json({ error: "folder outside root" }, { status: 403 });
+      return NextResponse.json({ error: "התיקייה נמצאת מחוץ לתיקיית השורש המוגדרת" }, { status: 403 });
     return NextResponse.json({ error: e instanceof Error ? e.message : "error" }, { status: 500 });
   }
 

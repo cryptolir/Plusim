@@ -48,7 +48,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
       _count: { select: { files: true } },
     },
   });
-  if (!job) return NextResponse.json({ error: "not found" }, { status: 404 });
+  if (!job) return NextResponse.json({ error: "העבודה לא נמצאה" }, { status: 404 });
   // A published job may be re-run to absorb newly appended statements, but only
   // deliberately: the caller must opt in with {"confirmUpdate":true}. Without the
   // flag the old refusal stands, so no accidental or legacy call can pull a live
@@ -60,11 +60,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     confirmedUpdate =
       body !== null && typeof body === "object" && (body as { confirmUpdate?: unknown }).confirmUpdate === true;
     if (!confirmedUpdate) {
-      return NextResponse.json({ error: "job already published" }, { status: 409 });
+      return NextResponse.json({ error: "העבודה כבר פורסמה — אשרו עדכון כדי להריץ מחדש" }, { status: 409 });
     }
   }
   if (job._count.files === 0) {
-    return NextResponse.json({ error: "job has no statement files" }, { status: 400 });
+    return NextResponse.json({ error: "לעבודה אין דפי חשבון" }, { status: 400 });
   }
 
   const now = new Date();
@@ -82,7 +82,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     job.dispatchedAt.getTime() < now.getTime() - STALE_DISPATCH_MS;
   const allowed = confirmedUpdate ? [...DISPATCHABLE, "published"] : DISPATCHABLE;
   if (!allowed.includes(job.status) && !preStale) {
-    return NextResponse.json({ error: "dispatch already in flight or state changed" }, { status: 409 });
+    return NextResponse.json({ error: "הרצה כבר פעילה או שמצב העבודה השתנה" }, { status: 409 });
   }
   const cas = await db.reportJob.updateMany({
     where: {
@@ -104,7 +104,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     },
   });
   if (cas.count === 0) {
-    return NextResponse.json({ error: "dispatch already in flight or state changed" }, { status: 409 });
+    return NextResponse.json({ error: "הרצה כבר פעילה או שמצב העבודה השתנה" }, { status: 409 });
   }
 
   console.log(`[admin/reports] enqueueing job=${jobId} by=${auth.actor} gen=${now.toISOString()}`);
@@ -127,7 +127,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
       },
       data: { status: job.status, dispatchedAt: job.dispatchedAt, error: job.error },
     });
-    return NextResponse.json({ error: `enqueue failed: ${msg.slice(0, 500)}` }, { status: 502 });
+    return NextResponse.json({ error: `הוספת העבודה לתור נכשלה: ${msg.slice(0, 500)}` }, { status: 502 });
   }
   return NextResponse.json({ ok: true, status: "dispatched" }, { status: 202 });
 }

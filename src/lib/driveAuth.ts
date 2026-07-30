@@ -17,6 +17,6 @@ export async function authorizeDriveRequest(req: NextRequest): Promise<NextRespo
   const check = await checkAdmin();
   if (check.ok) return null;
   return check.reason === "no-session"
-    ? NextResponse.json({ error: "unauthorized" }, { status: 401 })
-    : NextResponse.json({ error: "forbidden" }, { status: 403 });
+    ? NextResponse.json({ error: "נדרשת התחברות מחדש" }, { status: 401 })
+    : NextResponse.json({ error: "אין הרשאה לפעולה הזו" }, { status: 403 });
 }

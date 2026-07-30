@@ -10,20 +10,20 @@ export const dynamic = "force-dynamic";
 
 export async function GET(_req: NextRequest, ctx: { params: Promise<{ jobId: string }> }) {
   const { userId } = await auth();
-  if (!userId) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!userId) return NextResponse.json({ error: "נדרשת התחברות" }, { status: 401 });
 
   const { jobId } = await ctx.params;
   const job = await db.reportJob.findFirst({
     where: { id: jobId, targetUserId: userId, status: "published" },
     select: { id: true },
   });
-  if (!job) return NextResponse.json({ error: "not found" }, { status: 404 });
+  if (!job) return NextResponse.json({ error: "הדוח לא נמצא" }, { status: 404 });
 
   const artifact = await db.reportArtifact.findFirst({
     where: { jobId },
     orderBy: { createdAt: "desc" },
   });
-  if (!artifact) return NextResponse.json({ error: "not found" }, { status: 404 });
+  if (!artifact) return NextResponse.json({ error: "הדוח לא נמצא" }, { status: 404 });
 
   return new NextResponse(new Uint8Array(artifact.bytes), {
     headers: {

@@ -162,10 +162,10 @@ export function verifyAgentResult(result: AgentResult, validLeaves: Set<string>)
   // Category validity (structural pass already ensured presence).
   for (const t of result.transactions) {
     if (!t.uncategorized && t.category && !validLeaves.has(t.category)) {
-      problems.push(`unknown category "${t.category}" (${t.merchant})`);
+      problems.push(`קטגוריה לא מוכרת "${t.category}" (${t.merchant})`);
     }
     if (!t.date.startsWith(t.month)) {
-      problems.push(`txn date ${t.date} outside its month ${t.month} (${t.merchant})`);
+      problems.push(`תאריך העסקה ${t.date} אינו בחודש ${t.month} (${t.merchant})`);
     }
   }
 
@@ -174,7 +174,7 @@ export function verifyAgentResult(result: AgentResult, validLeaves: Set<string>)
   for (const t of result.transactions) {
     const n = (seen.get(t.dedupKey) ?? 0) + 1;
     seen.set(t.dedupKey, n);
-    if (n === 2) problems.push(`duplicate dedupKey ${t.dedupKey}`);
+    if (n === 2) problems.push(`עסקה כפולה (${t.dedupKey})`);
   }
 
   // Recompute per-source totals from the transactions themselves.
@@ -187,7 +187,7 @@ export function verifyAgentResult(result: AgentResult, validLeaves: Set<string>)
     const match = s.statementTotalAgorot === null ? true : recomputed === s.statementTotalAgorot;
     if (!match) {
       problems.push(
-        `source "${s.label}": recomputed ${recomputed} ≠ statement ${s.statementTotalAgorot} agorot`,
+        `מקור "${s.label}": הסכום המחושב ${recomputed} ≠ הסכום בדף החשבון ${s.statementTotalAgorot} אגורות`,
       );
     }
     return {
@@ -200,7 +200,7 @@ export function verifyAgentResult(result: AgentResult, validLeaves: Set<string>)
   // A source present in transactions but missing from sourceTotals is suspicious.
   for (const label of bySource.keys()) {
     if (!result.sourceTotals.some((s) => s.label === label)) {
-      problems.push(`source "${label}" has transactions but no reported statement total`);
+      problems.push(`למקור "${label}" יש עסקאות אך אין סכום מדווח בדף החשבון`);
     }
   }
 
