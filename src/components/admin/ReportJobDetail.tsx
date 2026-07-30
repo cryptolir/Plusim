@@ -39,6 +39,8 @@ interface JobDetail {
   status: string;
   title: string | null;
   error: string | null;
+  /** ISO string; the detail route already selects it. Used for the stale-dispatch reopen (F28). */
+  dispatchedAt: string | null;
   sheetUrl: string | null;
   verification: {
     problems?: string[];
@@ -163,7 +165,17 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
 
   const uncategorized = job.transactions.filter((t) => t.uncategorized);
   const v = job.verification;
-  const running = ["dispatched", "processing"].includes(job.status);
+  // A `dispatched` row older than the route stale bound (2 min) is one whose
+  // enqueue died before a queue entry existed. The run route accepts exactly
+  // that as an idempotent repair — but only an admin can trigger it, so the
+  // button must reopen or the job is stuck forever with no product path out
+  // (F28). `processing` is never reopened: the worker sweep owns that case.
+  const STALE_DISPATCH_MS = 2 * 60_000;
+  const staleDispatch =
+    job.status === "dispatched" &&
+    job.dispatchedAt !== null &&
+    Date.now() - new Date(job.dispatchedAt).getTime() > STALE_DISPATCH_MS;
+  const running = ["dispatched", "processing"].includes(job.status) && !staleDispatch;
 
   return (
     <div className="space-y-6">

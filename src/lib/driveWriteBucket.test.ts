@@ -68,3 +68,19 @@ it("driveFetch awaits the gate before any request (pinned by construction, I6)",
     driveFetchBody.indexOf("return fetch("),
   );
 });
+
+// ---- F29 (Codex round 6) ----------------------------------------------------
+it("the write gate is taken AFTER the access token resolves, not before", async () => {
+  // Taking the gate first lets the bucket refill while a cold/expired token
+  // refreshes, so everything admitted during that wait reaches fetch together.
+  const src = readFileSync(
+    fileURLToPath(new URL("./googleDrive.ts", import.meta.url)),
+    "utf8",
+  );
+  const body = src.slice(src.indexOf("async function driveFetch"));
+  const tokenAt = body.indexOf("await getAccessToken()");
+  const gateAt = body.indexOf("await driveWriteGate(init)");
+  expect(tokenAt).toBeGreaterThan(-1);
+  expect(gateAt).toBeGreaterThan(-1);
+  expect(tokenAt).toBeLessThan(gateAt);
+});

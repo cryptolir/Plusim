@@ -250,8 +250,13 @@ export function driveWriteGate(init?: RequestInit): Promise<void> | null {
 }
 
 async function driveFetch(url: string, init?: RequestInit): Promise<Response> {
-  await driveWriteGate(init);
+  // Token FIRST, gate second (F29). Taking the gate before awaiting an OAuth
+  // refresh lets the bucket refill during that wait, so calls admitted while a
+  // cold/expired token refreshes (e.g. concurrent trashFile under
+  // Promise.allSettled) all reach fetch together and blow past ~3 writes/s.
+  // Held immediately before the request, the gate paces actual Drive traffic.
   const token = await getAccessToken();
+  await driveWriteGate(init);
   return fetch(url, {
     ...init,
     headers: { ...(init?.headers ?? {}), authorization: `Bearer ${token}` },
