@@ -17,6 +17,8 @@
  *                           block a worker that dispatches fine without it.
  */
 export const REQUIRED_WORKER_ENV = ["DATABASE_URL", "AGENTGLOB_AGENT_NAME", "APP_BASE_URL"] as const;
+// Promote to REQUIRED_WORKER_ENV when AgentGlob issues the key and begins
+// enforcing — provision and require in the SAME change (DEPLOY.md, F34).
 export const OPTIONAL_WORKER_ENV = ["AGENTGLOB_APP_API_KEY"] as const;
 
 export function assertWorkerEnv(env: NodeJS.ProcessEnv = process.env): void {
