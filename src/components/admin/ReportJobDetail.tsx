@@ -8,6 +8,30 @@
 import { useEffect, useState } from "react";
 import { SECTION_NAMES } from "@/config/reportTaxonomy";
 
+const STALE_DISPATCH_MS = 2 * 60_000;
+
+/**
+ * Pure so it is testable without a component-test harness (none exists in
+ * this repo yet -- see runGate.test.ts). running gates the upload control
+ * and the working badge; the server 409s add-files on ANY dispatched or
+ * processing job regardless of staleness (files/route.ts:49-53), so it must
+ * stay the raw in-flight check. rerunLocked is narrower: a dispatched row
+ * past the route own 2-minute stale bound is an idempotent repair the run
+ * route already accepts -- only the button must reopen for it, or the job is
+ * stuck forever with no product path out (F28). processing never reopens:
+ * the worker sweep owns that recovery instead (round 6/7, F28/F30).
+ */
+export function computeRunGate(
+  status: string,
+  dispatchedAt: string | null,
+  now: number = Date.now(),
+): { running: boolean; rerunLocked: boolean } {
+  const running = status === "dispatched" || status === "processing";
+  const staleDispatch =
+    status === "dispatched" && dispatchedAt !== null && now - new Date(dispatchedAt).getTime() > STALE_DISPATCH_MS;
+  return { running, rerunLocked: running && !staleDispatch };
+}
+
 // Hebrew display labels for job.status (keys stay English — they are the status
 // enum used in logic; only the rendered badge text is translated).
 const STATUS_LABEL: Record<string, string> = {
@@ -165,17 +189,7 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
 
   const uncategorized = job.transactions.filter((t) => t.uncategorized);
   const v = job.verification;
-  // A `dispatched` row older than the route stale bound (2 min) is one whose
-  // enqueue died before a queue entry existed. The run route accepts exactly
-  // that as an idempotent repair — but only an admin can trigger it, so the
-  // button must reopen or the job is stuck forever with no product path out
-  // (F28). `processing` is never reopened: the worker sweep owns that case.
-  const STALE_DISPATCH_MS = 2 * 60_000;
-  const staleDispatch =
-    job.status === "dispatched" &&
-    job.dispatchedAt !== null &&
-    Date.now() - new Date(job.dispatchedAt).getTime() > STALE_DISPATCH_MS;
-  const running = ["dispatched", "processing"].includes(job.status) && !staleDispatch;
+  const { running, rerunLocked } = computeRunGate(job.status, job.dispatchedAt);
 
   return (
     <div className="space-y-6">
@@ -191,7 +205,7 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
       <div className="flex flex-wrap gap-2">
         <button
           onClick={() => runAgent()}
-          disabled={busy !== null || running}
+          disabled={busy !== null || rerunLocked}
           className="min-h-11 rounded-lg border px-4 disabled:opacity-50"
         >
           {busy === "run" ? "שולח…" : job.status === "uploaded" ? "שליחה לסוכן" : "הרצה מחדש של הסוכן"}
