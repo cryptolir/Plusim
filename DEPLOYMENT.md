@@ -31,7 +31,7 @@ as-built record of the live deployment.
 | Agent | `onlyclaw` — `https://app.agentglob.com/api/public/chat/onlyclaw` |
 | Session key | `app:plusim:<userId>:<conversationId>` |
 | Host | Coolify @ 178.104.184.3, project "Vcode - Hosting" / production |
-| App | nixpacks, port 3000, `NIXPACKS_NODE_VERSION=20` |
+| App | nixpacks, port 3000, `NIXPACKS_NODE_VERSION=22` (pg-boss requires node >=22.12.0; Node 20 is EOL since 2026-04) |
 | Build | `pnpm install --frozen-lockfile && pnpm prisma generate && pnpm prisma migrate deploy && pnpm build` |
 | Start | `pnpm start` |
 | DB | `Plusim_DB` (postgres:16-alpine) |

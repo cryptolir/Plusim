@@ -69,6 +69,38 @@ admin):
 | `PLUSIM_DRIVE_ROOT_FOLDER_ID` | The shared Drive root that contains every client subfolder |
 | `DRIVE_TOKEN_ENCRYPTION_KEY` / `DRIVE_OAUTH_STATE_SECRET` | `openssl rand -base64 32` each |
 
+## Report-dispatch worker (second Coolify service, same repo)
+
+Report jobs are dispatched by a dedicated worker
+(docs/plans/reports-scaling-stage1-2.md). Create it as a **second Coolify
+service** from the same repo:
+
+| Field | Value |
+|---|---|
+| Repository / Branch | `cryptolir/Plusim` / `main` (same as the web app) |
+| Build command | `pnpm install --frozen-lockfile && pnpm prisma generate` |
+| `NIXPACKS_NODE_VERSION` | **`22`** — required, not cosmetic: pg-boss needs node >=22.12.0, the build fails on 20 |
+| Start command | `pnpm worker` |
+| Replicas | `1` (dispatch concurrency 1 — do NOT raise before the Stage 2 gate) |
+| Memory limit | 256 MB is plenty (it only holds HTTP calls) |
+| Port / Domain | none — the worker serves no HTTP |
+
+**The worker does NOT inherit the web service's environment.** Provision
+exactly (asserted at boot — a missing var kills the worker at startup, naming it):
+
+| Key | Notes |
+|---|---|
+| `DATABASE_URL` | Same Plusim_DB URL as the web app (pg-boss owns a `pgboss` schema in it) |
+| `AGENTGLOB_AGENT_NAME` | `onlyclaw` |
+| `APP_BASE_URL` | `https://plusim.xyz` — manifest links handed to the agent |
+| `AGENTGLOB_APP_API_KEY` | Optional **today only** (warn-only): AgentGlob has not issued it yet, so `callAgent` sends it only when set. See the promotion note below. |
+
+> **Follow-up — promote the app key to required (Codex round 10, F34).** AgentGlob's app-identity rollout is `accept → send → require` and is currently at *send*. The moment it starts **enforcing**, a worker booted without `AGENTGLOB_APP_API_KEY` will send every `callAgent` unauthenticated and exhaust the retries on every report dispatch — with no boot-time signal, because the assertion is warn-only. When AgentGlob issues the key, do both in one change: provision it on the web **and** worker services, and move it from `OPTIONAL_WORKER_ENV` to `REQUIRED_WORKER_ENV` in `src/worker/env.ts`. Requiring it before the key exists would make `assertWorkerEnv()` throw at startup in every environment, so the worker would not boot at all.
+
+Deploy gate: after the first deploy, confirm the service log shows
+`[worker] report-dispatch worker started` — and that a run pressed in
+`/admin/reports` moves הועלה → נשלח לסוכן → בעיבוד.
+
 ## Database migrations
 
 Migrations run automatically during every deploy as part of the build command
