@@ -7,6 +7,7 @@
  */
 import { useEffect, useState } from "react";
 import { SECTION_NAMES } from "@/config/reportTaxonomy";
+import { shekel } from "@/lib/reportAnalysis";
 
 const STALE_DISPATCH_MS = 2 * 60_000;
 
@@ -83,10 +84,6 @@ interface Mapping {
   merchantPattern: string;
   category: string;
   source: string;
-}
-
-function shekel(agorot: number): string {
-  return (agorot / 100).toLocaleString("he-IL", { style: "currency", currency: "ILS" });
 }
 
 export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken: string }) {
@@ -270,7 +267,7 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
           </p>
           {v.perSource && v.perSource.length > 0 && (
             <table className="mt-2 w-full text-sm">
-              <thead className="text-left text-muted-foreground">
+              <thead className="text-start text-muted-foreground">
                 <tr>
                   <th className="py-1 pr-3 font-medium">מקור</th>
                   <th className="py-1 pr-3 font-medium">סה&quot;כ בדף החשבון</th>
@@ -319,7 +316,7 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="text-left text-muted-foreground">
+              <thead className="text-start text-muted-foreground">
                 <tr>
                   <th className="py-1 pr-3 font-medium">תאריך</th>
                   <th className="py-1 pr-3 font-medium">בית עסק</th>
@@ -376,7 +373,7 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
         <h2 className="mb-2 font-medium">כל העסקאות ({job.transactions.length})</h2>
         <div className="max-h-[32rem] overflow-auto">
           <table className="w-full text-sm">
-            <thead className="sticky top-0 bg-background text-left text-muted-foreground">
+            <thead className="sticky top-0 bg-background text-start text-muted-foreground">
               <tr>
                 <th className="py-1 pr-3 font-medium">חודש</th>
                 <th className="py-1 pr-3 font-medium">תאריך</th>
