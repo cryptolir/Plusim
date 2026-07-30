@@ -13,11 +13,23 @@
  */
 import { db } from "@/lib/db";
 
+/**
+ * A callback that AUTHORIZED just before expiry may still be parsing/verifying
+ * when the token lapses (the result route's budget is 60 s) — authorization is
+ * checked at entry, the conditional write happens later. Sweep only tokens
+ * expired by more than this margin so an in-flight callback can never be
+ * failed out from under its own transaction (Codex round 2, F25).
+ */
+export const SWEEP_GRACE_MS = 15 * 60_000;
+
 export async function reconcileExpiredProcessing(now: Date = new Date()): Promise<number> {
   const res = await db.reportJob.updateMany({
     // `lt` never matches NULL expiries, so rows without a minted token
     // (e.g. `dispatched`, or legacy rows) are untouched by construction.
-    where: { status: "processing", agentTokenExpiresAt: { lt: now } },
+    where: {
+      status: "processing",
+      agentTokenExpiresAt: { lt: new Date(now.getTime() - SWEEP_GRACE_MS) },
+    },
     data: { status: "failed", error: "run never completed before its token expired" },
   });
   if (res.count > 0) {

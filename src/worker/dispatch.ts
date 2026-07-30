@@ -149,13 +149,17 @@ export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<v
       return;
     }
     console.error(`[worker] job=${jobId} dispatch failed (attempt=${entry.retryCount}): ${msg}`);
-    if (entry.retryCount >= entry.retryLimit) {
-      // Final attempt only (F3) — earlier attempts rethrow untouched.
+    if (entry.retryCount >= entry.retryLimit && isDefinitiveSendFailure(msg)) {
+      // Final attempt AND the app itself rejected — no run exists, safe to fail
+      // now (F3). An AMBIGUOUS final failure must NOT write failed here: the
+      // run may be live, and its callback needs the row to stay `processing`
+      // (acceptingWhere) — the throw below dead-letters the entry and the DLQ
+      // handler reconciles AFTER the callback grace window (Codex round 2, F24).
       await db.reportJob.updateMany({
         where: { id: jobId, status: "processing", queueJobId: entry.id },
         data: { status: "failed", error: `dispatch failed: ${msg.slice(0, 500)}` },
       });
-    } else if (isDefinitiveSendFailure(msg)) {
+    } else if (entry.retryCount < entry.retryLimit && isDefinitiveSendFailure(msg)) {
       // The AgentGlob APP answered with an error status — THIS attempt's request
       // terminated without an accepted run (and the agent posts its callback
       // BEFORE replying, so any run that mattered already called back). Clearing
@@ -174,20 +178,52 @@ export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<v
 }
 
 /**
+ * Grace before reconciling a row whose LAST SEND is recent: an ambiguous final
+ * send can dead-letter seconds after callAgent returned, while the accepted run
+ * is still working — its callback needs `processing` to survive until it lands.
+ * 10 min covers the 300 s callAgent hold + the result route's 60 s budget with
+ * slack; the DLQ's retry backoff (5 × 60 s backoff ≈ 30 min) guarantees a later
+ * attempt lands after the grace expires (Codex round 2, F24).
+ */
+export const DEAD_LETTER_CALLBACK_GRACE_MS = 10 * 60_000;
+
+/**
  * Dead-letter reconciliation (F10): a final-attempt crash or expiration would
  * otherwise strand `processing` forever — unreachable by the run route and
  * invisible to the callback. Keys on the GENERATION (the dead-letter entry has
  * a NEW pg-boss id; only the payload survives — F17), so it inherently no-ops
- * when the callback already moved the row out of `processing` (F16).
+ * when the callback already moved the row out of `processing` (F16). A row
+ * whose send marker is within the callback grace throws instead — the DLQ
+ * entry retries on backoff and reconciles once the grace has passed (F24).
  */
 export async function handleReportDispatchDead(payload: ReportDispatchPayload): Promise<void> {
+  const gen = new Date(payload.gen);
+  const graceCutoff = new Date(Date.now() - DEAD_LETTER_CALLBACK_GRACE_MS);
   const res = await db.reportJob.updateMany({
-    where: { id: payload.jobId, status: "processing", dispatchedAt: new Date(payload.gen) },
+    where: {
+      id: payload.jobId,
+      status: "processing",
+      dispatchedAt: gen,
+      // Never-sent rows (marker null) reconcile immediately; sent rows only
+      // after the callback grace.
+      OR: [{ dispatchAttemptedAt: null }, { dispatchAttemptedAt: { lt: graceCutoff } }],
+    },
     data: { status: "failed", error: "worker crashed or expired" },
   });
   if (res.count === 1) {
     console.warn(`[worker] job=${payload.jobId} gen=${payload.gen} dead-lettered — reconciled to failed`);
-  } else {
-    console.log(`[worker] job=${payload.jobId} gen=${payload.gen} dead-letter no-op (row moved on)`);
+    return;
   }
+  // 0 rows: either the callback moved the row on (done), or the row is still
+  // ours but freshly sent — defer, don't discard.
+  const row = await db.reportJob.findUnique({
+    where: { id: payload.jobId },
+    select: { status: true, dispatchedAt: true },
+  });
+  if (row && row.status === "processing" && row.dispatchedAt?.getTime() === gen.getTime()) {
+    throw new Error(
+      `job ${payload.jobId}: recent send may still produce a callback — deferring reconciliation`,
+    );
+  }
+  console.log(`[worker] job=${payload.jobId} gen=${payload.gen} dead-letter no-op (row moved on)`);
 }

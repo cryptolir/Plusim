@@ -201,13 +201,23 @@ it("first-attempt transient error rethrows without writing failed", async () => 
   expect(failedWrites).toHaveLength(0);
 });
 
-it("final attempt writes failed + error text, then still rethrows", async () => {
+it("final attempt writes failed + error text, then still rethrows (definitive failure)", async () => {
   agent.mockRejectedValue(new Error("agentglob 500: upstream blew up"));
   await expect(handleReportDispatch(entry({ retryCount: 2 }))).rejects.toThrow("agentglob 500");
   const failedWrites = updateMany.mock.calls.filter(([a]) => a.data?.status === "failed");
   expect(failedWrites).toHaveLength(1);
   expect(failedWrites[0][0].where).toEqual({ id: "jobA", status: "processing", queueJobId: "pgb-1" });
   expect(failedWrites[0][0].data.error).toContain("dispatch failed: agentglob 500");
+});
+
+// ---- Codex round 2, F24 ---------------------------------------------------------
+it("AMBIGUOUS final send leaves processing (callback-eligible) and rethrows to the DLQ", async () => {
+  // e.g. earlier definitive 503s cleared the marker, the final attempt re-sent,
+  // and got a 502 — AgentGlob may have accepted; the run may be live. Writing
+  // failed here would orphan its callback (acceptingWhere needs processing).
+  agent.mockRejectedValue(new Error("agentglob 502: bad gateway"));
+  await expect(handleReportDispatch(entry({ retryCount: 2 }))).rejects.toThrow("agentglob 502");
+  expect(updateMany.mock.calls.filter(([a]) => a.data?.status === "failed")).toHaveLength(0);
 });
 
 // ---- plan test 7 ----------------------------------------------------------------
@@ -218,19 +228,37 @@ it("dispatch timeout leaves processing for the callback", async () => {
   expect(statusWrites).toHaveLength(0);
 });
 
-// ---- plan tests 16 + 20 (F10/F16/F17) ---------------------------------------------
-it("dead-letter reconciliation marks failed only for the matching generation key", async () => {
+// ---- plan tests 16 + 20 (F10/F16/F17) + Codex round 2 F24 ---------------------------
+it("dead-letter reconciliation marks failed only for the matching generation key, outside the callback grace", async () => {
   updateMany.mockResolvedValueOnce({ count: 1 });
   await handleReportDispatchDead({ jobId: "jobA", gen: GEN });
   const cas = updateMany.mock.calls[0][0];
-  expect(cas.where).toEqual({ id: "jobA", status: "processing", dispatchedAt: new Date(GEN) });
+  expect(cas.where).toMatchObject({ id: "jobA", status: "processing", dispatchedAt: new Date(GEN) });
+  // F24 — never-sent rows reconcile immediately; sent rows only after the grace.
+  expect(cas.where.OR[0]).toEqual({ dispatchAttemptedAt: null });
+  expect(cas.where.OR[1].dispatchAttemptedAt.lt).toBeInstanceOf(Date);
   expect(cas.data).toEqual({ status: "failed", error: "worker crashed or expired" });
 });
 
 it("dead-letter reconciliation no-ops when the callback moved the row out of processing", async () => {
-  // The CAS keys on status=processing + the generation, so count 0 IS the no-op —
-  // nothing else is attempted.
   updateMany.mockResolvedValueOnce({ count: 0 });
+  findUnique.mockResolvedValue({ status: "completed", dispatchedAt: new Date(GEN) });
   await expect(handleReportDispatchDead({ jobId: "jobA", gen: GEN })).resolves.toBeUndefined();
   expect(updateMany).toHaveBeenCalledTimes(1);
+});
+
+it("dead-letter reconciliation DEFERS (throws) while a freshly-sent row is inside the callback grace", async () => {
+  // The DLQ entry retries on backoff and reconciles once the grace has passed;
+  // an accepted run's callback keeps its processing window (F24).
+  updateMany.mockResolvedValueOnce({ count: 0 });
+  findUnique.mockResolvedValue({ status: "processing", dispatchedAt: new Date(GEN) });
+  await expect(handleReportDispatchDead({ jobId: "jobA", gen: GEN })).rejects.toThrow(
+    /deferring reconciliation/,
+  );
+});
+
+it("dead-letter reconciliation no-ops for a processing row owned by a NEWER generation", async () => {
+  updateMany.mockResolvedValueOnce({ count: 0 });
+  findUnique.mockResolvedValue({ status: "processing", dispatchedAt: new Date("2026-07-30T11:00:00.000Z") });
+  await expect(handleReportDispatchDead({ jobId: "jobA", gen: GEN })).resolves.toBeUndefined();
 });

@@ -12,7 +12,7 @@ vi.mock("@/lib/db", () => ({
 }));
 
 import { db } from "@/lib/db";
-import { reconcileExpiredProcessing } from "./reconcile";
+import { reconcileExpiredProcessing, SWEEP_GRACE_MS } from "./reconcile";
 
 const updateMany = db.reportJob.updateMany as unknown as ReturnType<typeof vi.fn>;
 
@@ -20,13 +20,18 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-it("fails only processing rows whose token expiry is strictly in the past", async () => {
+it("fails only processing rows expired past the in-flight-callback grace (F25)", async () => {
   updateMany.mockResolvedValue({ count: 2 });
   const now = new Date("2026-07-30T12:00:00.000Z");
   const n = await reconcileExpiredProcessing(now);
   expect(n).toBe(2);
   expect(updateMany).toHaveBeenCalledExactlyOnceWith({
-    where: { status: "processing", agentTokenExpiresAt: { lt: now } },
+    // The grace margin means a callback that authorized just before expiry can
+    // never be failed out from under its own still-running transaction.
+    where: {
+      status: "processing",
+      agentTokenExpiresAt: { lt: new Date(now.getTime() - SWEEP_GRACE_MS) },
+    },
     data: { status: "failed", error: "run never completed before its token expired" },
   });
 });
