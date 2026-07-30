@@ -20,7 +20,7 @@ vi.mock("@/lib/agentRuntimeAuth", () => ({
 import { db } from "@/lib/db";
 import { callAgent } from "@/lib/agentglob";
 import { mintJobToken } from "@/lib/agentRuntimeAuth";
-import { handleReportDispatch, handleReportDispatchDead } from "./dispatch";
+import { handleReportDispatch, handleReportDispatchDead, isOwnDispatchAbort } from "./dispatch";
 
 const updateMany = db.reportJob.updateMany as unknown as ReturnType<typeof vi.fn>;
 const findUnique = db.reportJob.findUnique as unknown as ReturnType<typeof vi.fn>;
@@ -261,4 +261,29 @@ it("dead-letter reconciliation no-ops for a processing row owned by a NEWER gene
   updateMany.mockResolvedValueOnce({ count: 0 });
   findUnique.mockResolvedValue({ status: "processing", dispatchedAt: new Date("2026-07-30T11:00:00.000Z") });
   await expect(handleReportDispatchDead({ jobId: "jobA", gen: GEN })).resolves.toBeUndefined();
+});
+
+
+// ---- F33 (Codex round 9): abort classification is structural ---------------
+it("an agentglob status-prefixed error is NEVER read as our own abort, even when it says timeout", () => {
+  // The bug: /abort|timeout/ over the message acked the queue entry with the
+  // send marker still set, so nothing retried or dead-lettered and the row sat
+  // `processing` until the ~25h sweep.
+  expect(isOwnDispatchAbort(new Error("agentglob 500: upstream timeout"))).toBe(false);
+  expect(isOwnDispatchAbort(new Error("agentglob 504: gateway timeout"))).toBe(false);
+  expect(isOwnDispatchAbort(new Error("agentglob 400: request aborted by policy"))).toBe(false);
+});
+
+it("a real AbortSignal.timeout rejection IS our own abort", () => {
+  const timeoutErr = new Error("The operation was aborted due to timeout");
+  timeoutErr.name = "TimeoutError";
+  const abortErr = new Error("This operation was aborted");
+  abortErr.name = "AbortError";
+  expect(isOwnDispatchAbort(timeoutErr)).toBe(true);
+  expect(isOwnDispatchAbort(abortErr)).toBe(true);
+});
+
+it("an unnamed transport abort still falls back to the text signal", () => {
+  expect(isOwnDispatchAbort(new Error("socket hang up: aborted"))).toBe(true);
+  expect(isOwnDispatchAbort(new Error("ECONNRESET"))).toBe(false);
 });

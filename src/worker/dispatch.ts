@@ -45,6 +45,27 @@ export function isDefinitiveSendFailure(msg: string): boolean {
   return status !== undefined && status !== "502" && status !== "504";
 }
 
+/**
+ * OUR 300 s abort, or the AgentGlob app answering? Classify structurally, not
+ * by message text: `AbortSignal.timeout` throws a DOMException named
+ * TimeoutError (AbortError when aborted otherwise), while an app error is a
+ * plain Error carrying an `agentglob NNN:` status prefix (agentglob.ts:50,52).
+ *
+ * Matching /abort|timeout/ over the raw message read `agentglob 500: upstream
+ * timeout` as our own abort — the handler then returned SUCCESSFULLY, so
+ * pg-boss acked the entry with dispatchAttemptedAt still set: no retry, no
+ * dead-letter, and the row sat `processing` until the ~25 h expiry sweep
+ * (Codex round 9, F33). A status-prefixed message can now never reach the text
+ * fallback, which is kept only for transport aborts that lost their
+ * DOMException identity.
+ */
+export function isOwnDispatchAbort(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (/^agentglob \d{3}:/.test(msg)) return false;
+  if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) return true;
+  return /abort|timeout/i.test(msg);
+}
+
 export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<void> {
   const { jobId } = entry.data;
   const gen = new Date(entry.data.gen);
@@ -143,8 +164,9 @@ export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<v
     // The callback (not this reply) is authoritative — leave `processing` alone.
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (/abort|timeout/i.test(msg)) {
-      // Run continues server-side; the callback will complete the job.
+    if (isOwnDispatchAbort(e)) {
+      // Run continues server-side; the callback will complete the job. Only a
+      // genuine client-side abort may ack the entry like this (F33).
       console.warn(`[worker] job=${jobId} dispatch wait timed out; awaiting callback`);
       return;
     }
