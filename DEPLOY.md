@@ -79,6 +79,7 @@ service** from the same repo:
 |---|---|
 | Repository / Branch | `cryptolir/Plusim` / `main` (same as the web app) |
 | Build command | `pnpm install --frozen-lockfile && pnpm prisma generate` |
+| `NIXPACKS_NODE_VERSION` | **`22`** — required, not cosmetic: pg-boss needs node >=22.12.0, the build fails on 20 |
 | Start command | `pnpm worker` |
 | Replicas | `1` (dispatch concurrency 1 — do NOT raise before the Stage 2 gate) |
 | Memory limit | 256 MB is plenty (it only holds HTTP calls) |
