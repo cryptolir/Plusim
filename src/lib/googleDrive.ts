@@ -205,7 +205,52 @@ async function getAccessToken(): Promise<string> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Write throttle: Drive tolerates ~3 writes/s per user. driveFetch is the single
+// choke point every helper routes through, so gating non-GET here covers every
+// mutation, present and future, by construction (invariant I6). The method is
+// NORMALIZED first — most read calls pass no init at all, and a literal non-GET
+// check would throttle listChildren/getEntry/downloads (F13). In-process is
+// sufficient while every Drive write lives in this single-replica web app; move
+// to a Postgres-backed bucket the day any second process writes to Drive.
+// ---------------------------------------------------------------------------
+const DRIVE_WRITES_PER_SEC = 3;
+const DRIVE_WRITE_BURST = 3;
+let driveWriteTokens = DRIVE_WRITE_BURST;
+let driveWriteLastRefill = Date.now();
+
+/** Take one write token, waiting for a refill when the bucket is dry. Exported for tests. */
+export async function takeDriveWriteToken(): Promise<void> {
+  for (;;) {
+    const now = Date.now();
+    driveWriteTokens = Math.min(
+      DRIVE_WRITE_BURST,
+      driveWriteTokens + ((now - driveWriteLastRefill) / 1000) * DRIVE_WRITES_PER_SEC,
+    );
+    driveWriteLastRefill = now;
+    if (driveWriteTokens >= 1) {
+      driveWriteTokens -= 1;
+      return;
+    }
+    const waitMs = Math.ceil(((1 - driveWriteTokens) / DRIVE_WRITES_PER_SEC) * 1000);
+    await new Promise((r) => setTimeout(r, waitMs));
+  }
+}
+
+/** Refill the bucket to full. Exported for tests only. */
+export function resetDriveWriteBucketForTests(): void {
+  driveWriteTokens = DRIVE_WRITE_BURST;
+  driveWriteLastRefill = Date.now();
+}
+
+/** null → no throttle (a read); otherwise the pending bucket take. Exported for tests. */
+export function driveWriteGate(init?: RequestInit): Promise<void> | null {
+  const method = (init?.method ?? "GET").toUpperCase();
+  return method === "GET" ? null : takeDriveWriteToken();
+}
+
 async function driveFetch(url: string, init?: RequestInit): Promise<Response> {
+  await driveWriteGate(init);
   const token = await getAccessToken();
   return fetch(url, {
     ...init,

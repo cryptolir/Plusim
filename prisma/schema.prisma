@@ -76,6 +76,13 @@ model ReportJob {
   // Per-job bearer for /api/agent/jobs/<id>/* — sha256 hex of the raw token.
   agentTokenHash      String?
   agentTokenExpiresAt DateTime?
+  // Queue-dispatch attempt ownership (docs/plans/reports-scaling-stage1-2.md §4):
+  //   queueJobId          — pg-boss entry id that claimed this dispatch generation
+  //   dispatchAttemptedAt — set immediately before callAgent; splits crashed
+  //                         retries into "never sent" (null → safe to re-send)
+  //                         vs "ambiguously accepted" (set → never re-send)
+  queueJobId          String?
+  dispatchAttemptedAt DateTime?
   dispatchedAt  DateTime?
   completedAt   DateTime?
   publishedAt   DateTime?

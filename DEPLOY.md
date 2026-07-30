@@ -69,6 +69,35 @@ admin):
 | `PLUSIM_DRIVE_ROOT_FOLDER_ID` | The shared Drive root that contains every client subfolder |
 | `DRIVE_TOKEN_ENCRYPTION_KEY` / `DRIVE_OAUTH_STATE_SECRET` | `openssl rand -base64 32` each |
 
+## Report-dispatch worker (second Coolify service, same repo)
+
+Report jobs are dispatched by a dedicated worker
+(docs/plans/reports-scaling-stage1-2.md). Create it as a **second Coolify
+service** from the same repo:
+
+| Field | Value |
+|---|---|
+| Repository / Branch | `cryptolir/Plusim` / `main` (same as the web app) |
+| Build command | `pnpm install --frozen-lockfile && pnpm prisma generate` |
+| Start command | `pnpm worker` |
+| Replicas | `1` (dispatch concurrency 1 — do NOT raise before the Stage 2 gate) |
+| Memory limit | 256 MB is plenty (it only holds HTTP calls) |
+| Port / Domain | none — the worker serves no HTTP |
+
+**The worker does NOT inherit the web service's environment.** Provision
+exactly (asserted at boot — a missing var kills the worker at startup, naming it):
+
+| Key | Notes |
+|---|---|
+| `DATABASE_URL` | Same Plusim_DB URL as the web app (pg-boss owns a `pgboss` schema in it) |
+| `AGENTGLOB_AGENT_NAME` | `onlyclaw` |
+| `APP_BASE_URL` | `https://plusim.xyz` — manifest links handed to the agent |
+| `AGENTGLOB_APP_API_KEY` | Optional today (warn-only): callAgent sends it only when set |
+
+Deploy gate: after the first deploy, confirm the service log shows
+`[worker] report-dispatch worker started` — and that a run pressed in
+`/admin/reports` moves הועלה → נשלח לסוכן → בעיבוד.
+
 ## Database migrations
 
 Migrations run automatically during every deploy as part of the build command

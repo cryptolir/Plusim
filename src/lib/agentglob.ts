@@ -1,5 +1,7 @@
-import { getCurrentUser } from "@/lib/auth";
-
+// NOTE: @/lib/auth (Clerk) is imported LAZILY inside the one function that
+// needs it, so this module stays loadable outside Next.js — the report worker
+// (src/worker) reuses callAgent under plain tsx, where a top-level
+// @clerk/nextjs/server import may not resolve.
 const BASE = "https://app.agentglob.com";
 const AGENT = process.env.AGENTGLOB_AGENT_NAME!;
 const APP_KEY = process.env.AGENTGLOB_APP_API_KEY;
@@ -140,6 +142,7 @@ export async function seedAppProfileNameIfMissing(
   name: string,
 ): Promise<{ ok: boolean; seeded?: boolean }> {
   if (!WRITE_KEY) return { ok: false };
+  const { getCurrentUser } = await import("@/lib/auth");
   const userId = await getCurrentUser(); // Clerk session only — never a caller arg
   if (!userId) return { ok: false };
   const trimmed = (name ?? "").replace(/[\r\n]+/g, " ").trim();
