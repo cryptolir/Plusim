@@ -14,11 +14,20 @@
 import { db } from "@/lib/db";
 
 /**
- * A callback that AUTHORIZED just before expiry may still be parsing/verifying
- * when the token lapses (the result route's budget is 60 s) — authorization is
- * checked at entry, the conditional write happens later. Sweep only tokens
- * expired by more than this margin so an in-flight callback can never be
- * failed out from under its own transaction (Codex round 2, F25).
+ * A callback that AUTHORIZED just before expiry may still be mid-request when
+ * the token lapses — authorization is checked at entry, the conditional write
+ * happens later. Sweep only tokens expired by more than this margin so an
+ * in-flight callback can never be failed out from under its own transaction
+ * (Codex round 2 F25, round 3 refinement).
+ *
+ * What actually bounds the auth→write window (NOT the route's `maxDuration`,
+ * which self-hosted `next start` does not enforce): Node's HTTP server kills a
+ * stalled request at `requestTimeout` (default 300 s), the verification step is
+ * synchronous in-process CPU, and the Prisma interactive transaction aborts at
+ * its default 5 s timeout. Worst case ≈ 5 minutes; the margin is ~3×. And the
+ * only exposed callbacks at all are ones authorizing in the last instant of a
+ * 24-hour-old run — a rejected callback there converges by rerun, the plan's
+ * accepted residual class.
  */
 export const SWEEP_GRACE_MS = 15 * 60_000;
 
