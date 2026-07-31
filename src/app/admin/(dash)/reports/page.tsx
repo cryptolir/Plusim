@@ -5,6 +5,7 @@ import { mintSaveToken } from "@/lib/adminSaveToken";
 import { REPORTS_TOKEN_SCOPE } from "@/lib/reportsAdminAuth";
 import { db } from "@/lib/db";
 import { ReportUploadForm } from "@/components/admin/ReportUploadForm";
+import { PublishRowButton } from "@/components/admin/PublishRowButton";
 
 export const dynamic = "force-dynamic";
 
@@ -59,6 +60,11 @@ export default async function AdminReportsPage() {
     },
   });
 
+  // The publish route also accepts "published" (re-publish), but a published row
+  // shows the report link instead — re-publishing belongs on the job page, where
+  // the verification panel is. Any other status would only earn a refusal.
+  const canPublish = (status: string) => ["completed", "needs_review"].includes(status);
+
   return (
     <div className="space-y-8">
       <div>
@@ -73,38 +79,78 @@ export default async function AdminReportsPage() {
 
       <div className="overflow-x-auto rounded-xl border">
         <table className="w-full text-sm">
-          <thead className="bg-muted/50 text-left">
+          {/* Header cells inherit the page's RTL start alignment — a text-left
+              here (the old bug) put every label on the opposite side of its
+              column's data. */}
+          <thead className="bg-muted/50">
             <tr>
-              <th className="px-3 py-2 font-medium">עבודה</th>
-              <th className="px-3 py-2 font-medium">משתמש</th>
-              <th className="px-3 py-2 font-medium">סטטוס</th>
-              <th className="px-3 py-2 font-medium">קבצים</th>
-              <th className="px-3 py-2 font-medium">עסקאות</th>
-              <th className="px-3 py-2 font-medium">נוצר</th>
+              <th className="px-3 py-2 text-start font-medium">עבודה</th>
+              <th className="px-3 py-2 text-start font-medium">משתמש</th>
+              <th className="px-3 py-2 text-start font-medium">סטטוס</th>
+              <th className="px-3 py-2 text-start font-medium">קבצים</th>
+              <th className="px-3 py-2 text-start font-medium">עסקאות</th>
+              <th className="px-3 py-2 text-start font-medium">נוצר</th>
+              <th className="px-3 py-2 text-start font-medium">דוח מקוון</th>
             </tr>
           </thead>
           <tbody>
             {jobs.map((j) => (
-              <tr key={j.id} className="border-t">
+              <tr key={j.id} className="border-t align-top">
                 <td className="px-3 py-2">
-                  <Link href={`/admin/reports/${j.id}`} className="text-blue-600 underline">
+                  <Link
+                    href={`/admin/reports/${j.id}`}
+                    className="block max-w-56 truncate text-blue-600 underline"
+                    title={j.title || j.id}
+                    dir="auto"
+                  >
                     {j.title || j.id.slice(0, 10)}
                   </Link>
                 </td>
-                <td className="px-3 py-2">{nameByUser.get(j.targetUserId) ?? j.targetUserId}</td>
+                <td className="px-3 py-2">
+                  {/* max-width on a <td> is ignored under table-layout:auto —
+                      the clamp has to live on a block inside the cell. */}
+                  <span className="block max-w-40 truncate" dir="auto">
+                    {nameByUser.get(j.targetUserId) ?? j.targetUserId}
+                  </span>
+                </td>
                 <td className="px-3 py-2">
                   <span className={`rounded-full px-2 py-0.5 text-xs ${STATUS_BADGE[j.status] ?? "bg-muted"}`}>
                     {STATUS_LABEL[j.status] ?? j.status}
                   </span>
                 </td>
-                <td className="px-3 py-2">{j._count.files}</td>
-                <td className="px-3 py-2">{j._count.transactions}</td>
-                <td className="px-3 py-2 whitespace-nowrap">{j.createdAt.toLocaleString()}</td>
+                <td className="px-3 py-2 tabular-nums">{j._count.files}</td>
+                <td className="px-3 py-2 tabular-nums">{j._count.transactions}</td>
+                {/* Hebrew locale + LTR isolation: a bare toLocaleString() renders
+                    US order and its digits scatter inside the RTL row. */}
+                <td className="px-3 py-2 tabular-nums whitespace-nowrap">
+                  <span dir="ltr">
+                    {j.createdAt.toLocaleString("he-IL", { dateStyle: "short", timeStyle: "short" })}
+                  </span>
+                </td>
+                <td className="px-3 py-2">
+                  {j.status === "published" ? (
+                    <Link
+                      href={`/admin/reports/${j.id}/view`}
+                      target="_blank"
+                      className="rounded-full border px-3 py-1 text-xs whitespace-nowrap transition-colors hover:bg-muted"
+                    >
+                      פתיחת הדוח ↗
+                    </Link>
+                  ) : canPublish(j.status) ? (
+                    <PublishRowButton
+                      jobId={j.id}
+                      saveToken={token}
+                      user={nameByUser.get(j.targetUserId) ?? j.targetUserId}
+                    />
+                  ) : (
+                    <span className="text-xs text-muted-foreground">טרם מוכן</span>
+                  )}
+                </td>
               </tr>
             ))}
             {jobs.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-3 py-6 text-center text-muted-foreground">
+                <td colSpan={7} className="px-3 py-6 text-center text-muted-foreground">
                   אין עדיין עבודות דוח — העלו דפי חשבון למעלה.
                 </td>
               </tr>

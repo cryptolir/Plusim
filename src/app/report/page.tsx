@@ -3,32 +3,9 @@ import { auth } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
 import { db } from "@/lib/db";
 import { getMergedTaxonomy } from "@/lib/reportCategories";
+import { shekel, monthTitle } from "@/lib/reportAnalysis";
 
 export const dynamic = "force-dynamic";
-
-function shekel(agorot: number): string {
-  return (agorot / 100).toLocaleString("he-IL", { style: "currency", currency: "ILS" });
-}
-
-/** Hebrew month title from "2026-06". */
-function monthTitle(month: string): string {
-  const NAMES = [
-    "ינואר",
-    "פברואר",
-    "מרץ",
-    "אפריל",
-    "מאי",
-    "יוני",
-    "יולי",
-    "אוגוסט",
-    "ספטמבר",
-    "אוקטובר",
-    "נובמבר",
-    "דצמבר",
-  ];
-  const [y, m] = month.split("-").map(Number);
-  return `${NAMES[(m ?? 1) - 1]} ${y}`;
-}
 
 export default async function ReportPage() {
   const { userId } = await auth();

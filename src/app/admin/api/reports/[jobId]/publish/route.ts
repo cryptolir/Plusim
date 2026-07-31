@@ -146,13 +146,13 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
   let createdSheetId: string | null = null;
   try {
     if (!(await isDriveConnected())) {
-      exportNote = "Drive not connected — sheet export skipped";
+      exportNote = "Google Drive לא מחובר — ייצוא הגיליון דולג";
     } else {
       const folder = await db.userDriveFolder.findUnique({ where: { userId: job.targetUserId } });
       if (!folder) {
-        exportNote = "user has no assigned Drive folder — sheet export skipped";
+        exportNote = "למשתמש לא הוקצתה תיקיית Drive — ייצוא הגיליון דולג";
       } else if (!artifact) {
-        exportNote = "no xlsx artifact to export";
+        exportNote = "אין קובץ xlsx לייצוא";
       } else {
         // BOTH containments, before ANY write. assertEntryUnderFolder proves the
         // sheet belongs to THIS client but walks only as far as folderId — it
@@ -193,7 +193,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
       }
     }
   } catch (e) {
-    exportNote = `sheet export failed: ${e instanceof Error ? e.message : String(e)}`;
+    exportNote = `ייצוא הגיליון נכשל: ${e instanceof Error ? e.message : String(e)}`;
     console.error(`[admin/reports] job=${jobId} ${exportNote}`);
   }
 
@@ -203,7 +203,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
   // no link is the honest state, and the next successful publish restores one.
   if (!exportedCurrent && job.sheetUrl) {
     sheetUrl = null;
-    exportNote = `${exportNote ?? "no current workbook was exported"} — stale sheet link cleared`;
+    exportNote = `${exportNote ?? "לא יוצא גיליון עדכני"} — הקישור הישן לגיליון הוסר`;
   }
 
   // Conditional publish: re-assert everything the pre-check validated. Both

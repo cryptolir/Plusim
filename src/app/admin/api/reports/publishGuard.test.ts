@@ -347,7 +347,7 @@ describe("sheet export on re-publish", () => {
     );
     const body = await res.json();
     expect(body.sheetUrl).toBeNull();
-    expect(body.exportNote).toMatch(/stale sheet link cleared/);
+    expect(body.exportNote).toMatch(/הקישור הישן לגיליון הוסר/);
   });
 
   it("republish_folder_outside_root_409 — assigned folder left the root ⇒ no Drive write at all", async () => {
@@ -392,7 +392,7 @@ describe("sheet export on re-publish", () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.sheetUrl).toBeNull();
-      expect(body.exportNote).toMatch(/stale sheet link cleared/);
+      expect(body.exportNote).toMatch(/הקישור הישן לגיליון הוסר/);
     });
 
     it("no xlsx artifact to export", async () => {
@@ -411,7 +411,7 @@ describe("sheet export on re-publish", () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.sheetUrl).toBeNull();
-      expect(body.exportNote).toBe("Drive not connected — sheet export skipped");
+      expect(body.exportNote).toBe("Google Drive לא מחובר — ייצוא הגיליון דולג");
     });
   });
 

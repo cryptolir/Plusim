@@ -17,8 +17,8 @@ const ROOTS = ["src/app/admin/api", "src/app/api/reports"];
 const EXTRA_FILES = ["src/lib/reportStatementUpload.ts", "src/lib/reportsAdminAuth.ts", "src/lib/driveAuth.ts"];
 
 const HEBREW = /[\u0590-\u05FF]/;
-// `error: "…"` / `error: `…`` literals — the message shape the UI prints.
-const ERROR_LITERAL = /\berror:\s*(["`])((?:\\.|(?!\1)[\s\S])*)\1/g;
+// `error: "…"` / `exportNote: "…"` literals — the message shapes the UI prints.
+const ERROR_LITERAL = /\b(?:error:|exportNote\s*=)\s*(["`])((?:\\.|(?!\1)[\s\S])*)\1/g;
 
 function tsFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
