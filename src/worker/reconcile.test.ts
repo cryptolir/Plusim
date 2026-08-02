@@ -32,7 +32,7 @@ it("fails only processing rows expired past the in-flight-callback grace (F25)",
       status: "processing",
       agentTokenExpiresAt: { lt: new Date(now.getTime() - SWEEP_GRACE_MS) },
     },
-    data: { status: "failed", error: "run never completed before its token expired" },
+    data: { status: "failed", error: "ההרצה לא הסתיימה לפני שפג תוקף ההרשאה — יש להריץ מחדש" },
   });
 });
 

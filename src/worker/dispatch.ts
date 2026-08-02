@@ -179,7 +179,7 @@ export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<v
       // handler reconciles AFTER the callback grace window (Codex round 2, F24).
       await db.reportJob.updateMany({
         where: { id: jobId, status: "processing", queueJobId: entry.id },
-        data: { status: "failed", error: `dispatch failed: ${msg.slice(0, 500)}` },
+        data: { status: "failed", error: `השליחה לסוכן נכשלה: ${msg.slice(0, 500)}` },
       });
     } else if (entry.retryCount < entry.retryLimit && isDefinitiveSendFailure(msg)) {
       // The AgentGlob APP answered with an error status — THIS attempt's request
@@ -230,7 +230,7 @@ export async function handleReportDispatchDead(payload: ReportDispatchPayload): 
       // after the callback grace.
       OR: [{ dispatchAttemptedAt: null }, { dispatchAttemptedAt: { lt: graceCutoff } }],
     },
-    data: { status: "failed", error: "worker crashed or expired" },
+    data: { status: "failed", error: "תהליך הרקע קרס או פג תוקפו לפני שהעבודה נשלחה" },
   });
   if (res.count === 1) {
     console.warn(`[worker] job=${payload.jobId} gen=${payload.gen} dead-lettered — reconciled to failed`);

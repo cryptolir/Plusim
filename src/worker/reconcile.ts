@@ -39,7 +39,7 @@ export async function reconcileExpiredProcessing(now: Date = new Date()): Promis
       status: "processing",
       agentTokenExpiresAt: { lt: new Date(now.getTime() - SWEEP_GRACE_MS) },
     },
-    data: { status: "failed", error: "run never completed before its token expired" },
+    data: { status: "failed", error: "ההרצה לא הסתיימה לפני שפג תוקף ההרשאה — יש להריץ מחדש" },
   });
   if (res.count > 0) {
     console.warn(`[worker] reconciled ${res.count} expired-token processing job(s) to failed`);
