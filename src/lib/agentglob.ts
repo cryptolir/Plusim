@@ -206,8 +206,8 @@ export async function saveUserFileRaw(
   ifMatch: string,
   opts?: { force?: boolean; actor?: string },
 ): Promise<SaveRawResult> {
-  if (!WRITE_KEY) return { ok: false, status: 500, error: "write key not configured" };
-  if (!userId) return { ok: false, status: 400, error: "missing userId" };
+  if (!WRITE_KEY) return { ok: false, status: 500, error: "מפתח הכתיבה של AgentGlob אינו מוגדר" };
+  if (!userId) return { ok: false, status: 400, error: "חסר מזהה משתמש" };
   try {
     const force = opts?.force ? "&force=1" : "";
     const url = `${BASE}/api/public/chat/${AGENT}/user-file/raw?userId=${encodeURIComponent(userId)}${force}`;
@@ -230,7 +230,7 @@ export async function saveUserFileRaw(
     if (res.status === 409) {
       return { ok: false, status: 409, conflict: true, currentEtag: typeof data?.currentEtag === "string" ? data.currentEtag : "" };
     }
-    return { ok: false, status: res.status, error: typeof data?.error === "string" ? data.error : `error ${res.status}` };
+    return { ok: false, status: res.status, error: typeof data?.error === "string" ? data.error : `שגיאה ${res.status}` };
   } catch (e) {
     return { ok: false, status: 503, error: String(e) };
   }

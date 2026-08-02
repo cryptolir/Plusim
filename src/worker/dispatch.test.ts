@@ -207,7 +207,7 @@ it("final attempt writes failed + error text, then still rethrows (definitive fa
   const failedWrites = updateMany.mock.calls.filter(([a]) => a.data?.status === "failed");
   expect(failedWrites).toHaveLength(1);
   expect(failedWrites[0][0].where).toEqual({ id: "jobA", status: "processing", queueJobId: "pgb-1" });
-  expect(failedWrites[0][0].data.error).toContain("dispatch failed: agentglob 500");
+  expect(failedWrites[0][0].data.error).toContain("השליחה לסוכן נכשלה: agentglob 500");
 });
 
 // ---- Codex round 2, F24 ---------------------------------------------------------
@@ -237,7 +237,7 @@ it("dead-letter reconciliation marks failed only for the matching generation key
   // F24 — never-sent rows reconcile immediately; sent rows only after the grace.
   expect(cas.where.OR[0]).toEqual({ dispatchAttemptedAt: null });
   expect(cas.where.OR[1].dispatchAttemptedAt.lt).toBeInstanceOf(Date);
-  expect(cas.data).toEqual({ status: "failed", error: "worker crashed or expired" });
+  expect(cas.data).toEqual({ status: "failed", error: "תהליך הרקע קרס או פג תוקפו לפני שהעבודה נשלחה" });
 });
 
 it("dead-letter reconciliation no-ops when the callback moved the row out of processing", async () => {
