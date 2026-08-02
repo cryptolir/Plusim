@@ -172,6 +172,16 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
     await action("addFiles", `/admin/api/reports/${jobId}/files`, { method: "POST", body: form });
   }
 
+  // Deletion alone never touches the stored report — it only drops the file
+  // from the NEXT run's union (see the route's header comment) — so the admin
+  // is told that up front, the same way addFiles is.
+  async function deleteFile(fileId: string, filename: string) {
+    if (!window.confirm(`למחוק את הקובץ "${filename}"?\n\nהדוח הקיים לא ישתנה עד להרצה מחדש של הסוכן.`)) {
+      return;
+    }
+    await action(`delete-file-${fileId}`, `/admin/api/reports/${jobId}/files/${fileId}`, { method: "DELETE" });
+  }
+
   async function assignCategory(txId: string, category: string, remember: boolean) {
     if (!category) return;
     await action("assign", `/admin/api/reports/${jobId}/transactions/${txId}`, {
@@ -226,11 +236,27 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
         <h2 className="mb-2 font-medium">קובצי דפי חשבון</h2>
         <ul className="space-y-1 text-sm">
           {job.files.map((f) => (
-            <li key={f.id} dir="auto">
-              {f.filename} <span className="text-muted-foreground">({Math.round(f.size / 1024)} KB)</span>
+            <li key={f.id} className="flex items-center gap-2">
+              <span dir="auto">
+                {f.filename} <span className="text-muted-foreground">({Math.round(f.size / 1024)} KB)</span>
+              </span>
+              {/* Hidden mid-run for the same reason the upload control is: the
+                  server 409s a file-list change while the agent is working. */}
+              {!running && (
+                <button
+                  onClick={() => void deleteFile(f.id, f.filename)}
+                  disabled={busy !== null}
+                  className="rounded border px-2 py-0.5 text-xs text-red-600 disabled:opacity-50"
+                >
+                  {busy === `delete-file-${f.id}` ? "מוחק…" : "מחיקה"}
+                </button>
+              )}
             </li>
           ))}
         </ul>
+        {job.files.length === 0 && (
+          <p className="text-sm text-muted-foreground">אין קבצים בעבודה הזו — הוסיפו דף חשבון כדי להריץ את הסוכן.</p>
+        )}
         {/* Adding files to a job that already has a report is the update flow:
             upload here, then re-run the agent over the whole set. Hidden while
             the agent is working — the server refuses those appends anyway. */}
@@ -252,7 +278,7 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
             {busy === "addFiles" && <span className="text-muted-foreground">מעלה…</span>}
             {job.files.length > 0 && (
               <span className="text-xs text-muted-foreground">
-                לאחר ההוספה יש להריץ את הסוכן מחדש כדי לעדכן את הדוח.
+                לאחר הוספה או מחיקה של קובץ יש להריץ את הסוכן מחדש כדי לעדכן את הדוח.
               </span>
             )}
           </label>
