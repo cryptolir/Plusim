@@ -155,25 +155,48 @@ export function parseAgentResult(body: unknown, validLeaves: Set<string>): Agent
 }
 
 /**
- * Below which a per-source total gap is a note rather than a publish blocker.
+ * Whether a per-source total gap is small enough to be a note rather than a
+ * publish blocker. THREE conditions, all of which must hold — the waiver is
+ * deliberately hard to earn, because everything it lets through is a report
+ * published with numbers that do not reconcile.
  *
- * Whichever is LARGER of a flat floor and a share of the statement: the flat
- * floor covers the small statements where any percentage is a few shekels, and
- * the percentage keeps the allowance proportionate on large ones instead of
- * letting a fixed sum wave through a material gap.
+ *  1. SHORTFALL ONLY. Only `recomputed < statement` qualifies. The artifact this
+ *     exists for is missing rows (trailing summary lines the statement's own
+ *     total counts and the row parse does not), which can only ever undercount.
+ *     An OVER-count means a row exists that the statement does not justify — a
+ *     misparse or a spurious row with a unique dedupKey, which no other check
+ *     catches — and publishing inflated expenses is worse than blocking
+ *     (Codex #41 P2).
+ *  2. ABSOLUTE CAP. At most MINOR_GAP_CAP_AGOROT, full stop.
+ *  3. PROPORTION CAP. AND at most MINOR_GAP_MAX_SHARE of the statement.
  *
- * Calibrated on the case that prompted it — job "s1" source max-2, ₪87.80 short
- * on a ₪7,365.91 statement (1.2%), which reproduced with the CURRENT parser and
- * so is not the charge-summary bug. Deliberately not tuned to just clear that
- * one number: ₪150 leaves room for a second such line without also admitting a
- * dropped section, which in the same statement would run to hundreds.
+ * (2) and (3) are an AND, not the `max()` this shipped with first. `max()` took
+ * the more PERMISSIVE of the two, which admitted precisely the failures the
+ * reconciliation gate exists to catch (Codex #41 P1): a ₪1,000 row dropped from
+ * a ₪50,000 statement is 2%, and a source totalling ≤ ₪150 that lost EVERY row
+ * has a gap equal to its whole total yet still sat under the flat floor. Under
+ * the AND both are fatal — 100% of a source can never be under 2% of it.
+ *
+ * Calibrated on job "s1" source max-2: ₪87.80 short on ₪7,365.91 (1.2%),
+ * reproduced with the CURRENT parser, so not the charge-summary bug #38 fixed.
+ * On that statement the proportion cap binds first (₪147.31), not the flat one.
  */
-export const MINOR_GAP_FLOOR_AGOROT = 15_000; // ₪150
-export const MINOR_GAP_SHARE = 0.02; // 2% of the statement's own total
+export const MINOR_GAP_CAP_AGOROT = 15_000; // ₪150 — absolute ceiling
+export const MINOR_GAP_MAX_SHARE = 0.02; // AND at most 2% of the statement
 
-export function isMinorTotalGap(gapAgorot: number, statementTotalAgorot: number | null): boolean {
-  const share = Math.abs(statementTotalAgorot ?? 0) * MINOR_GAP_SHARE;
-  return gapAgorot <= Math.max(MINOR_GAP_FLOOR_AGOROT, share);
+export function isMinorTotalGap(
+  recomputedAgorot: number,
+  statementTotalAgorot: number | null,
+): boolean {
+  // No statement total ⇒ nothing to reconcile against, so nothing to waive.
+  // A non-positive total is outside the calibrated shape; fail closed.
+  if (statementTotalAgorot === null || statementTotalAgorot <= 0) return false;
+  const shortfall = statementTotalAgorot - recomputedAgorot;
+  if (shortfall <= 0) return false; // (1) over-count is never minor
+  return (
+    shortfall <= MINOR_GAP_CAP_AGOROT && // (2)
+    shortfall <= statementTotalAgorot * MINOR_GAP_MAX_SHARE // (3)
+  );
 }
 
 /** Agorot → "₪1,234.56". Shared so a note and the UI never disagree on format. */
@@ -260,7 +283,7 @@ export function verifyAgentResult(result: AgentResult, validLeaves: Set<string>)
       // A large gap is the shape of a real parse failure (a dropped section, a
       // layout change), where publishing would ship a materially wrong report.
       // That still blocks, so the check keeps the job it exists to do.
-      minorGap = isMinorTotalGap(gap, s.statementTotalAgorot);
+      minorGap = isMinorTotalGap(recomputed, s.statementTotalAgorot);
       if (minorGap) {
         notes.push(`${line} — פער קטן, כנראה שורות סיכום בסוף דף החשבון; אינו חוסם פרסום`);
       } else {
