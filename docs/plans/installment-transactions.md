@@ -1,6 +1,21 @@
 # Plusim — Installment transactions (תשלומים / קרדיט): correct month, visible badge, editable date
 
-> **Status:** Draft — Rev 1. Nothing implemented yet.
+> **Status:** Draft — **Rev 2** (Codex round-1 folded: 4×P1). Nothing implemented yet.
+>
+> **Review log:**
+> - Rev 1 — authored from a file-anchored read plus a fresh parse of the real statement with the
+>   deployed parser (§0).
+> - Rev 2 — folds Codex round 1 (all four accepted):
+>   **P1-a** multi-block statements: global-latest charge date re-creates the wrong-month bug for
+>   rows belonging to an earlier block → substitution is now **per block** (§2.2).
+>   **P1-b** fail-open on a missing charge date would let the admin publish the exact wrong-month
+>   report this plan exists to prevent → now **fail-closed**: undated installment rows are flagged
+>   in the payload and app-side verification turns the flag into a FATAL problem (§2.2.3); Ask 4 is
+>   resolved accordingly.
+>   **P1-c** edits during an active re-run are silently erased by the result callback's
+>   delete+recreate → route-level 409 while the agent is running + UI disable; this also closes the
+>   **pre-existing** identical race on category assignment (§2.3).
+>   **P1-d** the client guide update is mandatory under AGENTS.md rule 4, not discretionary (§2.4).
 >
 > **Process** (self-contained — canonical protocol in `docs/PLAN_REVIEW_PROTOCOL.md`): plan PR →
 > adversarial Codex review → each round becomes a new Rev with resolution notes (never silently
@@ -11,8 +26,10 @@
 > (client `/report`, admin online view, the exported workbook), touches the report-verification
 > interplay (`date`↔`month` consistency is a FATAL check, `src/lib/reportResult.ts:251-253`), and
 > widens an admin mutation route. A bug here scatters or double-buckets real charges in a
-> client-facing financial report. No schema migration and no agent-contract change — that is a
-> headline design decision this review should attack (Ask 1).
+> client-facing financial report. No schema migration; the agent contract gains exactly one
+> **optional, transient** integrity flag (`undatedInstallment`, Rev 2 — checked at verification,
+> never stored). The badge itself still rides the existing `note` field — that carrier decision is
+> the one this review should attack (Ask 1).
 >
 > **Review asks (attack these):**
 > 1. **The no-new-field decision.** The installment marker rides the existing free-text `note`
@@ -28,9 +45,10 @@
 >    (`transactions/[txId]/route.ts:27-30`). The widened body must not let a date-only edit clear
 >    `uncategorized`, must not let a category-only edit touch the date, and must reject a date that
 >    silently disagrees with the recomputed `month`. Attack the field-interaction matrix.
-> 4. **Fail-open on a missing charge date.** When no `לתאריך חיוב סה"כ` date is found, dates stay
->    as-is and a warning flows to `agentNotes`. Is fail-open right here, or does an undated
->    statement need to block?
+> 4. ~~**Fail-open on a missing charge date.**~~ **Resolved in Rev 2 (Codex P1-b): fail-closed.**
+>    An installment row whose block has no extractable charge date is flagged in the payload and
+>    app-side verification makes it FATAL — the job cannot be published until the parser (or the
+>    statement) is fixed. Same philosophy as refusing an unrecognized statement (#38).
 
 ---
 
@@ -129,20 +147,30 @@ parser's prefix survives and the regex keeps matching (Ask 1 covers the residual
 
 ### 2.2 Parser: substitute the statement charge date (parse_leumi_pdf.py only)
 
-1. Capture the charge date where the total already comes from: extend the total-block read to also
-   take the **first `DATE_RE` line after the `סה"כ` line** (it precedes the amount). With multiple
-   blocks (early-repayment subtotals), keep the **latest** date — the regular cycle's charge date.
-2. After both sections parse and **before Phase 4 assigns dedup keys**, for every transaction whose
-   `note` matches the installment pattern (same pattern as §2.1, Python side):
+1. **Per-block charge dates (Rev 2 — Codex P1-a).** A `לתאריך חיוב סה"כ` block closes the run of
+   rows above it (the domestic walker already treats blocks as subtotal boundaries, `:259-266`).
+   Extend the block read to also capture the **first `DATE_RE` line after the `סה"כ` line** (it
+   precedes the amount), and associate each parsed row with **the block that closes it** — never a
+   single statement-wide date. On a statement with an early-repayment subtotal (charge date D1)
+   followed by the regular cycle (D2), installment rows above the first block get D1 and rows
+   between the blocks get D2. The single-block case (the fixture: one block, `15/05/26`)
+   degenerates to the same behavior Rev 1 described.
+2. Substitution runs per section **before Phase 4 assigns dedup keys**: for every row whose `note`
+   matches the installment pattern (same pattern as §2.1, Python side):
    - keep the original date in the note: `note = f"{note} · עסקה מקורית: {orig_date}"`;
-   - set `date = charge_date`.
+   - set `date = <its block's charge date>`.
    Then Phase 4 computes dedup keys from the substituted dates — two same-merchant same-amount
    installments on the same charge date stay distinct via the existing `|{seq}` suffix (`:113-114`).
-3. **No charge date found** → substitute nothing, append
-   `res.warnings.append(f"{path}: לא נמצא תאריך חיוב — תאריכי תשלומים נותרו כתאריך העסקה המקורי")`
-   → surfaces in the admin verification panel via `agentNotes`. Fail-open because the pre-plan
-   behavior (deal dates) is wrong months, not wrong money — totals are unaffected either way
-   (Ask 4).
+3. **No charge date for a block that contains installment rows → fail closed (Rev 2 — Codex
+   P1-b).** Substitute nothing for those rows and stamp each one `undatedInstallment: true` in the
+   payload transaction (a transient contract field — accepted by `parseAgentResult`, checked by
+   `verifyAgentResult`, **never stored**; no schema change). App-side verification adds a problem
+   per flagged row (`תשלום ללא תאריך חיוב (<merchant>)`) — problems are FATAL, so **the publish
+   route refuses the job** (`publish/route.ts:91-101`) until the parser or the statement is fixed.
+   `run_job.py` also demotes its own declared status to `needs_review` (belt; the app-side check is
+   the suspenders and is what actually blocks). A warning still lands in `agentNotes` so the admin
+   sees *why*. Old skill versions never send the field, and `parseAgentResult` treats it as
+   optional — so the app deploys first and nothing breaks in the gap (§6).
 
 `month` follows automatically (`run_job.py:398` derives it from the date), so the
 date-outside-month check (`reportResult.ts:251`) stays consistent by construction. Amounts are
@@ -152,6 +180,13 @@ untouched, so per-source totals still reconcile to the agora.
 
 Widen `transactions/[txId]/route.ts` — same auth gate, no new surface:
 
+- **No edits while the agent is running (Rev 2 — Codex P1-c).** The route rejects (409, Hebrew
+  message) when the job's status is `dispatched` or `processing`: the result callback
+  delete+recreates every transaction row (`result/route.ts:73-88`), so an edit accepted mid-run
+  returns success and then silently vanishes. This guard covers **category assignment too — the
+  identical race exists today** and this closes it at the shared route (root cause, not the new
+  path only). UI: the date input and the assign controls disable under the existing `running` flag
+  (`computeRunGate`), matching how upload/delete already hide mid-run.
 - Body becomes `{category?, rememberMerchant?, date?}`; **at least one of `category`/`date`
   required** (else 400).
 - `category`, when present: exactly today's behavior (validate against merged leaf set, set
@@ -168,9 +203,11 @@ Widen `transactions/[txId]/route.ts` — same auth gate, no new surface:
 ### 2.4 Guides (same impl PR, per AGENTS.md rule 4)
 
 `ADMIN_GUIDE.he.md`: what the badge means (N מתוך M), that installment rows are dated by the
-statement charge date with the original deal date kept in the note, how to edit a date, and that a
-re-run recomputes both. `CLIENT_GUIDE.he.md`: unchanged (the client page's only per-row rendering
-is the uncat table; a one-line mention is impl-time discretion).
+statement charge date with the original deal date kept in the note, how to edit a date, that
+editing is unavailable while the agent works, and that a re-run recomputes both.
+`CLIENT_GUIDE.he.md`: **mandatory, same PR (Rev 2 — Codex P1-d, AGENTS.md rule 4)** — the client
+page's ללא-סיווג rows gain a visible badge, so the client guide documents it and bumps its
+"עודכן לאחרונה" date. Both guides ship in the implementation PR.
 
 ## 3. Invariants
 
@@ -182,10 +219,15 @@ is the uncat table; a one-line mention is impl-time discretion).
    sequence suffix.
 4. **A date-only edit never changes categorization state**; a category-only edit never changes the
    date. The route has no path that writes one field from the other's branch.
-5. **No charge date ⇒ no substitution**, with a human-visible warning — never a guessed or invented
-   date.
-6. **The badge is display-only.** No logic (verification, bucketing, export) branches on
-   `installmentInfo` — it reads the same `note` everything already stores.
+5. **Each installment row takes its own block's charge date** — never a statement-global date
+   (Rev 2). A block that closes rows governs exactly those rows.
+6. **No charge date ⇒ no substitution AND no publication** (Rev 2): the flagged rows make
+   verification FATAL. Never a guessed or invented date, never a silent wrong-month publish.
+7. **No transaction edit lands while the agent is running** (Rev 2): the route 409s for
+   `dispatched`/`processing` — for date AND category alike.
+8. **The badge is display-only.** No logic (verification, bucketing, export) branches on
+   `installmentInfo` — it reads the same `note` everything already stores. (`undatedInstallment`
+   is a separate, transient integrity flag — it never renders and is never stored.)
 
 ## 4. Tests (named; the impl PR carries all of them)
 
@@ -195,10 +237,20 @@ git):
 - `installment_row_gets_charge_date_and_keeps_deal_date_in_note`
 - `kredit_wording_is_detected` (`תשלום - קרדיט 6 מתוך 13`)
 - `non_installment_rows_keep_their_deal_date`
-- `no_charge_date_block_leaves_dates_and_adds_warning`
-- `multiple_total_blocks_use_the_latest_charge_date`
+- `installment_rows_take_their_own_blocks_charge_date` (Rev 2 — rows on both sides of an
+  early-repayment subtotal get D1 and D2 respectively, never one global date)
+- `undated_installment_rows_are_flagged_not_guessed` (Rev 2 — no block date ⇒ `undatedInstallment`
+  on exactly the matching rows, dates untouched)
 - `same_merchant_same_amount_installments_stay_distinct_after_substitution` (dedup)
 - `substitution_changes_no_amount_and_no_total` (sum before == sum after)
+
+Contract + verification (Rev 2 — Codex P1-b; `reportResult.test.ts` + a run_job status test):
+
+- `undated_installment_flag_is_a_fatal_problem` (verifyAgentResult: flagged row ⇒ problem ⇒
+  publish route refuses)
+- `payload_without_the_flag_verifies_exactly_as_today` (regression — old skill versions)
+- `run_job_demotes_status_to_needs_review_when_any_installment_is_undated` (tests the resulting
+  status, not just a warning)
 
 Helper (`reportAnalysis` unit tests):
 
@@ -214,12 +266,15 @@ Route (`transactions PATCH` tests, mocked db — same style as `deleteJob.test.t
 - `date_and_category_together_apply_both`
 - `invalid_date_shapes_400` (`2026-2-3`, `2026-02-31`, `31/05/2026`, empty)
 - `body_with_neither_field_400s`
+- `edits_rejected_while_agent_is_running` (Rev 2 — 409 for `dispatched` AND `processing`, for a
+  date-only edit AND a category-only edit; the rerun/edit race test Codex asked for)
 
 ## 5. Deliberately NOT building
 
-- **A dedicated `installment` column / agent-contract field.** Costs a Prisma migration, a
-  `parseAgentResult` change, and a result-route write for what one regex over an existing field
-  provides. Revisit only if the badge needs to drive *logic* (it must not — invariant 6).
+- **A dedicated, STORED `installment` column for the badge.** Costs a Prisma migration and a
+  result-route write for what one regex over an existing field provides. Revisit only if the badge
+  needs to drive *logic* (it must not — invariant 8). Distinct from Rev 2's `undatedInstallment`,
+  which is an integrity flag: optional in the contract, consumed at verification, never persisted.
 - **MAX-format (`parse_max_pdf.py`) installment extraction.** No fixture with installments in
   hand; that parser extracts no תשלום text today. The shared badge lights up automatically the day
   its notes carry the pattern. Follow-up when a real MAX statement with installments exists.
@@ -236,6 +291,9 @@ Route (`transactions PATCH` tests, mocked db — same style as `deleteJob.test.t
 1. This plan PR → Codex review rounds → approval.
 2. One implementation PR: parser change + skill-file sync to the agent box (manual copy, same
    pipeline as #44/#46 — git and the running agent stay byte-identical), `installmentInfo` +
-   renderers, PATCH widening + UI, guides, full test list above. Verified end-to-end by re-running
-   דיין 9 (owner clicks; agent re-parses the same statement) and checking the five rows land in
-   2026-05 with badges.
+   renderers, PATCH widening + UI, both guides, full test list above. **Deploy order inside the
+   step: the app (merge → Coolify auto-deploy) before the skill copy** — the app must accept and
+   check `undatedInstallment` before any skill version can send it; the reverse gap is harmless
+   (old skill never sends it) but the discipline keeps the fail-closed check live from the first
+   flagged payload. Verified end-to-end by re-running דיין 9 (owner clicks; agent re-parses the
+   same statement) and checking the five rows land in 2026-05 with badges.
