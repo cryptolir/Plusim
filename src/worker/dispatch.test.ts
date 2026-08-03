@@ -370,9 +370,14 @@ it("dead-letter reconciliation DEFERS (throws) while a freshly-sent row is insid
 });
 
 it("dead-letter reconciliation no-ops for a processing row owned by a NEWER generation", async () => {
-  updateMany.mockResolvedValueOnce({ count: 0 });
+  // BOTH settle arms must miss (Codex round 1 on #39): mocking only the first
+  // let the second fall through to the beforeEach default of {count: 1}, so the
+  // handler exited as "reconciled" and the ownership read below never ran — the
+  // test passed even if the newer-generation no-op regressed.
+  updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 0 });
   findUnique.mockResolvedValue({ status: "processing", dispatchedAt: new Date("2026-07-30T11:00:00.000Z") });
   await expect(handleReportDispatchDead({ jobId: "jobA", gen: GEN })).resolves.toBeUndefined();
+  expect(findUnique).toHaveBeenCalledTimes(1); // the generation check is what decided it
 });
 
 
