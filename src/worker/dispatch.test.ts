@@ -293,6 +293,32 @@ it("a FAILED reason containing 'timeout' still reaches the dead-letter path", as
   expect(updateMany.mock.calls.filter(([a]) => a.data?.status === "failed")).toHaveLength(0);
 });
 
+// F36: the reason is recorded WITHOUT settling, so a late callback still lands.
+it("a FAILED ack records the reason on the row but never changes its status", async () => {
+  agent.mockResolvedValue({ reply: "FAILED jobA runner scripts not available on host" });
+  await expect(handleReportDispatch(entry())).rejects.toThrow(AgentGaveUpError);
+  const reasonWrites = updateMany.mock.calls.filter(([a]) => typeof a.data?.error === "string");
+  expect(reasonWrites).toHaveLength(1);
+  expect(reasonWrites[0][0].where).toEqual({ id: "jobA", status: "processing", queueJobId: "pgb-1" });
+  expect(reasonWrites[0][0].data).toEqual({
+    error: "הסוכן דיווח על כשל: runner scripts not available on host",
+  });
+  // status untouched — acceptingWhere must still admit a callback that is
+  // mid-flight (F34); the DLQ grace is what eventually settles the row.
+  expect(reasonWrites[0][0].data.status).toBeUndefined();
+});
+
+// The reason write sits outside the try, so a DB failure propagates to pg-boss
+// rather than being read as our own abort and silently acked (round 1, P2).
+it("a DB failure while recording the reason propagates instead of acking the entry", async () => {
+  agent.mockResolvedValue({ reply: "FAILED jobA disk full" });
+  updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 1 });
+  const dbTimeout = new Error("Timed out fetching a connection");
+  dbTimeout.name = "TimeoutError";
+  updateMany.mockRejectedValueOnce(dbTimeout);
+  await expect(handleReportDispatch(entry())).rejects.toThrow("Timed out fetching a connection");
+});
+
 // ---- plan test 7 ----------------------------------------------------------------
 it("dispatch timeout leaves processing for the callback", async () => {
   agent.mockRejectedValue(new Error("The operation was aborted due to timeout"));
@@ -303,9 +329,10 @@ it("dispatch timeout leaves processing for the callback", async () => {
 
 // ---- plan tests 16 + 20 (F10/F16/F17) + Codex round 2 F24 ---------------------------
 it("dead-letter reconciliation marks failed only for the matching generation key, outside the callback grace", async () => {
+  updateMany.mockResolvedValueOnce({ count: 0 }); // no diagnosis on the row
   updateMany.mockResolvedValueOnce({ count: 1 });
   await handleReportDispatchDead({ jobId: "jobA", gen: GEN });
-  const cas = updateMany.mock.calls[0][0];
+  const cas = updateMany.mock.calls[1][0];
   expect(cas.where).toMatchObject({ id: "jobA", status: "processing", dispatchedAt: new Date(GEN) });
   // F24 — never-sent rows reconcile immediately; sent rows only after the grace.
   expect(cas.where.OR[0]).toEqual({ dispatchAttemptedAt: null });
@@ -313,17 +340,29 @@ it("dead-letter reconciliation marks failed only for the matching generation key
   expect(cas.data).toEqual({ status: "failed", error: "תהליך הרקע קרס או פג תוקפו לפני שהעבודה נשלחה" });
 });
 
+// ---- Codex round 3, F36 ---------------------------------------------------------
+it("dead-letter reconciliation keeps the agent's own reason instead of overwriting it", async () => {
+  updateMany.mockResolvedValueOnce({ count: 1 }); // the row already carries a diagnosis
+  await handleReportDispatchDead({ jobId: "jobA", gen: GEN });
+  const kept = updateMany.mock.calls[0][0];
+  expect(kept.where).toMatchObject({ status: "processing", error: { not: null } });
+  expect(kept.data).toEqual({ status: "failed" }); // status only — the reason survives
+  // The generic-text statement must not run at all once the reason won.
+  expect(updateMany.mock.calls.filter(([a]) => "error" in (a.data ?? {}))).toHaveLength(0);
+});
+
 it("dead-letter reconciliation no-ops when the callback moved the row out of processing", async () => {
-  updateMany.mockResolvedValueOnce({ count: 0 });
+  // Neither settle arm matches (reason-carrying, then generic) — F36.
+  updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 0 });
   findUnique.mockResolvedValue({ status: "completed", dispatchedAt: new Date(GEN) });
   await expect(handleReportDispatchDead({ jobId: "jobA", gen: GEN })).resolves.toBeUndefined();
-  expect(updateMany).toHaveBeenCalledTimes(1);
+  expect(updateMany).toHaveBeenCalledTimes(2);
 });
 
 it("dead-letter reconciliation DEFERS (throws) while a freshly-sent row is inside the callback grace", async () => {
   // The DLQ entry retries on backoff and reconciles once the grace has passed;
   // an accepted run's callback keeps its processing window (F24).
-  updateMany.mockResolvedValueOnce({ count: 0 });
+  updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 0 });
   findUnique.mockResolvedValue({ status: "processing", dispatchedAt: new Date(GEN) });
   await expect(handleReportDispatchDead({ jobId: "jobA", gen: GEN })).rejects.toThrow(
     /deferring reconciliation/,
@@ -331,9 +370,14 @@ it("dead-letter reconciliation DEFERS (throws) while a freshly-sent row is insid
 });
 
 it("dead-letter reconciliation no-ops for a processing row owned by a NEWER generation", async () => {
-  updateMany.mockResolvedValueOnce({ count: 0 });
+  // BOTH settle arms must miss (Codex round 1 on #39): mocking only the first
+  // let the second fall through to the beforeEach default of {count: 1}, so the
+  // handler exited as "reconciled" and the ownership read below never ran — the
+  // test passed even if the newer-generation no-op regressed.
+  updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 0 });
   findUnique.mockResolvedValue({ status: "processing", dispatchedAt: new Date("2026-07-30T11:00:00.000Z") });
   await expect(handleReportDispatchDead({ jobId: "jobA", gen: GEN })).resolves.toBeUndefined();
+  expect(findUnique).toHaveBeenCalledTimes(1); // the generation check is what decided it
 });
 
 

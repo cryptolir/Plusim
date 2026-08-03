@@ -207,7 +207,18 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
       </div>
 
       {error && <p className="text-sm text-red-600">{error}</p>}
-      {job.error && <p className="rounded-lg bg-red-50 p-2 text-sm text-red-700">{job.error}</p>}
+      {/* A reason on a STILL-RUNNING job is a report, not a verdict: the agent
+          said it gave up, but its callback may still land and complete the run
+          (worker/dispatch.ts F34/F36). Red would claim a failure that has not
+          happened — amber, with the wait spelled out. */}
+      {job.error &&
+        (running ? (
+          <p className="rounded-lg bg-amber-50 p-2 text-sm text-amber-800">
+            {job.error} — ממתין לאישור סופי לפני סימון ככישלון.
+          </p>
+        ) : (
+          <p className="rounded-lg bg-red-50 p-2 text-sm text-red-700">{job.error}</p>
+        ))}
 
       <div className="flex flex-wrap gap-2">
         <button

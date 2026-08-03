@@ -175,6 +175,7 @@ export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<v
   const manifestUrl = `${appBaseUrl()}/api/agent/jobs/${jobId}/manifest?t=${encodeURIComponent(token)}`;
   const message = `PLUSIM_REPORT_JOB v1\njob: ${jobId}\nmanifest: ${manifestUrl}`;
   console.log(`[worker] dispatching job=${jobId} entry=${entry.id} attempt=${entry.retryCount}`);
+  let gaveUpReason: string | null = null;
   try {
     const { reply } = await callAgent({
       // Keyed on the dispatch GENERATION, not just the job. A per-job key made
@@ -212,9 +213,7 @@ export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<v
     // DEAD_LETTER_CALLBACK_GRACE_MS — no-opping if the callback landed in the
     // meantime. Same grace path an ambiguous send already takes.
     const gaveUp = new RegExp(`^FAILED\\s+${escapeRe(jobId)}\\b[\\s:-]*([\\s\\S]*)`).exec(reply.trim());
-    if (gaveUp) {
-      throw new AgentGaveUpError((gaveUp[1].trim() || "ללא פירוט").slice(0, 500));
-    }
+    if (gaveUp) gaveUpReason = (gaveUp[1].trim() || "ללא פירוט").slice(0, 500);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (isOwnDispatchAbort(e)) {
@@ -250,6 +249,25 @@ export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<v
     }
     throw e instanceof Error ? e : new Error(msg);
   }
+
+  if (gaveUpReason !== null) {
+    // Record the diagnosis WITHOUT settling (Codex round 3, F36). Only `error`
+    // is written: `status` stays `processing`, so `acceptingWhere` still admits
+    // a late callback — which clears `error` to null when it succeeds
+    // (result/route.ts:63), so a recovered run leaves no stale reason behind.
+    // Without this the admin only ever saw the dead-letter's generic text,
+    // because the scheduled retries take the ambiguous branch above and it is
+    // THEIR error that pg-boss stores on the dead-letter entry.
+    //
+    // Deliberately OUTSIDE the try: a Prisma error here must not reach
+    // isOwnDispatchAbort, which returns successfully and lets pg-boss ack the
+    // entry with nothing settled (Codex round 1, P2 — the same shape as F33).
+    await db.reportJob.updateMany({
+      where: { id: jobId, status: "processing", queueJobId: entry.id },
+      data: { error: `הסוכן דיווח על כשל: ${gaveUpReason}` },
+    });
+    throw new AgentGaveUpError(gaveUpReason);
+  }
 }
 
 /**
@@ -274,15 +292,26 @@ export const DEAD_LETTER_CALLBACK_GRACE_MS = 10 * 60_000;
 export async function handleReportDispatchDead(payload: ReportDispatchPayload): Promise<void> {
   const gen = new Date(payload.gen);
   const graceCutoff = new Date(Date.now() - DEAD_LETTER_CALLBACK_GRACE_MS);
-  const res = await db.reportJob.updateMany({
-    where: {
-      id: payload.jobId,
-      status: "processing",
-      dispatchedAt: gen,
-      // Never-sent rows (marker null) reconcile immediately; sent rows only
-      // after the callback grace.
-      OR: [{ dispatchAttemptedAt: null }, { dispatchAttemptedAt: { lt: graceCutoff } }],
-    },
+  const settleWhere = {
+    id: payload.jobId,
+    status: "processing",
+    dispatchedAt: gen,
+    // Never-sent rows (marker null) reconcile immediately; sent rows only
+    // after the callback grace.
+    OR: [{ dispatchAttemptedAt: null }, { dispatchAttemptedAt: { lt: graceCutoff } }],
+  };
+  // A row already carrying a diagnosis — the agent's own FAILED reason, written
+  // by the dispatch handler without settling — keeps it (F36). The generic text
+  // is a fallback for rows that reached here with nothing to say (a crash before
+  // any send, an expired entry), NOT a description to overwrite a real one with:
+  // "crashed before it was sent" is actively wrong for a job the agent ran and
+  // reported on. Two statements because updateMany cannot branch per row.
+  const kept = await db.reportJob.updateMany({
+    where: { ...settleWhere, error: { not: null } },
+    data: { status: "failed" },
+  });
+  const res = kept.count === 1 ? kept : await db.reportJob.updateMany({
+    where: { ...settleWhere, error: null },
     data: { status: "failed", error: "תהליך הרקע קרס או פג תוקפו לפני שהעבודה נשלחה" },
   });
   if (res.count === 1) {
