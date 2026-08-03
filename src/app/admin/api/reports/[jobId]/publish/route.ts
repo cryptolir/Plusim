@@ -36,16 +36,13 @@ import {
   uploadXlsxAsSpreadsheet,
   updateXlsxSpreadsheet,
   trashFile,
+  sheetIdFromUrl,
 } from "@/lib/googleDrive";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const PUBLISHABLE = ["completed", "needs_review", "published"];
-
-function sheetIdFromUrl(url: string): string | null {
-  return /\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/.exec(url)?.[1] ?? null;
-}
 
 export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: string }> }) {
   const auth = await authorizeReportsRequest(req);
