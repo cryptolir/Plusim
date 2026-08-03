@@ -177,7 +177,18 @@ export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<v
   console.log(`[worker] dispatching job=${jobId} entry=${entry.id} attempt=${entry.retryCount}`);
   try {
     const { reply } = await callAgent({
-      sessionKey: `app:plusim:report-job:${jobId}`,
+      // Keyed on the dispatch GENERATION, not just the job. A per-job key made
+      // every re-run land in the same agent conversation, so the model read its
+      // own previous verdict and repeated it instead of re-examining: job
+      // cmsbmx7vo's session held two identical "FAILED — plusim-reports scripts
+      // not found" turns and answered a third dispatch the same way in 12 s with
+      // zero tool calls, hours after the scripts were verified present. A
+      // re-run's whole purpose is a clean attempt, so it gets a clean session.
+      //
+      // Retries WITHIN one generation deliberately keep sharing a session — they
+      // are the same logical attempt, and re-sending the same generation is
+      // exactly the case where prior context is legitimate.
+      sessionKey: `app:plusim:report-job:${jobId}:${entry.data.gen}`,
       message,
       timeoutMs: DISPATCH_TIMEOUT_MS,
     });

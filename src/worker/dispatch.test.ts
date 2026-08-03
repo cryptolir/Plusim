@@ -82,7 +82,37 @@ it("fresh dispatch: claim CAS on the dispatched arm only, mark, then send with t
   expect(marker.data.dispatchAttemptedAt).toBeInstanceOf(Date);
   expect(agent).toHaveBeenCalledTimes(1);
   expect(agent.mock.calls[0][0].message).toContain("t=tok-1");
-  expect(agent.mock.calls[0][0].sessionKey).toBe("app:plusim:report-job:jobA");
+  expect(agent.mock.calls[0][0].sessionKey).toBe(`app:plusim:report-job:jobA:${GEN}`);
+});
+
+// A re-run must not inherit the previous run's conversation: the model was
+// re-reading its own stale FAILED verdict and answering from it (see dispatch.ts).
+it("a later dispatch generation gets a different agent session", async () => {
+  await handleReportDispatch(entry());
+  const first = agent.mock.calls[0][0].sessionKey;
+
+  vi.clearAllMocks();
+  updateMany.mockResolvedValue({ count: 1 });
+  agent.mockResolvedValue({ reply: "ok" });
+  mint.mockReturnValue({ token: "tok-x", tokenHash: "hash-x", expiresAt: new Date() });
+  await handleReportDispatch(entry({ gen: "2026-07-30T12:00:00.000Z" }));
+
+  expect(agent.mock.calls[0][0].sessionKey).not.toBe(first);
+});
+
+// …while a retry of the SAME generation keeps its context (same logical attempt).
+it("a retry within one generation reuses the same agent session", async () => {
+  await handleReportDispatch(entry({ retryCount: 0 }));
+  const first = agent.mock.calls[0][0].sessionKey;
+
+  vi.clearAllMocks();
+  updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValue({ count: 1 });
+  findUnique.mockResolvedValue({ status: "processing", queueJobId: "pgb-1", dispatchAttemptedAt: null });
+  agent.mockResolvedValue({ reply: "ok" });
+  mint.mockReturnValue({ token: "tok-y", tokenHash: "hash-y", expiresAt: new Date() });
+  await handleReportDispatch(entry({ retryCount: 1 }));
+
+  expect(agent.mock.calls[0][0].sessionKey).toBe(first);
 });
 
 // ---- plan test 3 (invariant I2) ---------------------------------------------
