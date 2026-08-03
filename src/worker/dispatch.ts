@@ -46,6 +46,19 @@ export function isDefinitiveSendFailure(msg: string): boolean {
 }
 
 /**
+ * The agent's own give-up ack (`FAILED <jobId> <reason>`), carried as a throw so
+ * the entry reaches the dead-letter grace path. A distinct CLASS, not a message
+ * prefix: the reason is agent-supplied free text, and classifying it by text is
+ * what F33/F35 are about.
+ */
+export class AgentGaveUpError extends Error {
+  constructor(reason: string) {
+    super(`הסוכן דיווח על כשל: ${reason}`);
+    this.name = "AgentGaveUpError";
+  }
+}
+
+/**
  * OUR 300 s abort, or the AgentGlob app answering? Classify structurally, not
  * by message text: `AbortSignal.timeout` throws a DOMException named
  * TimeoutError (AbortError when aborted otherwise), while an app error is a
@@ -58,13 +71,21 @@ export function isDefinitiveSendFailure(msg: string): boolean {
  * (Codex round 9, F33). A status-prefixed message can now never reach the text
  * fallback, which is kept only for transport aborts that lost their
  * DOMException identity.
+ *
+ * `AgentGaveUpError` gets the same structural exemption: its message embeds the
+ * agent's own free-text reason, so `FAILED <job> analysis script timeout` would
+ * otherwise text-match here and reproduce F33 exactly (Codex round 2, F35).
  */
 export function isOwnDispatchAbort(e: unknown): boolean {
   const msg = e instanceof Error ? e.message : String(e);
+  if (e instanceof AgentGaveUpError) return false;
   if (/^agentglob \d{3}:/.test(msg)) return false;
   if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) return true;
   return /abort|timeout/i.test(msg);
 }
+
+/** jobId is a cuid today; escaping keeps the FAILED matcher literal regardless. */
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<void> {
   const { jobId } = entry.data;
@@ -161,7 +182,28 @@ export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<v
       timeoutMs: DISPATCH_TIMEOUT_MS,
     });
     console.log(`[worker] job=${jobId} agent replied: ${reply.slice(0, 200)}`);
-    // The callback (not this reply) is authoritative — leave `processing` alone.
+    // The callback stays authoritative — but `FAILED <jobId> <reason>` (the
+    // skill's documented give-up ack, SKILL.md "Failure handling") was
+    // previously logged and dropped, leaving the row `processing` until the
+    // ~25 h expiry sweep.
+    //
+    // Settling it HERE would be wrong (Codex round 1, F34): the skill retries a
+    // failing script before giving up, so an ambiguous finalize POST can still
+    // be committing server-side while this reply arrives. Writing `failed` would
+    // move the row out of `acceptingWhere` (result/route.ts:39) and the real
+    // result would 409 into the void, unrecoverable — the entry is acked, so
+    // neither a retry nor the DLQ can bring it back.
+    //
+    // So THROW instead: the catch below leaves the row `processing` (no
+    // `agentglob NNN:` prefix ⇒ not a definitive send failure ⇒ no status write
+    // and no marker clear), the entry exhausts to the dead-letter queue, and
+    // `handleReportDispatchDead` settles it only after
+    // DEAD_LETTER_CALLBACK_GRACE_MS — no-opping if the callback landed in the
+    // meantime. Same grace path an ambiguous send already takes.
+    const gaveUp = new RegExp(`^FAILED\\s+${escapeRe(jobId)}\\b[\\s:-]*([\\s\\S]*)`).exec(reply.trim());
+    if (gaveUp) {
+      throw new AgentGaveUpError((gaveUp[1].trim() || "ללא פירוט").slice(0, 500));
+    }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (isOwnDispatchAbort(e)) {

@@ -20,7 +20,12 @@ vi.mock("@/lib/agentRuntimeAuth", () => ({
 import { db } from "@/lib/db";
 import { callAgent } from "@/lib/agentglob";
 import { mintJobToken } from "@/lib/agentRuntimeAuth";
-import { handleReportDispatch, handleReportDispatchDead, isOwnDispatchAbort } from "./dispatch";
+import {
+  handleReportDispatch,
+  handleReportDispatchDead,
+  isOwnDispatchAbort,
+  AgentGaveUpError,
+} from "./dispatch";
 
 const updateMany = db.reportJob.updateMany as unknown as ReturnType<typeof vi.fn>;
 const findUnique = db.reportJob.findUnique as unknown as ReturnType<typeof vi.fn>;
@@ -217,6 +222,44 @@ it("AMBIGUOUS final send leaves processing (callback-eligible) and rethrows to t
   // failed here would orphan its callback (acceptingWhere needs processing).
   agent.mockRejectedValue(new Error("agentglob 502: bad gateway"));
   await expect(handleReportDispatch(entry({ retryCount: 2 }))).rejects.toThrow("agentglob 502");
+  expect(updateMany.mock.calls.filter(([a]) => a.data?.status === "failed")).toHaveLength(0);
+});
+
+// ---- agent gave up (SKILL.md "Failure handling"; Codex round 1, F34) -------------
+it("a FAILED ack routes to the DLQ grace path — never a direct settle that could 409 a live callback", async () => {
+  agent.mockResolvedValue({ reply: "FAILED jobA runner scripts not available on host" });
+  // Throws, so pg-boss never acks: the entry exhausts to the dead-letter queue,
+  // whose reconciliation applies DEAD_LETTER_CALLBACK_GRACE_MS and no-ops if the
+  // callback lands. Settling here would move the row out of `acceptingWhere`.
+  await expect(handleReportDispatch(entry())).rejects.toThrow("runner scripts not available");
+  // The row stays `processing` and the send marker stays set (no re-send).
+  expect(updateMany.mock.calls.filter(([a]) => a.data?.status === "failed")).toHaveLength(0);
+  expect(updateMany.mock.calls.filter(([a]) => a.data?.dispatchAttemptedAt === null && !a.data?.status)).toHaveLength(0);
+});
+
+it("a DONE ack, or a FAILED naming another job, leaves the row to the callback", async () => {
+  for (const reply of ["DONE jobA status=ok tx=11 uncat=0", "FAILED jobB something broke"]) {
+    vi.clearAllMocks();
+    updateMany.mockResolvedValue({ count: 1 });
+    agent.mockResolvedValue({ reply });
+    await expect(handleReportDispatch(entry())).resolves.toBeUndefined();
+    expect(updateMany.mock.calls.filter(([a]) => a.data?.status === "failed")).toHaveLength(0);
+  }
+});
+
+// F35: the reason is agent-supplied free text. A reason containing "timeout" or
+// "abort" must NOT reach isOwnDispatchAbort's text fallback — that returns
+// successfully, pg-boss acks the entry, and the row strands `processing` (F33).
+it.each(["runner scripts not available", "analysis script timeout", "parse aborted"])(
+  "a FAILED ack is never classified as an own-dispatch abort, even when the reason says %j",
+  (reason) => {
+    expect(isOwnDispatchAbort(new AgentGaveUpError(reason))).toBe(false);
+  },
+);
+
+it("a FAILED reason containing 'timeout' still reaches the dead-letter path", async () => {
+  agent.mockResolvedValue({ reply: "FAILED jobA analysis script timeout" });
+  await expect(handleReportDispatch(entry())).rejects.toThrow("analysis script timeout");
   expect(updateMany.mock.calls.filter(([a]) => a.data?.status === "failed")).toHaveLength(0);
 });
 
