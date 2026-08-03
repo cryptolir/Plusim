@@ -220,6 +220,26 @@ it("AMBIGUOUS final send leaves processing (callback-eligible) and rethrows to t
   expect(updateMany.mock.calls.filter(([a]) => a.data?.status === "failed")).toHaveLength(0);
 });
 
+// ---- agent gave up (SKILL.md "Failure handling") ---------------------------------
+it("a FAILED ack settles the row instead of leaving it processing until the sweep", async () => {
+  agent.mockResolvedValue({ reply: "FAILED jobA runner scripts not available on host" });
+  await handleReportDispatch(entry());
+  const failedWrites = updateMany.mock.calls.filter(([a]) => a.data?.status === "failed");
+  expect(failedWrites).toHaveLength(1);
+  expect(failedWrites[0][0].where).toEqual({ id: "jobA", status: "processing", queueJobId: "pgb-1" });
+  expect(failedWrites[0][0].data.error).toContain("runner scripts not available");
+});
+
+it("a DONE ack, or a FAILED naming another job, leaves the row to the callback", async () => {
+  for (const reply of ["DONE jobA status=ok tx=11 uncat=0", "FAILED jobB something broke"]) {
+    vi.clearAllMocks();
+    updateMany.mockResolvedValue({ count: 1 });
+    agent.mockResolvedValue({ reply });
+    await handleReportDispatch(entry());
+    expect(updateMany.mock.calls.filter(([a]) => a.data?.status === "failed")).toHaveLength(0);
+  }
+});
+
 // ---- plan test 7 ----------------------------------------------------------------
 it("dispatch timeout leaves processing for the callback", async () => {
   agent.mockRejectedValue(new Error("The operation was aborted due to timeout"));

@@ -161,7 +161,22 @@ export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<v
       timeoutMs: DISPATCH_TIMEOUT_MS,
     });
     console.log(`[worker] job=${jobId} agent replied: ${reply.slice(0, 200)}`);
-    // The callback (not this reply) is authoritative — leave `processing` alone.
+    // The callback (not this reply) is authoritative — EXCEPT when the agent
+    // explicitly gives up. `FAILED <jobId> <reason>` is the skill's documented
+    // failure ack (SKILL.md "Failure handling") and no callback follows it, so
+    // without this the row sat `processing` until the ~25 h expiry sweep.
+    // Scoped to `processing` + our entry, so a callback that already landed
+    // (completed/needs_review/published) wins and this no-ops.
+    const gaveUp = new RegExp(`^FAILED\\s+${jobId}\\b[\\s:-]*([\\s\\S]*)`).exec(reply.trim());
+    if (gaveUp) {
+      await db.reportJob.updateMany({
+        where: { id: jobId, status: "processing", queueJobId: entry.id },
+        data: {
+          status: "failed",
+          error: `הסוכן דיווח על כשל: ${(gaveUp[1].trim() || "ללא פירוט").slice(0, 500)}`,
+        },
+      });
+    }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (isOwnDispatchAbort(e)) {
