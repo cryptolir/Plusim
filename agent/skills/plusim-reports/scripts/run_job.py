@@ -40,7 +40,7 @@ from build_report_xlsx import build_workbook  # noqa: E402
 from parse_discount_xlsx import parse_discount_xlsx  # noqa: E402
 from parse_isracard_xlsx import parse_isracard_xlsx  # noqa: E402
 from parse_leumi_pdf import detect_leumi_pdf, parse_leumi_pdf  # noqa: E402
-from parse_max_pdf import parse_max_pdf  # noqa: E402
+from parse_max_pdf import detect_max_pdf, parse_max_pdf  # noqa: E402
 from verify_report import verify  # noqa: E402
 
 TOKEN_ENV = "PLUSIM_RUNTIME_TOKEN"
@@ -133,6 +133,16 @@ MAX_CATEGORY_MAP = {
 }
 
 
+class UnknownStatementError(Exception):
+    """A file matches no parser. Raised instead of guessing.
+
+    Every parser returns an empty transaction list on a layout it does not
+    recognize, so a wrong-parser guess reaches the app as "transactions empty"
+    with nothing pointing at the file that caused it. Naming the file here is
+    the whole difference between a riddle and a fix.
+    """
+
+
 def parse_xlsx_auto(path: str):
     """Dispatch an xlsx statement to the right parser by content.
 
@@ -149,6 +159,25 @@ def parse_xlsx_auto(path: str):
     if any("עובר ושב" in (n or "") for n in names):
         return parse_discount_xlsx(path)
     return parse_isracard_xlsx(path)
+
+
+def parse_pdf_auto(path: str, label: str, name: str):
+    """Dispatch a PDF to the parser that recognizes it, or refuse.
+
+    Both issuers are detected explicitly — there is deliberately no fallback
+    parser. MAX used to be the else-branch, so any unrecognized PDF (a bank
+    current-account export, another issuer) was parsed as a MAX statement and
+    silently produced zero rows.
+    """
+    if detect_leumi_pdf(path):
+        return parse_leumi_pdf(path, label)
+    if detect_max_pdf(path):
+        return parse_max_pdf(path, label)
+    raise UnknownStatementError(
+        f"{name}: unrecognized PDF — not a MAX or Leumi/Isracard card statement. "
+        "Bank current-account (עובר ושב) statements are supported as xlsx only; "
+        "re-export from the bank site as Excel."
+    )
 
 
 def normalize_merchant(m: str) -> str:
@@ -245,12 +274,14 @@ def cmd_prepare(args) -> None:
         if file["mime"].endswith("pdf"):
             max_seq += 1
             label = file.get("sourceLabel") or f"max-{max_seq}"
-            if detect_leumi_pdf(dest):
-                r = parse_leumi_pdf(dest, label)
-            else:
-                r = parse_max_pdf(dest, label)
+            r = parse_pdf_auto(dest, label, file["name"])
         else:
             r = parse_xlsx_auto(dest)
+        # A recognized layout that still yields nothing is not fatal (a genuinely
+        # empty billing period exists), but it must never pass silently — this is
+        # the warning that would have named the file behind "transactions empty".
+        if not r.transactions:
+            warnings.append(f"{file['name']}: parsed 0 transactions — check the file covers a billed period")
         for t in r.transactions:
             all_txns.append(
                 {

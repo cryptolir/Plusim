@@ -88,6 +88,42 @@ def _agorot(tok: tuple[str, str]) -> int:
     return -v if sign == "-" else v
 
 
+def detect_max_pdf(path: str) -> bool:
+    """Check if a PDF is a statement parse_max_pdf can actually read.
+
+    Two shapes, matching the parser's own two branches:
+      - a standard MAX "פירוט החיובים": the transaction-table column header
+        ("שם בית העסק") plus at least one known section header;
+      - a Diners one-page export: no section headers at all, dd/mm/yy dates,
+        and shekel amounts on the same lines.
+
+    Deliberately keyed on the same markers the parser branches on, so detection
+    can never pass a file the parser would then find nothing in.
+
+    This exists so run_job.py can REFUSE an unrecognized PDF instead of
+    defaulting to this parser, which silently returns zero transactions on a
+    layout it does not know (a bank current-account PDF, another issuer) — an
+    empty result the app can only report as "transactions empty".
+    """
+    try:
+        reader = PdfReader(path)
+        text = "\n".join((p.extract_text() or "") for p in reader.pages)
+    except Exception:
+        return False
+    if "שם בית העסק" in text and any(header in text for header in SECTIONS):
+        return True
+    # Diners: the parser's fallback needs a dd/mm/yy date and an amount on the
+    # same line. Require one such line, so a stray date cannot pass a non-statement.
+    if not DATE_RE.search(text):
+        for line in text.splitlines():
+            dm = SLASH_DATE_RE.search(line)
+            if dm:
+                amounts = list(AMOUNT_RE.finditer(line))
+                if amounts and amounts[-1].start() > dm.start():
+                    return True
+    return False
+
+
 def parse_max_pdf(path: str, label: str) -> ParseResult:
     reader = PdfReader(path)
     text = "\n".join((page.extract_text() or "") for page in reader.pages)
