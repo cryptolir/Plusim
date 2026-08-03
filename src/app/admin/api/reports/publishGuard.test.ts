@@ -31,13 +31,17 @@ vi.mock("@/lib/db", () => ({
     userDriveFolder: { findUnique: vi.fn() },
   },
 }));
-vi.mock("@/lib/googleDrive", () => ({
+vi.mock("@/lib/googleDrive", async () => ({
   isDriveConnected: vi.fn(),
   assertEntryUnderRoot: vi.fn(),
   assertEntryUnderFolder: vi.fn(),
   uploadXlsxAsSpreadsheet: vi.fn(),
   updateXlsxSpreadsheet: vi.fn(),
   trashFile: vi.fn(),
+  // Pure url→id parsing, and these tests assert on the ids it produces — a
+  // stub would make the superseded-sheet cases pass without exercising it.
+  sheetIdFromUrl: (await vi.importActual<typeof import("@/lib/googleDrive")>("@/lib/googleDrive"))
+    .sheetIdFromUrl,
 }));
 
 import { db } from "@/lib/db";

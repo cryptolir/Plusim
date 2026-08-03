@@ -487,6 +487,15 @@ export async function updateTextFile(entry: DriveEntry, text: string): Promise<D
   return toEntry((await res.json()) as DriveApiFile);
 }
 
+/**
+ * Drive file id of an exported report sheet, from the stored `sheetUrl`.
+ * Shared by publish (trashing a superseded sheet) and delete (trashing the
+ * sheet outright) — the sheet is a real Drive file, so nothing else removes it.
+ */
+export function sheetIdFromUrl(url: string): string | null {
+  return /\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/.exec(url)?.[1] ?? null;
+}
+
 /** Move a file to Drive trash (recoverable). */
 export async function trashFile(id: string): Promise<void> {
   const params = new URLSearchParams({ supportsAllDrives: "true" });

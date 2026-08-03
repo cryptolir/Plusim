@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeReportsRequest } from "@/lib/reportsAdminAuth";
 import { getMergedTaxonomy } from "@/lib/reportCategories";
-import { trashFile } from "@/lib/googleDrive";
+import { trashFile, sheetIdFromUrl } from "@/lib/googleDrive";
 
 export const dynamic = "force-dynamic";
 
@@ -66,6 +66,11 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
  * artifacts cascade via the schema's onDelete: Cascade). Drive trash is
  * best-effort, same as the per-file delete route — the DB row is the source
  * of truth and a Drive hiccup must not block the deletion.
+ *
+ * Both Drive objects go: the uploaded statements AND the exported sheet. The
+ * sheet is the only artifact that outlives the DB row (ReportArtifact holds
+ * the xlsx as bytes and cascades), so skipping it left the old report sitting
+ * in the client's folder to be mistaken for the new one.
  */
 export async function DELETE(req: NextRequest, ctx: { params: Promise<{ jobId: string }> }) {
   const auth = await authorizeReportsRequest(req);
@@ -74,7 +79,7 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ jobId: s
   const { jobId } = await ctx.params;
   const job = await db.reportJob.findUnique({
     where: { id: jobId },
-    select: { id: true, status: true, files: { select: { driveFileId: true } } },
+    select: { id: true, status: true, sheetUrl: true, files: { select: { driveFileId: true } } },
   });
   if (!job) return NextResponse.json({ error: "העבודה לא נמצאה" }, { status: 404 });
   if (["dispatched", "processing"].includes(job.status)) {
@@ -86,12 +91,14 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ jobId: s
 
   await db.reportJob.delete({ where: { id: jobId } });
 
-  for (const file of job.files) {
+  const sheetId = job.sheetUrl ? sheetIdFromUrl(job.sheetUrl) : null;
+  const driveIds = [...job.files.map((f) => f.driveFileId), ...(sheetId ? [sheetId] : [])];
+  for (const id of driveIds) {
     try {
-      await trashFile(file.driveFileId);
+      await trashFile(id);
     } catch (e) {
       console.warn(
-        `[admin/reports] job=${jobId} could not trash file ${file.driveFileId} on job delete: ${e instanceof Error ? e.message : String(e)}`,
+        `[admin/reports] job=${jobId} could not trash ${id} on job delete: ${e instanceof Error ? e.message : String(e)}`,
       );
     }
   }
