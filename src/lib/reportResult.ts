@@ -42,6 +42,26 @@ export interface AgentResult {
   agentNotes?: string;
 }
 
+/**
+ * Hebrew for a rejected agent result.
+ *
+ * The thrown messages are an agent-contract vocabulary — English on purpose,
+ * and they stay that way in the HTTP response and the logs. But the same text
+ * lands in `ReportJob.error`, which the job page renders verbatim to a person
+ * ("תוצאת הסוכן נדחתה: transactions empty"), so it gets translated here.
+ *
+ * Only "transactions empty" earns a real explanation: it is the one rejection
+ * an admin can act on (wrong file, unreadable scan). The rest are agent bugs —
+ * a Hebrew sentence plus the raw detail is enough to report them.
+ */
+export function rejectionHe(msg: string): string {
+  if (msg === "transactions empty") {
+    return "הסוכן לא מצא אף עסקה בקבצים. בדקו שהקבצים הם דפי חשבון של כרטיס אשראי, ושהטקסט בהם ניתן לקריאה (קובץ סרוק כתמונה לא ייקרא).";
+  }
+  if (msg.startsWith("xlsx")) return `קובץ האקסל שהסוכן יצר אינו תקין (${msg})`;
+  return `תשובת הסוכן לא עברה בדיקת תקינות (${msg})`;
+}
+
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_TXNS = 5000;

@@ -15,7 +15,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeAgentJobRequest } from "@/lib/agentRuntimeAuth";
-import { parseAgentResult, verifyAgentResult, decodeXlsx } from "@/lib/reportResult";
+import { parseAgentResult, verifyAgentResult, decodeXlsx, rejectionHe } from "@/lib/reportResult";
 import { getValidLeafSet } from "@/lib/reportCategories";
 
 export const dynamic = "force-dynamic";
@@ -128,7 +128,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     // or re-dispatched between auth and here.
     await db.reportJob.updateMany({
       where: acceptingWhere,
-      data: { status: "needs_review", error: `תוצאת הסוכן נדחתה: ${msg}`.slice(0, 500) },
+      data: { status: "needs_review", error: rejectionHe(msg).slice(0, 500) },
     });
     return NextResponse.json({ error: msg }, { status: 400 });
   }
