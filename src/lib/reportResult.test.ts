@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { parseAgentResult, verifyAgentResult, decodeXlsx, rejectionHe, type AgentResult } from "./reportResult";
+import {
+  parseAgentResult,
+  verifyAgentResult,
+  decodeXlsx,
+  rejectionHe,
+  isMinorTotalGap,
+  MINOR_GAP_FLOOR_AGOROT,
+  type AgentResult,
+} from "./reportResult";
 import { mergedLeafSet } from "@/config/reportTaxonomy";
 
 const FOOD = "מזון ומכולת";
@@ -61,12 +69,14 @@ describe("verifyAgentResult — fatal classification (fail closed)", () => {
     expect(v.uncategorizedCount).toBe(1);
   });
 
-  it("per-source total mismatch → fatal", () => {
+  it("a MATERIAL per-source total mismatch → fatal", () => {
     const r = result();
-    r.sourceTotals[0].statementTotalAgorot = 9999; // != recomputed 1579
+    r.sourceTotals[0].statementTotalAgorot = 21_579; // recomputed 1579 ⇒ gap ₪200, over the floor
     const v = verifyAgentResult(r, BASE_LEAVES);
     expect(v.fatal).toBe(true);
     expect(v.problems.join(" ")).toMatch(/הסכום המחושב .* ≠ הסכום בדף החשבון/);
+    expect(v.notes).toEqual([]);
+    expect(v.perSource[0].minorGap).toBe(false);
   });
 
   it("unknown category → fatal", () => {
@@ -188,5 +198,57 @@ describe("rejectionHe — the job page shows a person, not the agent contract", 
       expect(he).toMatch(HEBREW);
       expect(he).toContain(msg); // still debuggable
     }
+  });
+});
+
+describe("a small total gap is a note, not a publish blocker", () => {
+  // Regression: job "s1" source max-2 came back ₪87.80 short on a ₪7,365.91
+  // statement, with the CURRENT parser — so not the charge-summary bug. The old
+  // code had one list, so surfacing the gap at all meant refusing to publish an
+  // otherwise complete 46-transaction report.
+  const withGap = (statement: number) => {
+    const r = result();
+    r.sourceTotals[0].statementTotalAgorot = statement; // recomputed is 1579
+    return verifyAgentResult(r, BASE_LEAVES);
+  };
+
+  it("the s1 shape publishes, with the gap still stated", () => {
+    const v = withGap(1579 + 8780); // ₪87.80 short
+    expect(v.fatal).toBe(false);
+    expect(v.problems).toEqual([]);
+    expect(v.notes).toHaveLength(1);
+    expect(v.notes[0]).toMatch(/הפרש ₪87\.80/);
+    expect(v.notes[0]).toMatch(/אינו חוסם פרסום/);
+    expect(v.perSource[0].minorGap).toBe(true);
+    // Still not "ok" — a note is something to read, just not to block on.
+    expect(v.ok).toBe(false);
+  });
+
+  it("holds exactly at the floor and blocks one agora past it", () => {
+    expect(isMinorTotalGap(MINOR_GAP_FLOOR_AGOROT, 1579)).toBe(true);
+    expect(isMinorTotalGap(MINOR_GAP_FLOOR_AGOROT + 1, 1579)).toBe(false);
+    expect(withGap(1579 + MINOR_GAP_FLOOR_AGOROT).fatal).toBe(false);
+    expect(withGap(1579 + MINOR_GAP_FLOOR_AGOROT + 1).fatal).toBe(true);
+  });
+
+  it("scales with the statement: 2% is allowed once it exceeds the flat floor", () => {
+    // ₪50,000 statement ⇒ 2% = ₪1,000, which is what governs, not the ₪150 floor.
+    expect(isMinorTotalGap(100_000, 5_000_000)).toBe(true);
+    expect(isMinorTotalGap(100_001, 5_000_000)).toBe(false);
+    // …and the floor still governs a small statement, where 2% is pennies.
+    expect(isMinorTotalGap(14_999, 1000)).toBe(true);
+  });
+
+  it("a dropped section is exactly what must still block", () => {
+    // Half a ₪7,365.91 statement missing — the failure the check exists for.
+    expect(withGap(1579 + 368_295).fatal).toBe(true);
+  });
+
+  it("a note never masks a real integrity problem in the same result", () => {
+    const r = result({ transactions: [tx({ category: "not-a-real-leaf" })] });
+    r.sourceTotals[0].statementTotalAgorot = 1579 + 500; // minor gap alongside
+    const v = verifyAgentResult(r, BASE_LEAVES);
+    expect(v.fatal).toBe(true); // the unknown category still blocks
+    expect(v.notes).toHaveLength(1);
   });
 });
