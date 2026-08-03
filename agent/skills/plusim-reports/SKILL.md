@@ -1,6 +1,6 @@
 ---
 name: plusim-reports
-description: Process Plusim statement-categorization jobs. Triggered by chat messages starting with PLUSIM_REPORT_JOB. Fetches the job manifest from the Plusim app, parses Israeli card statements (Isracard/Leumi xlsx, MAX pdf), categorizes transactions into the household budget taxonomy, builds the month-sheet xlsx, verifies totals to the agora, and POSTs the result back to the app.
+description: Process Plusim statement-categorization jobs. Triggered by chat messages starting with PLUSIM_REPORT_JOB. Fetches the job manifest from the Plusim app, parses Israeli card statements (Isracard/Leumi xlsx, MAX pdf) and Bank Discount current-account (עובר ושב) xlsx exports, categorizes transactions into the household budget taxonomy, builds the month-sheet xlsx, verifies totals to the agora, and POSTs the result back to the app.
 homepage: https://plusim.xyz
 metadata: {"openclaw":{"emoji":"📊","requires":{"env":["PLUSIM_RUNTIME_URL","PLUSIM_RUNTIME_TOKEN"]}}}
 ---
