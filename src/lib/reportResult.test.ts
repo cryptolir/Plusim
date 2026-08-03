@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseAgentResult, verifyAgentResult, decodeXlsx, type AgentResult } from "./reportResult";
+import { parseAgentResult, verifyAgentResult, decodeXlsx, rejectionHe, type AgentResult } from "./reportResult";
 import { mergedLeafSet } from "@/config/reportTaxonomy";
 
 const FOOD = "מזון ומכולת";
@@ -170,5 +170,23 @@ describe("decodeXlsx — payload type (non-xlsx fails closed)", () => {
   it("accepts a zip-magic payload", () => {
     const zip = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0x00]).toString("base64");
     expect(decodeXlsx(zip)).toBeInstanceOf(Buffer);
+  });
+});
+
+describe("rejectionHe — the job page shows a person, not the agent contract", () => {
+  const HEBREW = /[֐-׿]/;
+
+  it("explains an empty result in terms the admin can act on", () => {
+    const he = rejectionHe("transactions empty");
+    expect(he).not.toMatch(/transactions empty/);
+    expect(he).toMatch(/כרטיס אשראי/);
+  });
+
+  it("wraps every other rejection in Hebrew, keeping the raw detail", () => {
+    for (const msg of ["txn[3] bad month", "sourceTotals[0] bad totals", "xlsx too large"]) {
+      const he = rejectionHe(msg);
+      expect(he).toMatch(HEBREW);
+      expect(he).toContain(msg); // still debuggable
+    }
   });
 });
