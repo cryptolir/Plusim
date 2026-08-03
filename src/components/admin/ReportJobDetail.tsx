@@ -33,6 +33,17 @@ export function computeRunGate(
   return { running, rerunLocked: running && !staleDispatch };
 }
 
+/**
+ * Options for a proposed mapping's category picker. The agent can propose a
+ * leaf that is no longer in the merged taxonomy (renamed, or the row predates
+ * the change); keeping it at the head means the select can never silently
+ * display a DIFFERENT category than the one the admin is about to approve.
+ * Pure for the same reason computeRunGate is — no component-test harness here.
+ */
+export function mappingOptions(proposed: string, leaves: string[]): string[] {
+  return leaves.includes(proposed) ? leaves : [proposed, ...leaves];
+}
+
 // Hebrew display labels for job.status (keys stay English — they are the status
 // enum used in logic; only the rendered badge text is translated).
 const STATUS_LABEL: Record<string, string> = {
@@ -187,6 +198,17 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
       return;
     }
     await action(`delete-file-${fileId}`, `/admin/api/reports/${jobId}/files/${fileId}`, { method: "DELETE" });
+  }
+
+  // Shared by both pickers (uncategorized rows and proposed mappings) — on
+  // success action() reloads, so the new leaf shows up in every select at once.
+  async function addCategory(name: string, section: string) {
+    const data = await action("add-category", "/admin/api/report-categories", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name, section }),
+    });
+    return data !== undefined;
   }
 
   async function assignCategory(txId: string, category: string, remember: boolean) {
@@ -359,17 +381,7 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
         <section className="rounded-xl border p-4">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <h2 className="font-medium">ללא סיווג — הקצאת קטגוריות ({uncategorized.length})</h2>
-            <AddCategoryForm
-              onAdd={async (name, section) => {
-                const data = await action("add-category", "/admin/api/report-categories", {
-                  method: "POST",
-                  headers: { "content-type": "application/json" },
-                  body: JSON.stringify({ name, section }),
-                });
-                return data !== undefined;
-              }}
-              busy={busy === "add-category"}
-            />
+            <AddCategoryForm onAdd={addCategory} busy={busy === "add-category"} />
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -394,33 +406,26 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
 
       {mappings.length > 0 && (
         <section className="rounded-xl border p-4">
-          <h2 className="mb-2 font-medium">מיפויי בתי עסק מוצעים ({mappings.length})</h2>
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <h2 className="font-medium">מיפויי בתי עסק מוצעים ({mappings.length})</h2>
+            <AddCategoryForm onAdd={addCategory} busy={busy === "add-category"} />
+          </div>
           <ul className="space-y-2 text-sm">
             {mappings.map((m) => (
-              <li key={m.id} className="flex flex-wrap items-center gap-2">
-                <span dir="auto" className="font-medium">{m.merchantPattern}</span>
-                <span className="text-muted-foreground">→</span>
-                <span dir="auto">{m.category}</span>
-                <span className="text-xs text-muted-foreground">({m.source})</span>
-                <button
-                  onClick={() =>
-                    action("mapping", `/admin/api/report-mappings/${m.id}`, {
-                      method: "PATCH",
-                      headers: { "content-type": "application/json" },
-                      body: JSON.stringify({ approved: true }),
-                    })
-                  }
-                  className="rounded border px-2 py-0.5 text-xs"
-                >
-                  אישור
-                </button>
-                <button
-                  onClick={() => action("mapping", `/admin/api/report-mappings/${m.id}`, { method: "DELETE" })}
-                  className="rounded border px-2 py-0.5 text-xs text-red-600"
-                >
-                  דחייה
-                </button>
-              </li>
+              <MappingRow
+                key={m.id}
+                mapping={m}
+                leaves={categoryLeaves}
+                busy={busy !== null}
+                onApprove={(category) =>
+                  action("mapping", `/admin/api/report-mappings/${m.id}`, {
+                    method: "PATCH",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ approved: true, category }),
+                  })
+                }
+                onReject={() => action("mapping", `/admin/api/report-mappings/${m.id}`, { method: "DELETE" })}
+              />
             ))}
           </ul>
         </section>
@@ -517,6 +522,62 @@ function AddCategoryForm({
         ביטול
       </button>
     </span>
+  );
+}
+
+/**
+ * A proposed merchant→category mapping. The category is editable in place so a
+ * near-miss proposal can be corrected and approved in one step instead of being
+ * rejected and re-entered by hand. Local state survives the 10s poll (stable
+ * key ⇒ same instance), so an in-progress pick is never clobbered by a refresh.
+ */
+function MappingRow({
+  mapping,
+  leaves,
+  busy,
+  onApprove,
+  onReject,
+}: {
+  mapping: Mapping;
+  leaves: string[];
+  busy: boolean;
+  onApprove: (category: string) => Promise<unknown>;
+  onReject: () => Promise<unknown>;
+}) {
+  const [category, setCategory] = useState(mapping.category);
+  return (
+    <li className="flex flex-wrap items-center gap-2">
+      <span dir="auto" className="font-medium">{mapping.merchantPattern}</span>
+      <span className="text-muted-foreground">→</span>
+      <select
+        value={category}
+        onChange={(e) => setCategory(e.target.value)}
+        disabled={busy}
+        className="rounded border bg-background px-1 py-0.5 disabled:opacity-50"
+        dir="rtl"
+      >
+        {mappingOptions(mapping.category, leaves).map((l) => (
+          <option key={l} value={l}>
+            {l}
+          </option>
+        ))}
+      </select>
+      <span className="text-xs text-muted-foreground">({mapping.source})</span>
+      <button
+        onClick={() => void onApprove(category)}
+        disabled={busy}
+        className="rounded border px-2 py-0.5 text-xs disabled:opacity-50"
+      >
+        אישור
+      </button>
+      <button
+        onClick={() => void onReject()}
+        disabled={busy}
+        className="rounded border px-2 py-0.5 text-xs text-red-600 disabled:opacity-50"
+      >
+        דחייה
+      </button>
+    </li>
   );
 }
 

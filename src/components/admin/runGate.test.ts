@@ -7,7 +7,7 @@
  * reopens (the worker sweep owns that recovery, not the admin button).
  */
 import { it, expect } from "vitest";
-import { computeRunGate } from "./ReportJobDetail";
+import { computeRunGate, mappingOptions } from "./ReportJobDetail";
 
 const NOW = new Date("2026-07-30T12:00:00.000Z").getTime();
 const FRESH = new Date("2026-07-30T11:59:30.000Z").toISOString(); // 30s old
@@ -33,4 +33,21 @@ it("completed/failed/published: neither running nor locked", () => {
   for (const status of ["completed", "needs_review", "failed", "published"]) {
     expect(computeRunGate(status, null, NOW)).toEqual({ running: false, rerunLocked: false });
   }
+});
+
+const LEAVES = ["דלק", "מזון", "ביטוח"];
+
+it("a proposed leaf that is in the taxonomy does not get duplicated", () => {
+  expect(mappingOptions("מזון", LEAVES)).toEqual(LEAVES);
+});
+
+// Without this the select falls back to whatever renders first, so "אישור"
+// would approve a category the admin never chose.
+it("a proposed leaf outside the taxonomy stays selectable, at the head", () => {
+  expect(mappingOptions("חניה", LEAVES)).toEqual(["חניה", ...LEAVES]);
+  expect(mappingOptions("חניה", LEAVES)[0]).toBe("חניה");
+});
+
+it("empty taxonomy still shows the proposal", () => {
+  expect(mappingOptions("חניה", [])).toEqual(["חניה"]);
 });
