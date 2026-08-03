@@ -6,6 +6,7 @@ import { REPORTS_TOKEN_SCOPE } from "@/lib/reportsAdminAuth";
 import { db } from "@/lib/db";
 import { ReportUploadForm } from "@/components/admin/ReportUploadForm";
 import { PublishRowButton } from "@/components/admin/PublishRowButton";
+import { DeleteJobButton } from "@/components/admin/DeleteJobButton";
 
 export const dynamic = "force-dynamic";
 
@@ -91,6 +92,7 @@ export default async function AdminReportsPage() {
               <th className="px-3 py-2 text-start font-medium">עסקאות</th>
               <th className="px-3 py-2 text-start font-medium">נוצר</th>
               <th className="px-3 py-2 text-start font-medium">דוח מקוון</th>
+              <th className="px-3 py-2 text-start font-medium"></th>
             </tr>
           </thead>
           <tbody>
@@ -146,11 +148,20 @@ export default async function AdminReportsPage() {
                     <span className="text-xs text-muted-foreground">טרם מוכן</span>
                   )}
                 </td>
+                <td className="px-3 py-2">
+                  {["dispatched", "processing"].includes(j.status) ? null : (
+                    <DeleteJobButton
+                      jobId={j.id}
+                      saveToken={token}
+                      label={j.title || j.id.slice(0, 10)}
+                    />
+                  )}
+                </td>
               </tr>
             ))}
             {jobs.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-3 py-6 text-center text-muted-foreground">
+                <td colSpan={8} className="px-3 py-6 text-center text-muted-foreground">
                   אין עדיין עבודות דוח — העלו דפי חשבון למעלה.
                 </td>
               </tr>
