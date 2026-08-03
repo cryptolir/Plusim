@@ -101,6 +101,28 @@ class TestSafeWorkdir(unittest.TestCase):
             with self.assertRaises(UnsafeWorkdirError):
                 safe_workdir(bad)
 
+    def test_rejects_the_mangled_name_left_under_tmp(self):
+        """The 2026-08-03 leak: junk glued onto a valid job id, still under
+        /tmp — so it passed every check above and cleanup never found it."""
+        leaked = os.path.join(SCRATCH_ROOT, "plusim-job-cmsd5wtpm0000hho83t6se3k4,timeout:180}")
+        with self.assertRaises(UnsafeWorkdirError) as ctx:
+            safe_workdir(leaked)
+        self.assertIn(",timeout:180}", str(ctx.exception))
+
+    def test_rejects_anything_not_exactly_plusim_job_dashid(self):
+        for bad in [
+            "plusim-job-",  # no id
+            "plusim-job",  # missing the dash
+            "plusim-jobs-abc123",  # wrong prefix
+            "PLUSIM-JOB-abc123",  # case
+            "plusim-job-abc 123",  # embedded space
+            "plusim-job-abc123/files",  # a subpath, not the root scratch dir
+            " plusim-job-abc123",  # leading whitespace
+            "plusim-job-abc123 ",  # trailing whitespace
+        ]:
+            with self.assertRaises(UnsafeWorkdirError):
+                safe_workdir(os.path.join(SCRATCH_ROOT, bad))
+
 
 class TestScratchRootIsPinned(unittest.TestCase):
     """Codex #42 P1: tempfile.gettempdir() honours $TMPDIR, so the model could
