@@ -133,6 +133,96 @@ MAX_CATEGORY_MAP = {
 }
 
 
+# Scratch directory containment.
+#
+# `--workdir` is supplied by the MODEL, and it has gotten this wrong: a mangled
+# argument once created a directory literally named ",timeout:300}" INSIDE the
+# skill folder, and a customer's statement PDF was downloaded into it. The agent
+# workspace is PERSISTENT, so that file outlived the job — and the mandatory
+# cleanup step never saw it, because cleanup only removes the path it is given.
+#
+# Scratch therefore has to live under /tmp: ephemeral, outside the workspace,
+# and exactly what SKILL.md already documents (/tmp/plusim-job-<jobId>).
+# Refusing anything else also protects `cleanup`, which rmtree's this path — a
+# bad value there deletes whatever it names.
+#
+# Pinned to a LITERAL /tmp, deliberately not tempfile.gettempdir(): that honours
+# $TMPDIR, so prefixing one invocation with TMPDIR=<workspace> would make the
+# persistent workspace itself the "safe" root and defeat this guard entirely.
+# It is also per-process, so `prepare` could accept a path that `cleanup` later
+# refuses — stranding exactly the PII this exists to remove (Codex #42 P1).
+SCRATCH_ROOT = os.path.realpath("/tmp")
+
+
+class UnsafeWorkdirError(Exception):
+    """--workdir outside the scratch root. Raised before anything is written."""
+
+
+def safe_workdir(raw: str) -> str:
+    # Relative paths resolve against CWD, so the SAME argument is safe or unsafe
+    # depending on where the agent happened to be invoked. Require absolute and
+    # the answer stops depending on that.
+    if not os.path.isabs(raw):
+        raise UnsafeWorkdirError(
+            f"--workdir must be an absolute path under {SCRATCH_ROOT} "
+            f"(e.g. {SCRATCH_ROOT}/plusim-job-<jobId>); a relative path resolves "
+            f"against the current directory. Got: {raw!r}"
+        )
+    wd = os.path.realpath(raw)
+    if wd == SCRATCH_ROOT or not wd.startswith(SCRATCH_ROOT + os.sep):
+        raise UnsafeWorkdirError(
+            f"--workdir must be a directory under {SCRATCH_ROOT} "
+            f"(e.g. {SCRATCH_ROOT}/plusim-job-<jobId>), never inside the agent "
+            f"workspace — statements are customer financial data and the "
+            f"workspace is persistent. Got: {raw!r}"
+        )
+    return wd
+
+
+def safe_dest(files_dir: str, name: str) -> str:
+    """Path to download one statement to, contained inside files_dir.
+
+    `name` is manifest-supplied — it is StatementFile.filename, which the app
+    stores as `f.name.slice(0, 200)` with NO path sanitising
+    (src/lib/reportStatementUpload.ts). A crafted multipart upload named
+    "../../../root/.ssh/authorized_keys" would otherwise make os.path.join
+    write outside the scratch dir, as root, on the agent host.
+
+    basename() is the containment; the realpath check is the belt.
+    """
+    base = os.path.basename(name).strip()
+    if base in ("", ".", ".."):
+        base = "statement"
+    dest = os.path.join(files_dir, base)
+    if os.path.dirname(os.path.realpath(dest)) != os.path.realpath(files_dir):
+        raise UnsafeWorkdirError(
+            f"refusing to write a statement outside the scratch dir: {name!r}"
+        )
+    return dest
+
+
+def _create_new(dest: str):
+    """Open dest for writing without ever following a symlink planted there.
+
+    O_NOFOLLOW refuses a symlink at the final component; O_EXCL refuses an
+    existing file. Any leftover (a retried `prepare`, or a planted link) is
+    unlinked first — lexists, so a dangling symlink is removed rather than
+    followed. 0600 because the content is customer financial data.
+
+    ponytail: this closes the final component only. A fully race-proof version
+    would hold an O_DIRECTORY|O_NOFOLLOW fd for the scratch dir and use openat
+    for every write (Codex #42 P2). Not done: it rewrites the whole download
+    path for a race the model can only win by deliberately backgrounding a
+    process against itself — and a model willing to do that already has
+    arbitrary exec and does not need the race. Revisit if the skill ever runs
+    somewhere /tmp is shared with untrusted processes.
+    """
+    if os.path.lexists(dest):
+        os.unlink(dest)
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    return os.fdopen(fd, "wb")
+
+
 class UnknownStatementError(Exception):
     """A file matches no parser. Raised instead of guessing.
 
@@ -213,11 +303,12 @@ def http_json(url: str, payload: dict | None = None) -> dict:
 
 def http_download(url: str, dest: str) -> None:
     if not url.startswith("http"):
-        shutil.copyfile(url, dest)
+        with open(url, "rb") as src, _create_new(dest) as f:
+            shutil.copyfileobj(src, f)
         return
     token = os.environ.get(TOKEN_ENV, "")
     req = urllib.request.Request(url, headers={"authorization": f"Bearer {token}"})
-    with urllib.request.urlopen(req, timeout=300) as res, open(dest, "wb") as f:
+    with urllib.request.urlopen(req, timeout=300) as res, _create_new(dest) as f:
         shutil.copyfileobj(res, f)
 
 
@@ -253,8 +344,13 @@ def categorize(txns: list[dict], dictionary: dict[str, str], leaves: set[str]) -
 
 
 def cmd_prepare(args) -> None:
-    wd = args.workdir
-    os.makedirs(os.path.join(wd, "files"), exist_ok=True)
+    wd = safe_workdir(args.workdir)
+    files_dir = os.path.join(wd, "files")
+    os.makedirs(files_dir, exist_ok=True)
+    # safe_workdir resolved a path; this confirms what now EXISTS there is a real
+    # directory, not a symlink swapped in between the check and the creation.
+    if os.path.islink(wd) or os.path.islink(files_dir):
+        raise UnsafeWorkdirError(f"scratch dir is a symlink, refusing to use it: {wd!r}")
 
     if args.manifest_file:
         with open(args.manifest_file, encoding="utf-8") as f:
@@ -269,7 +365,7 @@ def cmd_prepare(args) -> None:
     warnings: list[str] = []
     max_seq = 0
     for file in manifest["files"]:
-        dest = os.path.join(wd, "files", file["name"])
+        dest = safe_dest(files_dir, file["name"])
         http_download(file.get("url") or file["path"], dest)
         if file["mime"].endswith("pdf"):
             max_seq += 1
@@ -339,7 +435,7 @@ def cmd_prepare(args) -> None:
 
 
 def cmd_finalize(args) -> None:
-    wd = args.workdir
+    wd = safe_workdir(args.workdir)
     with open(os.path.join(wd, "state.json"), encoding="utf-8") as f:
         state = json.load(f)
     with open(os.path.join(wd, "manifest.json"), encoding="utf-8") as f:
@@ -433,8 +529,9 @@ def cmd_finalize(args) -> None:
 
 
 def cmd_cleanup(args) -> None:
-    shutil.rmtree(args.workdir, ignore_errors=True)
-    print(json.dumps({"phase": "cleanup", "removed": args.workdir}))
+    wd = safe_workdir(args.workdir)
+    shutil.rmtree(wd, ignore_errors=True)
+    print(json.dumps({"phase": "cleanup", "removed": wd}))
 
 
 def main() -> None:

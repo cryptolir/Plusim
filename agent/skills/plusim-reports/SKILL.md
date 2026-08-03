@@ -31,7 +31,13 @@ python3 -m pip install --target {baseDir}/vendor openpyxl pypdf
 
 ## Pipeline
 
-1. **Prepare.** Pick a scratch dir, e.g. `WD=/tmp/plusim-job-<jobId>`:
+1. **Prepare.** Pick a scratch dir. It **must** be an absolute path under
+   `/tmp` — always `WD=/tmp/plusim-job-<jobId>`. The scripts refuse anything
+   else, because statements are customer financial data and the workspace is
+   persistent: a scratch dir inside it leaves the PDFs behind after cleanup.
+   Pass `--workdir` as its own argument and never let shell/JSON punctuation
+   glue onto it (a mangled value once created a directory named
+   `,timeout:300}` in the skill folder and leaked a statement into it):
 
    ```
    python3 {baseDir}/scripts/run_job.py prepare --manifest-url '<manifest url>' --workdir $WD
@@ -97,5 +103,9 @@ python3 -m pip install --target {baseDir}/vendor openpyxl pypdf
 
 - Any script error: retry once; if it persists, reply
   `FAILED <jobId> <one-line reason>` and still run cleanup.
+- **Rejected `--workdir`** (`UnsafeWorkdirError`): do NOT retry with a different
+  directory or work around it. Re-run the SAME command with
+  `--workdir /tmp/plusim-job-<jobId>`; the guard exists because scratch outside
+  `/tmp` leaves customer statements in the persistent workspace.
 - Do not write anything about a job to memory or to per-user files — job
   sessions are isolated and stateless by design.
