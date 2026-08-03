@@ -1,8 +1,9 @@
-/** Reports admin API — job detail (files, verification, transactions, pending mappings). */
+/** Reports admin API — job detail (files, verification, transactions, pending mappings) + delete. */
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeReportsRequest } from "@/lib/reportsAdminAuth";
 import { getMergedTaxonomy } from "@/lib/reportCategories";
+import { trashFile } from "@/lib/googleDrive";
 
 export const dynamic = "force-dynamic";
 
@@ -58,4 +59,43 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
   const categoryLeaves = (await getMergedTaxonomy()).flatMap((s) => s.leaves);
 
   return NextResponse.json({ job, pendingMappings, categoryLeaves });
+}
+
+/**
+ * Delete an entire report and everything under it (files, transactions,
+ * artifacts cascade via the schema's onDelete: Cascade). Drive trash is
+ * best-effort, same as the per-file delete route — the DB row is the source
+ * of truth and a Drive hiccup must not block the deletion.
+ */
+export async function DELETE(req: NextRequest, ctx: { params: Promise<{ jobId: string }> }) {
+  const auth = await authorizeReportsRequest(req);
+  if (auth instanceof NextResponse) return auth;
+
+  const { jobId } = await ctx.params;
+  const job = await db.reportJob.findUnique({
+    where: { id: jobId },
+    select: { id: true, status: true, files: { select: { driveFileId: true } } },
+  });
+  if (!job) return NextResponse.json({ error: "העבודה לא נמצאה" }, { status: 404 });
+  if (["dispatched", "processing"].includes(job.status)) {
+    return NextResponse.json(
+      { error: "הסוכן עובד על העבודה הזו — יש להמתין לסיום לפני מחיקה" },
+      { status: 409 },
+    );
+  }
+
+  await db.reportJob.delete({ where: { id: jobId } });
+
+  for (const file of job.files) {
+    try {
+      await trashFile(file.driveFileId);
+    } catch (e) {
+      console.warn(
+        `[admin/reports] job=${jobId} could not trash file ${file.driveFileId} on job delete: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
+  console.log(`[admin/reports] job=${jobId} deleted by=${auth.actor}`);
+  return NextResponse.json({ ok: true });
 }
