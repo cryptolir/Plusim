@@ -154,21 +154,84 @@ export function parseAgentResult(body: unknown, validLeaves: Set<string>): Agent
   };
 }
 
+/**
+ * Whether a per-source total gap is small enough to be a note rather than a
+ * publish blocker. THREE conditions, all of which must hold — the waiver is
+ * deliberately hard to earn, because everything it lets through is a report
+ * published with numbers that do not reconcile.
+ *
+ *  1. SHORTFALL ONLY. Only `recomputed < statement` qualifies. The artifact this
+ *     exists for is missing rows (trailing summary lines the statement's own
+ *     total counts and the row parse does not), which can only ever undercount.
+ *     An OVER-count means a row exists that the statement does not justify — a
+ *     misparse or a spurious row with a unique dedupKey, which no other check
+ *     catches — and publishing inflated expenses is worse than blocking
+ *     (Codex #41 P2).
+ *  2. ABSOLUTE CAP. At most MINOR_GAP_CAP_AGOROT, full stop.
+ *  3. PROPORTION CAP. AND at most MINOR_GAP_MAX_SHARE of the statement.
+ *
+ * (2) and (3) are an AND, not the `max()` this shipped with first. `max()` took
+ * the more PERMISSIVE of the two, which admitted precisely the failures the
+ * reconciliation gate exists to catch (Codex #41 P1): a ₪1,000 row dropped from
+ * a ₪50,000 statement is 2%, and a source totalling ≤ ₪150 that lost EVERY row
+ * has a gap equal to its whole total yet still sat under the flat floor. Under
+ * the AND both are fatal — 100% of a source can never be under 2% of it.
+ *
+ * Calibrated on job "s1" source max-2: ₪87.80 short on ₪7,365.91 (1.2%),
+ * reproduced with the CURRENT parser, so not the charge-summary bug #38 fixed.
+ * On that statement the proportion cap binds first (₪147.31), not the flat one.
+ */
+export const MINOR_GAP_CAP_AGOROT = 15_000; // ₪150 — absolute ceiling
+export const MINOR_GAP_MAX_SHARE = 0.02; // AND at most 2% of the statement
+
+export function isMinorTotalGap(
+  recomputedAgorot: number,
+  statementTotalAgorot: number | null,
+): boolean {
+  // No statement total ⇒ nothing to reconcile against, so nothing to waive.
+  // A non-positive total is outside the calibrated shape; fail closed.
+  if (statementTotalAgorot === null || statementTotalAgorot <= 0) return false;
+  const shortfall = statementTotalAgorot - recomputedAgorot;
+  if (shortfall <= 0) return false; // (1) over-count is never minor
+  return (
+    shortfall <= MINOR_GAP_CAP_AGOROT && // (2)
+    shortfall <= statementTotalAgorot * MINOR_GAP_MAX_SHARE // (3)
+  );
+}
+
+/** Agorot → "₪1,234.56". Shared so a note and the UI never disagree on format. */
+export function shekel(agorot: number): string {
+  return `₪${(agorot / 100).toLocaleString("he-IL", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
 export interface VerificationOutcome {
   ok: boolean;
   /**
-   * True when any integrity check failed (per-source total mismatch, unknown
-   * category, date-outside-month, duplicate dedupKey, orphan source). These are
-   * FATAL — distinct from a job that merely has uncategorized rows awaiting
-   * admin categorization (non-fatal). The publish route refuses fatal jobs.
+   * True when any integrity check failed (a MATERIAL per-source total mismatch,
+   * unknown category, date-outside-month, duplicate dedupKey, orphan source).
+   * These are FATAL — distinct from a job that merely has uncategorized rows
+   * awaiting admin categorization (non-fatal). The publish route refuses fatal
+   * jobs.
    */
   fatal: boolean;
   problems: string[];
+  /**
+   * Findings worth showing but not worth blocking on — today, a total gap under
+   * isMinorTotalGap(). Kept separate from `problems` precisely so "visible" and
+   * "blocking" stop being the same decision: the old code had only one list, so
+   * surfacing a small gap at all meant refusing to publish the report.
+   */
+  notes: string[];
   perSource: {
     label: string;
     statementTotalAgorot: number | null;
     recomputedTotalAgorot: number;
     match: boolean;
+    /** Mismatched, but within isMinorTotalGap — shown as a note, not a blocker. */
+    minorGap?: boolean;
   }[];
   txCount: number;
   uncategorizedCount: number;
@@ -178,6 +241,7 @@ export interface VerificationOutcome {
 /** Independently verify the parsed result. Never trusts the agent's own sums. */
 export function verifyAgentResult(result: AgentResult, validLeaves: Set<string>): VerificationOutcome {
   const problems: string[] = [];
+  const notes: string[] = [];
 
   // Category validity (structural pass already ensured presence).
   for (const t of result.transactions) {
@@ -205,16 +269,33 @@ export function verifyAgentResult(result: AgentResult, validLeaves: Set<string>)
   const perSource = result.sourceTotals.map((s) => {
     const recomputed = bySource.get(s.label) ?? 0;
     const match = s.statementTotalAgorot === null ? true : recomputed === s.statementTotalAgorot;
+    let minorGap = false;
     if (!match) {
-      problems.push(
-        `מקור "${s.label}": הסכום המחושב ${recomputed} ≠ הסכום בדף החשבון ${s.statementTotalAgorot} אגורות`,
-      );
+      const gap = Math.abs(recomputed - (s.statementTotalAgorot ?? 0));
+      const line =
+        `מקור "${s.label}": הסכום המחושב ${shekel(recomputed)} ≠ הסכום בדף החשבון ` +
+        `${shekel(s.statementTotalAgorot ?? 0)} (הפרש ${shekel(gap)})`;
+      // A small gap is a known reconciliation artifact — trailing summary lines
+      // some statements print after the last transaction, which the statement's
+      // own total counts and the row parse does not. It stays VISIBLE as a note
+      // but must not block a report that is otherwise complete.
+      //
+      // A large gap is the shape of a real parse failure (a dropped section, a
+      // layout change), where publishing would ship a materially wrong report.
+      // That still blocks, so the check keeps the job it exists to do.
+      minorGap = isMinorTotalGap(recomputed, s.statementTotalAgorot);
+      if (minorGap) {
+        notes.push(`${line} — פער קטן, כנראה שורות סיכום בסוף דף החשבון; אינו חוסם פרסום`);
+      } else {
+        problems.push(line);
+      }
     }
     return {
       label: s.label,
       statementTotalAgorot: s.statementTotalAgorot,
       recomputedTotalAgorot: recomputed,
       match,
+      minorGap,
     };
   });
   // A source present in transactions but missing from sourceTotals is suspicious.
@@ -232,9 +313,12 @@ export function verifyAgentResult(result: AgentResult, validLeaves: Set<string>)
   }
 
   return {
-    ok: problems.length === 0,
+    // `ok` stays "nothing at all to report" — a note is still something the
+    // admin should read, even though it does not block.
+    ok: problems.length === 0 && notes.length === 0,
     fatal: problems.length > 0,
     problems,
+    notes,
     perSource,
     txCount: result.transactions.length,
     uncategorizedCount: result.transactions.filter((t) => t.uncategorized).length,

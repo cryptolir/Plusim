@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { parseAgentResult, verifyAgentResult, decodeXlsx, rejectionHe, type AgentResult } from "./reportResult";
+import {
+  parseAgentResult,
+  verifyAgentResult,
+  decodeXlsx,
+  rejectionHe,
+  isMinorTotalGap,
+  MINOR_GAP_CAP_AGOROT,
+  type AgentResult,
+} from "./reportResult";
 import { mergedLeafSet } from "@/config/reportTaxonomy";
 
 const FOOD = "מזון ומכולת";
@@ -61,12 +69,14 @@ describe("verifyAgentResult — fatal classification (fail closed)", () => {
     expect(v.uncategorizedCount).toBe(1);
   });
 
-  it("per-source total mismatch → fatal", () => {
+  it("a MATERIAL per-source total mismatch → fatal", () => {
     const r = result();
-    r.sourceTotals[0].statementTotalAgorot = 9999; // != recomputed 1579
+    r.sourceTotals[0].statementTotalAgorot = 21_579; // recomputed 1579 ⇒ gap ₪200, over the floor
     const v = verifyAgentResult(r, BASE_LEAVES);
     expect(v.fatal).toBe(true);
     expect(v.problems.join(" ")).toMatch(/הסכום המחושב .* ≠ הסכום בדף החשבון/);
+    expect(v.notes).toEqual([]);
+    expect(v.perSource[0].minorGap).toBe(false);
   });
 
   it("unknown category → fatal", () => {
@@ -188,5 +198,91 @@ describe("rejectionHe — the job page shows a person, not the agent contract", 
       expect(he).toMatch(HEBREW);
       expect(he).toContain(msg); // still debuggable
     }
+  });
+});
+
+describe("a small total gap is a note, not a publish blocker", () => {
+  // Regression: job "s1" source max-2 came back ₪87.80 short on a ₪7,365.91
+  // statement, with the CURRENT parser — so not the charge-summary bug. The old
+  // code had one list, so surfacing the gap at all meant refusing to publish an
+  // otherwise complete 46-transaction report.
+  //
+  // Every "still fatal" case below is a Codex finding on the FIRST version of
+  // this change, which used max(flat, share) — the more PERMISSIVE of the two
+  // limits — and waived all three.
+  // Both sides matter: the proportion cap is relative to the statement, so a
+  // fixture must model the REAL ratio. (First version of this test set
+  // recomputed to ₪15.79, which made an ₪87.80 gap 85% of the statement —
+  // correctly fatal, and nothing like s1.)
+  const withTotals = (recomputedAgorot: number, statementAgorot: number) => {
+    const r = result({ transactions: [tx({ amountAgorot: recomputedAgorot })] });
+    r.sourceTotals[0].statementTotalAgorot = statementAgorot;
+    return verifyAgentResult(r, BASE_LEAVES);
+  };
+  // s1 as it actually came back: ₪7,278.11 recomputed vs ₪7,365.91 stated.
+  const S1_RECOMPUTED = 727_811;
+  const S1_STATEMENT = 736_591;
+
+  it("the s1 shape publishes, with the gap still stated", () => {
+    const v = withTotals(S1_RECOMPUTED, S1_STATEMENT); // ₪87.80 short
+    expect(v.fatal).toBe(false);
+    expect(v.problems).toEqual([]);
+    expect(v.notes).toHaveLength(1);
+    expect(v.notes[0]).toMatch(/הפרש ₪87\.80/);
+    expect(v.notes[0]).toMatch(/אינו חוסם פרסום/);
+    expect(v.perSource[0].minorGap).toBe(true);
+    // Still not "ok" — a note is something to read, just not to block on.
+    expect(v.ok).toBe(false);
+  });
+
+  it("CODEX P1: a ₪1,000 row dropped from a ₪50,000 statement still BLOCKS", () => {
+    // 2% of ₪50,000 is ₪1,000, so the share alone would have waived it.
+    // The absolute cap is what refuses it.
+    expect(isMinorTotalGap(4_900_000, 5_000_000)).toBe(false);
+    expect(withTotals(4_900_000, 5_000_000).fatal).toBe(true);
+  });
+
+  it("CODEX P1: a source that lost EVERY transaction still BLOCKS", () => {
+    // A ₪150 source recomputing to 0 has a gap equal to its whole total, which
+    // sat exactly on the old flat floor. 100% of a source can never be ≤ 2%.
+    expect(isMinorTotalGap(0, MINOR_GAP_CAP_AGOROT)).toBe(false);
+    expect(isMinorTotalGap(0, 500)).toBe(false); // tiny source, same reasoning
+    expect(isMinorTotalGap(0, 5_000_000)).toBe(false);
+  });
+
+  it("CODEX P2: an OVER-count is never minor, however small", () => {
+    // A spurious row with a unique dedupKey inflates the total; no other check
+    // catches it, and publishing inflated expenses is worse than blocking.
+    expect(isMinorTotalGap(1579 + 100, 1579)).toBe(false);
+    expect(isMinorTotalGap(736_591 + 8_780, 736_591)).toBe(false);
+    const v = withTotals(S1_RECOMPUTED, S1_RECOMPUTED - 100); // statement BELOW recomputed
+    expect(v.fatal).toBe(true);
+    expect(v.notes).toEqual([]);
+    expect(v.perSource[0].minorGap).toBe(false);
+  });
+
+  it("both caps bind — whichever is tighter wins", () => {
+    // On s1's ₪7,365.91 statement the PROPORTION binds first: 2% = ₪147.31,
+    // below the ₪150 absolute cap.
+    expect(isMinorTotalGap(736_591 - 14_731, 736_591)).toBe(true);
+    expect(isMinorTotalGap(736_591 - 14_732, 736_591)).toBe(false);
+    // On a ₪1,000,000 statement the ABSOLUTE cap binds first: 2% would be
+    // ₪20,000, which must never be waived.
+    expect(isMinorTotalGap(100_000_000 - MINOR_GAP_CAP_AGOROT, 100_000_000)).toBe(true);
+    expect(isMinorTotalGap(100_000_000 - MINOR_GAP_CAP_AGOROT - 1, 100_000_000)).toBe(false);
+  });
+
+  it("fails closed with no usable statement total", () => {
+    expect(isMinorTotalGap(1000, null)).toBe(false);
+    expect(isMinorTotalGap(1000, 0)).toBe(false);
+    expect(isMinorTotalGap(-1000, -2000)).toBe(false); // negative total, uncalibrated
+  });
+
+  it("a note never masks a real integrity problem in the same result", () => {
+    const r = result({ transactions: [tx({ category: "not-a-real-leaf" })] });
+    r.sourceTotals[0].statementTotalAgorot = 1579 + 20; // ₪0.20 short of ₪15.99 = 1.25%, a minor gap
+    const v = verifyAgentResult(r, BASE_LEAVES);
+    expect(v.fatal).toBe(true); // the unknown category still blocks
+    expect(v.notes).toHaveLength(1);
   });
 });

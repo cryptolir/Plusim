@@ -69,7 +69,14 @@ interface JobDetail {
   sheetUrl: string | null;
   verification: {
     problems?: string[];
-    perSource?: { label: string; statementTotalAgorot: number | null; recomputedTotalAgorot: number; match: boolean }[];
+    notes?: string[];
+    perSource?: {
+      label: string;
+      statementTotalAgorot: number | null;
+      recomputedTotalAgorot: number;
+      match: boolean;
+      minorGap?: boolean;
+    }[];
     txCount?: number;
     uncategorizedCount?: number;
     agentNotes?: string | null;
@@ -318,7 +325,11 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
                     <td className="py-1 pr-3" dir="auto">{s.label}</td>
                     <td className="py-1 pr-3">{s.statementTotalAgorot === null ? "—" : shekel(s.statementTotalAgorot)}</td>
                     <td className="py-1 pr-3">{shekel(s.recomputedTotalAgorot)}</td>
-                    <td className="py-1">{s.match ? "✓" : "✗"}</td>
+                    {/* ≈ for a gap small enough to be a note: a bare ✗ next to an
+                        enabled publish button reads as "blocked" and is not. */}
+                    <td className="py-1" title={s.match ? undefined : s.minorGap ? "פער קטן — אינו חוסם פרסום" : "פער מהותי — חוסם פרסום"}>
+                      {s.match ? "✓" : s.minorGap ? "≈" : "✗"}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -328,6 +339,15 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
             <ul className="mt-2 list-disc pl-5 text-sm text-orange-700">
               {v.problems.map((p, i) => (
                 <li key={i}>{p}</li>
+              ))}
+            </ul>
+          )}
+          {/* Notes read as informational, not as a refusal — a blocking orange
+              bullet next to an enabled publish button would contradict itself. */}
+          {v.notes && v.notes.length > 0 && (
+            <ul className="mt-2 list-disc pl-5 text-sm text-muted-foreground">
+              {v.notes.map((n, i) => (
+                <li key={i} dir="auto">{n}</li>
               ))}
             </ul>
           )}
