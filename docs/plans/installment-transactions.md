@@ -1,6 +1,6 @@
 # Plusim — Installment transactions (תשלומים / קרדיט): correct month, visible badge, editable date
 
-> **Status:** Draft — **Rev 2** (Codex round-1 folded: 4×P1). Nothing implemented yet.
+> **Status:** Draft — **Rev 3** (Codex rounds 1–2 folded). Nothing implemented yet.
 >
 > **Review log:**
 > - Rev 1 — authored from a file-anchored read plus a fresh parse of the real statement with the
@@ -16,6 +16,16 @@
 >   delete+recreate → route-level 409 while the agent is running + UI disable; this also closes the
 >   **pre-existing** identical race on category assignment (§2.3).
 >   **P1-d** the client guide update is mandatory under AGENTS.md rule 4, not discretionary (§2.4).
+> - Rev 3 — folds Codex round 2 (both accepted; both are refinements of Rev 2's own folds):
+>   **P1-e** the charge-date scan was unbounded — with a missing block date it could mistake the
+>   NEXT transaction's deal date for the charge date and substitute a wrong date *without* the
+>   `undatedInstallment` flag, silently defeating P1-b. The scan is now bounded to the block: the
+>   date must sit between the `סה"כ` label and the block's own total amount (§2.2.1).
+>   **P1-f** the running-state edit guard was check-then-write (TOCTOU): a re-run CASing the job to
+>   `dispatched` between the check and the write still lost the edit. The WRITE itself is now
+>   conditional on the job's status — the same `updateMany` + count CAS the result route uses
+>   (§2.3). (Round 2's third inline comment is round 1's P1-c re-anchored by GitHub — same body,
+>   same timestamp — already folded in Rev 2 and superseded by P1-f.)
 >
 > **Process** (self-contained — canonical protocol in `docs/PLAN_REVIEW_PROTOCOL.md`): plan PR →
 > adversarial Codex review → each round becomes a new Rev with resolution notes (never silently
@@ -147,14 +157,19 @@ parser's prefix survives and the regex keeps matching (Ask 1 covers the residual
 
 ### 2.2 Parser: substitute the statement charge date (parse_leumi_pdf.py only)
 
-1. **Per-block charge dates (Rev 2 — Codex P1-a).** A `לתאריך חיוב סה"כ` block closes the run of
-   rows above it (the domestic walker already treats blocks as subtotal boundaries, `:259-266`).
-   Extend the block read to also capture the **first `DATE_RE` line after the `סה"כ` line** (it
-   precedes the amount), and associate each parsed row with **the block that closes it** — never a
-   single statement-wide date. On a statement with an early-repayment subtotal (charge date D1)
-   followed by the regular cycle (D2), installment rows above the first block get D1 and rows
-   between the blocks get D2. The single-block case (the fixture: one block, `15/05/26`)
-   degenerates to the same behavior Rev 1 described.
+1. **Per-block charge dates, bounded to the block (Rev 2 — Codex P1-a; Rev 3 — Codex P1-e).** A
+   `לתאריך חיוב סה"כ` block closes the run of rows above it (the domestic walker already treats
+   blocks as subtotal boundaries, `:259-266`). The block's layout is `סה"כ`-label → date line →
+   total-amount line, so the charge date is the `DATE_RE` line **between the label and the block's
+   own total amount — and nowhere past it**. An unbounded "first date after the label" scan would,
+   when the block's date is missing or truncated, walk into the NEXT transaction's deal date and
+   substitute a wrong date **without** raising the `undatedInstallment` flag — silently defeating
+   step 3's fail-closed guarantee. No date inside the bounded window ⇒ the block has no charge
+   date ⇒ its rows take the step-3 path. Each parsed row associates with **the block that closes
+   it** — never a single statement-wide date: on a statement with an early-repayment subtotal
+   (charge date D1) followed by the regular cycle (D2), installment rows above the first block get
+   D1 and rows between the blocks get D2. The single-block case (the fixture: one block,
+   `15/05/26`) degenerates to the same behavior Rev 1 described.
 2. Substitution runs per section **before Phase 4 assigns dedup keys**: for every row whose `note`
    matches the installment pattern (same pattern as §2.1, Python side):
    - keep the original date in the note: `note = f"{note} · עסקה מקורית: {orig_date}"`;
@@ -180,13 +195,21 @@ untouched, so per-source totals still reconcile to the agora.
 
 Widen `transactions/[txId]/route.ts` — same auth gate, no new surface:
 
-- **No edits while the agent is running (Rev 2 — Codex P1-c).** The route rejects (409, Hebrew
-  message) when the job's status is `dispatched` or `processing`: the result callback
-  delete+recreates every transaction row (`result/route.ts:73-88`), so an edit accepted mid-run
-  returns success and then silently vanishes. This guard covers **category assignment too — the
-  identical race exists today** and this closes it at the shared route (root cause, not the new
-  path only). UI: the date input and the assign controls disable under the existing `running` flag
-  (`computeRunGate`), matching how upload/delete already hide mid-run.
+- **No edits while the agent is running — enforced by the write itself (Rev 2 — Codex P1-c;
+  Rev 3 — Codex P1-f).** The result callback delete+recreates every transaction row
+  (`result/route.ts:73-88`), so an edit accepted mid-run returns success and then silently
+  vanishes. A check-then-write guard still loses the race when the run route CASes the job to
+  `dispatched` between the check and the write — so the guard is the WRITE: one conditional
+  `updateMany` whose `where` joins the parent job's status,
+  `{ id: txId, jobId, job: { status: { notIn: ["dispatched", "processing"] } } }` — one SQL
+  statement, the same count-CAS pattern the result route itself uses (`result/route.ts:58-71`).
+  `count === 0` ⇒ re-read the row to disambiguate: missing ⇒ 404, running ⇒ 409 with a Hebrew
+  message (the read is for the error text only; the write already refused atomically). The
+  `rememberMerchant` upsert runs only after a successful count. This guard covers **category
+  assignment too — the identical race exists today** and this closes it at the shared route (root
+  cause, not the new path only). UI: the date input and the assign controls disable under the
+  existing `running` flag (`computeRunGate`), matching how upload/delete already hide mid-run —
+  display hygiene; the conditional write is the guarantee.
 - Body becomes `{category?, rememberMerchant?, date?}`; **at least one of `category`/`date`
   required** (else 400).
 - `category`, when present: exactly today's behavior (validate against merged leaf set, set
@@ -223,8 +246,9 @@ page's ללא-סיווג rows gain a visible badge, so the client guide document
    (Rev 2). A block that closes rows governs exactly those rows.
 6. **No charge date ⇒ no substitution AND no publication** (Rev 2): the flagged rows make
    verification FATAL. Never a guessed or invented date, never a silent wrong-month publish.
-7. **No transaction edit lands while the agent is running** (Rev 2): the route 409s for
-   `dispatched`/`processing` — for date AND category alike.
+7. **No transaction edit lands while the agent is running** (Rev 2; atomic per Rev 3): the WRITE
+   is conditional on the parent job's status — for date AND category alike. There is no
+   check-then-write window.
 8. **The badge is display-only.** No logic (verification, bucketing, export) branches on
    `installmentInfo` — it reads the same `note` everything already stores. (`undatedInstallment`
    is a separate, transient integrity flag — it never renders and is never stored.)
@@ -241,6 +265,9 @@ git):
   early-repayment subtotal get D1 and D2 respectively, never one global date)
 - `undated_installment_rows_are_flagged_not_guessed` (Rev 2 — no block date ⇒ `undatedInstallment`
   on exactly the matching rows, dates untouched)
+- `missing_block_date_never_steals_the_next_rows_deal_date` (Rev 3 — a dated transaction sitting
+  right after a date-less total block must NOT be read as the charge date; the block's rows get
+  flagged instead)
 - `same_merchant_same_amount_installments_stay_distinct_after_substitution` (dedup)
 - `substitution_changes_no_amount_and_no_total` (sum before == sum after)
 
@@ -268,6 +295,9 @@ Route (`transactions PATCH` tests, mocked db — same style as `deleteJob.test.t
 - `body_with_neither_field_400s`
 - `edits_rejected_while_agent_is_running` (Rev 2 — 409 for `dispatched` AND `processing`, for a
   date-only edit AND a category-only edit; the rerun/edit race test Codex asked for)
+- `edit_write_is_conditional_on_job_not_running` (Rev 3 — the check/run interleaving: the
+  conditional `updateMany` returns count 0 even though a pre-read saw `completed` ⇒ 409, no
+  mapping upsert, nothing written)
 
 ## 5. Deliberately NOT building
 
