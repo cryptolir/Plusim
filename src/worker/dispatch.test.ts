@@ -220,14 +220,16 @@ it("AMBIGUOUS final send leaves processing (callback-eligible) and rethrows to t
   expect(updateMany.mock.calls.filter(([a]) => a.data?.status === "failed")).toHaveLength(0);
 });
 
-// ---- agent gave up (SKILL.md "Failure handling") ---------------------------------
-it("a FAILED ack settles the row instead of leaving it processing until the sweep", async () => {
+// ---- agent gave up (SKILL.md "Failure handling"; Codex round 1, F34) -------------
+it("a FAILED ack routes to the DLQ grace path — never a direct settle that could 409 a live callback", async () => {
   agent.mockResolvedValue({ reply: "FAILED jobA runner scripts not available on host" });
-  await handleReportDispatch(entry());
-  const failedWrites = updateMany.mock.calls.filter(([a]) => a.data?.status === "failed");
-  expect(failedWrites).toHaveLength(1);
-  expect(failedWrites[0][0].where).toEqual({ id: "jobA", status: "processing", queueJobId: "pgb-1" });
-  expect(failedWrites[0][0].data.error).toContain("runner scripts not available");
+  // Throws, so pg-boss never acks: the entry exhausts to the dead-letter queue,
+  // whose reconciliation applies DEAD_LETTER_CALLBACK_GRACE_MS and no-ops if the
+  // callback lands. Settling here would move the row out of `acceptingWhere`.
+  await expect(handleReportDispatch(entry())).rejects.toThrow("runner scripts not available");
+  // The row stays `processing` and the send marker stays set (no re-send).
+  expect(updateMany.mock.calls.filter(([a]) => a.data?.status === "failed")).toHaveLength(0);
+  expect(updateMany.mock.calls.filter(([a]) => a.data?.dispatchAttemptedAt === null && !a.data?.status)).toHaveLength(0);
 });
 
 it("a DONE ack, or a FAILED naming another job, leaves the row to the callback", async () => {
@@ -235,9 +237,15 @@ it("a DONE ack, or a FAILED naming another job, leaves the row to the callback",
     vi.clearAllMocks();
     updateMany.mockResolvedValue({ count: 1 });
     agent.mockResolvedValue({ reply });
-    await handleReportDispatch(entry());
+    await expect(handleReportDispatch(entry())).resolves.toBeUndefined();
     expect(updateMany.mock.calls.filter(([a]) => a.data?.status === "failed")).toHaveLength(0);
   }
+});
+
+// P2: the FAILED throw must not be mistaken for our own 300 s abort, which
+// returns successfully and lets pg-boss ack the entry (F33 classification).
+it("a FAILED ack is never classified as an own-dispatch abort", () => {
+  expect(isOwnDispatchAbort(new Error("הסוכן דיווח על כשל: runner scripts not available"))).toBe(false);
 });
 
 // ---- plan test 7 ----------------------------------------------------------------

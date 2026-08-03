@@ -66,6 +66,9 @@ export function isOwnDispatchAbort(e: unknown): boolean {
   return /abort|timeout/i.test(msg);
 }
 
+/** jobId is a cuid today; escaping keeps the FAILED matcher literal regardless. */
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<void> {
   const { jobId } = entry.data;
   const gen = new Date(entry.data.gen);
@@ -161,21 +164,27 @@ export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<v
       timeoutMs: DISPATCH_TIMEOUT_MS,
     });
     console.log(`[worker] job=${jobId} agent replied: ${reply.slice(0, 200)}`);
-    // The callback (not this reply) is authoritative — EXCEPT when the agent
-    // explicitly gives up. `FAILED <jobId> <reason>` is the skill's documented
-    // failure ack (SKILL.md "Failure handling") and no callback follows it, so
-    // without this the row sat `processing` until the ~25 h expiry sweep.
-    // Scoped to `processing` + our entry, so a callback that already landed
-    // (completed/needs_review/published) wins and this no-ops.
-    const gaveUp = new RegExp(`^FAILED\\s+${jobId}\\b[\\s:-]*([\\s\\S]*)`).exec(reply.trim());
+    // The callback stays authoritative — but `FAILED <jobId> <reason>` (the
+    // skill's documented give-up ack, SKILL.md "Failure handling") was
+    // previously logged and dropped, leaving the row `processing` until the
+    // ~25 h expiry sweep.
+    //
+    // Settling it HERE would be wrong (Codex round 1, F34): the skill retries a
+    // failing script before giving up, so an ambiguous finalize POST can still
+    // be committing server-side while this reply arrives. Writing `failed` would
+    // move the row out of `acceptingWhere` (result/route.ts:39) and the real
+    // result would 409 into the void, unrecoverable — the entry is acked, so
+    // neither a retry nor the DLQ can bring it back.
+    //
+    // So THROW instead: the catch below leaves the row `processing` (no
+    // `agentglob NNN:` prefix ⇒ not a definitive send failure ⇒ no status write
+    // and no marker clear), the entry exhausts to the dead-letter queue, and
+    // `handleReportDispatchDead` settles it only after
+    // DEAD_LETTER_CALLBACK_GRACE_MS — no-opping if the callback landed in the
+    // meantime. Same grace path an ambiguous send already takes.
+    const gaveUp = new RegExp(`^FAILED\\s+${escapeRe(jobId)}\\b[\\s:-]*([\\s\\S]*)`).exec(reply.trim());
     if (gaveUp) {
-      await db.reportJob.updateMany({
-        where: { id: jobId, status: "processing", queueJobId: entry.id },
-        data: {
-          status: "failed",
-          error: `הסוכן דיווח על כשל: ${(gaveUp[1].trim() || "ללא פירוט").slice(0, 500)}`,
-        },
-      });
+      throw new Error(`הסוכן דיווח על כשל: ${(gaveUp[1].trim() || "ללא פירוט").slice(0, 500)}`);
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
