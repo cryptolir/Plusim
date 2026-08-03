@@ -1,6 +1,6 @@
 # Plusim — Installment transactions (תשלומים / קרדיט): correct month, visible badge, editable date
 
-> **Status:** Draft — **Rev 3** (Codex rounds 1–2 folded). Nothing implemented yet.
+> **Status:** Draft — **Rev 4** (Codex rounds 1–3 folded). Nothing implemented yet.
 >
 > **Review log:**
 > - Rev 1 — authored from a file-anchored read plus a fresh parse of the real statement with the
@@ -26,6 +26,10 @@
 >   conditional on the job's status — the same `updateMany` + count CAS the result route uses
 >   (§2.3). (Round 2's third inline comment is round 1's P1-c re-anchored by GitHub — same body,
 >   same timestamp — already folded in Rev 2 and superseded by P1-f.)
+> - Rev 4 — folds Codex round 3 (one finding, accepted):
+>   **P1-g** the documentation contract (`docs/guides/README.md:33`) requires a new client-visible
+>   feature to add a ROADMAP **"Shipped"** entry alongside the client guide — verified against the
+>   contract table, added to §2.4.
 >
 > **Process** (self-contained — canonical protocol in `docs/PLAN_REVIEW_PROTOCOL.md`): plan PR →
 > adversarial Codex review → each round becomes a new Rev with resolution notes (never silently
@@ -230,7 +234,9 @@ statement charge date with the original deal date kept in the note, how to edit 
 editing is unavailable while the agent works, and that a re-run recomputes both.
 `CLIENT_GUIDE.he.md`: **mandatory, same PR (Rev 2 — Codex P1-d, AGENTS.md rule 4)** — the client
 page's ללא-סיווג rows gain a visible badge, so the client guide documents it and bumps its
-"עודכן לאחרונה" date. Both guides ship in the implementation PR.
+"עודכן לאחרונה" date. **`ROADMAP.md`: a "Shipped" entry for the feature (Rev 4 — Codex P1-g;
+`docs/guides/README.md:33` requires it for every new client-visible feature).** Both guides + the
+ROADMAP entry ship in the implementation PR.
 
 ## 3. Invariants
 
