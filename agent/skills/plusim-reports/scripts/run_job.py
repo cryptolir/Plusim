@@ -153,6 +153,13 @@ MAX_CATEGORY_MAP = {
 # refuses — stranding exactly the PII this exists to remove (Codex #42 P1).
 SCRATCH_ROOT = os.path.realpath("/tmp")
 
+# The exact shape of the one directory name the model is ever asked to produce
+# (SKILL.md: /tmp/plusim-job-<jobId>). fullmatch, not search — the incident this
+# guards against was a directory named ",timeout:300}" glued onto a valid job
+# id by a shell/JSON quoting slip; that value passed the "is it under /tmp?"
+# check above (it was), so it needs its own rejection.
+_JOB_DIRNAME_RE = re.compile(r"^plusim-job-[A-Za-z0-9]+$")
+
 
 class UnsafeWorkdirError(Exception):
     """--workdir outside the scratch root. Raised before anything is written."""
@@ -175,6 +182,13 @@ def safe_workdir(raw: str) -> str:
             f"(e.g. {SCRATCH_ROOT}/plusim-job-<jobId>), never inside the agent "
             f"workspace — statements are customer financial data and the "
             f"workspace is persistent. Got: {raw!r}"
+        )
+    if not _JOB_DIRNAME_RE.fullmatch(os.path.basename(wd)):
+        raise UnsafeWorkdirError(
+            f"--workdir must be exactly {SCRATCH_ROOT}/plusim-job-<jobId>, with "
+            f"nothing else appended to the name — a stray shell/JSON fragment "
+            f"glued onto a valid job id (e.g. '...,timeout:180}}') has silently "
+            f"left a customer statement behind before. Got: {raw!r}"
         )
     return wd
 
