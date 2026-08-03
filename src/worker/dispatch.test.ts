@@ -20,7 +20,12 @@ vi.mock("@/lib/agentRuntimeAuth", () => ({
 import { db } from "@/lib/db";
 import { callAgent } from "@/lib/agentglob";
 import { mintJobToken } from "@/lib/agentRuntimeAuth";
-import { handleReportDispatch, handleReportDispatchDead, isOwnDispatchAbort } from "./dispatch";
+import {
+  handleReportDispatch,
+  handleReportDispatchDead,
+  isOwnDispatchAbort,
+  AgentGaveUpError,
+} from "./dispatch";
 
 const updateMany = db.reportJob.updateMany as unknown as ReturnType<typeof vi.fn>;
 const findUnique = db.reportJob.findUnique as unknown as ReturnType<typeof vi.fn>;
@@ -242,10 +247,20 @@ it("a DONE ack, or a FAILED naming another job, leaves the row to the callback",
   }
 });
 
-// P2: the FAILED throw must not be mistaken for our own 300 s abort, which
-// returns successfully and lets pg-boss ack the entry (F33 classification).
-it("a FAILED ack is never classified as an own-dispatch abort", () => {
-  expect(isOwnDispatchAbort(new Error("הסוכן דיווח על כשל: runner scripts not available"))).toBe(false);
+// F35: the reason is agent-supplied free text. A reason containing "timeout" or
+// "abort" must NOT reach isOwnDispatchAbort's text fallback — that returns
+// successfully, pg-boss acks the entry, and the row strands `processing` (F33).
+it.each(["runner scripts not available", "analysis script timeout", "parse aborted"])(
+  "a FAILED ack is never classified as an own-dispatch abort, even when the reason says %j",
+  (reason) => {
+    expect(isOwnDispatchAbort(new AgentGaveUpError(reason))).toBe(false);
+  },
+);
+
+it("a FAILED reason containing 'timeout' still reaches the dead-letter path", async () => {
+  agent.mockResolvedValue({ reply: "FAILED jobA analysis script timeout" });
+  await expect(handleReportDispatch(entry())).rejects.toThrow("analysis script timeout");
+  expect(updateMany.mock.calls.filter(([a]) => a.data?.status === "failed")).toHaveLength(0);
 });
 
 // ---- plan test 7 ----------------------------------------------------------------

@@ -46,6 +46,19 @@ export function isDefinitiveSendFailure(msg: string): boolean {
 }
 
 /**
+ * The agent's own give-up ack (`FAILED <jobId> <reason>`), carried as a throw so
+ * the entry reaches the dead-letter grace path. A distinct CLASS, not a message
+ * prefix: the reason is agent-supplied free text, and classifying it by text is
+ * what F33/F35 are about.
+ */
+export class AgentGaveUpError extends Error {
+  constructor(reason: string) {
+    super(`הסוכן דיווח על כשל: ${reason}`);
+    this.name = "AgentGaveUpError";
+  }
+}
+
+/**
  * OUR 300 s abort, or the AgentGlob app answering? Classify structurally, not
  * by message text: `AbortSignal.timeout` throws a DOMException named
  * TimeoutError (AbortError when aborted otherwise), while an app error is a
@@ -58,9 +71,14 @@ export function isDefinitiveSendFailure(msg: string): boolean {
  * (Codex round 9, F33). A status-prefixed message can now never reach the text
  * fallback, which is kept only for transport aborts that lost their
  * DOMException identity.
+ *
+ * `AgentGaveUpError` gets the same structural exemption: its message embeds the
+ * agent's own free-text reason, so `FAILED <job> analysis script timeout` would
+ * otherwise text-match here and reproduce F33 exactly (Codex round 2, F35).
  */
 export function isOwnDispatchAbort(e: unknown): boolean {
   const msg = e instanceof Error ? e.message : String(e);
+  if (e instanceof AgentGaveUpError) return false;
   if (/^agentglob \d{3}:/.test(msg)) return false;
   if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) return true;
   return /abort|timeout/i.test(msg);
@@ -184,7 +202,7 @@ export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<v
     // meantime. Same grace path an ambiguous send already takes.
     const gaveUp = new RegExp(`^FAILED\\s+${escapeRe(jobId)}\\b[\\s:-]*([\\s\\S]*)`).exec(reply.trim());
     if (gaveUp) {
-      throw new Error(`הסוכן דיווח על כשל: ${(gaveUp[1].trim() || "ללא פירוט").slice(0, 500)}`);
+      throw new AgentGaveUpError((gaveUp[1].trim() || "ללא פירוט").slice(0, 500));
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
