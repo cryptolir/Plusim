@@ -23,6 +23,9 @@ from pypdf import PdfReader
 # dd.mm.yy; (?!\d\d) rejects dd.mm.yyyy billing dates but still matches a
 # transaction date glued to a digit-starting merchant ("10.03.264אפליקציית").
 DATE_RE = re.compile(r"\b(\d{2})\.(\d{2})\.(\d{2})(?!\d\d)")
+# Diners one-page statements use dd/mm/yy and have no MAX section headers;
+# they are handled by a separate line-based fallback below.
+SLASH_DATE_RE = re.compile(r"\b(\d{2})/(\d{2})/(\d{2})")
 AMOUNT_RE = re.compile(r"(-?)₪\s?([\d,]+\.\d{2})")
 TOTAL_LABEL = "סה״כ"
 # The monthly charge-summary line ("… <dd.mm.yyyy> חיוב ב₪<total>") repeats the
@@ -102,6 +105,67 @@ def parse_max_pdf(path: str, label: str) -> ParseResult:
             if "שם בית העסק" in text[m.end() : m.end() + 220]:
                 marks.append((m.start(), kind))
     marks.sort()
+
+    dates = list(DATE_RE.finditer(text))
+    slash_dates = list(SLASH_DATE_RE.finditer(text))
+    if not dates and not marks and slash_dates:
+        # Diners one-page export: each transaction is one text line,
+        # "dd/mm/yy<merchant>₪<charge>"; the statement total line has the
+        # amount BEFORE the charge date ("₪10,887.66 :02/03/26...").
+        stmt_total: int | None = None
+        seq: dict[str, int] = {}
+        for line in text.splitlines():
+            dm = SLASH_DATE_RE.search(line)
+            if not dm:
+                continue
+            amounts = list(AMOUNT_RE.finditer(line))
+            if not amounts:
+                continue  # footer/billing-date-only line
+            if amounts[-1].start() < dm.start():
+                if stmt_total is None:
+                    stmt_total = _agorot(amounts[-1].groups())
+                continue
+
+            agorot = _agorot(amounts[-1].groups())
+            is_cancel = "ביטול עסקה" in line
+            if is_cancel and agorot > 0:
+                agorot = -agorot
+
+            chunk = line[dm.end() : amounts[-1].start()]
+            max_cat = ""
+            for c in MAX_CATEGORIES:
+                if c in chunk:
+                    max_cat = c.replace("\n", " ")
+                    break
+            cleaned = chunk
+            for c in MAX_CATEGORIES:
+                cleaned = cleaned.replace(c, " ")
+            for w in TYPE_WORDS:
+                cleaned = cleaned.replace(w, " ")
+            cleaned = re.sub(r"[$€]\s?[\d,]+(?:\.\d+)?", " ", cleaned)  # foreign-currency originals
+            cleaned = AMOUNT_RE.sub(" ", cleaned)
+            cleaned = re.sub(r"[:\s]+", " ", cleaned).strip(" .·—-")
+            merchant = cleaned[:80] if cleaned else "(לא זוהה)"
+
+            dd, mm, yy = dm.groups()
+            date = f"20{yy}-{mm}-{dd}"
+            base = f"{billed_label}|{date}|{merchant}|{agorot}"
+            seq[base] = seq.get(base, 0) + 1
+            res.transactions.append(
+                Txn(
+                    date=date,
+                    merchant=merchant,
+                    amount_agorot=agorot,
+                    source_label=billed_label,
+                    dedup_key=f"{base}|{seq[base]}",
+                    note="ביטול עסקה" if is_cancel else "",
+                    max_category=max_cat,
+                )
+            )
+        res.source_totals[billed_label] = stmt_total
+        if stmt_total is None:
+            res.warnings.append(f"{path}: no statement total found")
+        return res
 
     def section_at(pos: int) -> str:
         kind = "billed"  # a lone foreign-currency block may precede any header

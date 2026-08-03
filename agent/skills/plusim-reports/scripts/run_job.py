@@ -37,7 +37,9 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "vendor"))
 sys.path.insert(0, _HERE)
 from build_report_xlsx import build_workbook  # noqa: E402
+from parse_discount_xlsx import parse_discount_xlsx  # noqa: E402
 from parse_isracard_xlsx import parse_isracard_xlsx  # noqa: E402
+from parse_leumi_pdf import detect_leumi_pdf, parse_leumi_pdf  # noqa: E402
 from parse_max_pdf import parse_max_pdf  # noqa: E402
 from verify_report import verify  # noqa: E402
 
@@ -129,6 +131,24 @@ MAX_CATEGORY_MAP = {
     "רפואה ובתי מרקחת": "הוצאות ריפוי",
     "מזון ומשקאות": "מזון ומכולת",
 }
+
+
+def parse_xlsx_auto(path: str):
+    """Dispatch an xlsx statement to the right parser by content.
+
+    A Bank Discount current-account export has its data on a sheet named
+    "עובר ושב"; anything else is treated as an Isracard/Leumi card export.
+    """
+    import openpyxl
+
+    wb = openpyxl.load_workbook(path, read_only=True)
+    try:
+        names = wb.sheetnames
+    finally:
+        wb.close()
+    if any("עובר ושב" in (n or "") for n in names):
+        return parse_discount_xlsx(path)
+    return parse_isracard_xlsx(path)
 
 
 def normalize_merchant(m: str) -> str:
@@ -224,9 +244,13 @@ def cmd_prepare(args) -> None:
         http_download(file.get("url") or file["path"], dest)
         if file["mime"].endswith("pdf"):
             max_seq += 1
-            r = parse_max_pdf(dest, file.get("sourceLabel") or f"max-{max_seq}")
+            label = file.get("sourceLabel") or f"max-{max_seq}"
+            if detect_leumi_pdf(dest):
+                r = parse_leumi_pdf(dest, label)
+            else:
+                r = parse_max_pdf(dest, label)
         else:
-            r = parse_isracard_xlsx(dest)
+            r = parse_xlsx_auto(dest)
         for t in r.transactions:
             all_txns.append(
                 {
