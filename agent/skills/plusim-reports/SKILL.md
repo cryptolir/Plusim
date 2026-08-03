@@ -17,16 +17,25 @@ manifest: <manifest URL including ?t=job-token>
 ```
 
 Everything deterministic (parsing, dedup, arithmetic, workbook build,
-verification) is done by the Python scripts in `{baseDir}/scripts/` — never by
+verification) is done by the Python scripts in
+`/home/node/.openclaw/workspace/skills/plusim-reports/scripts/` — never by
 you reading the files. Your ONLY judgment task is step 3.
 
+**Always use that absolute path.** Your working directory is a per-session
+sandbox (`.../workspace/user-workspaces/<user>/<sessionId>/`) that contains no
+`skills/` folder, so a path relative to the cwd resolves to nothing. Do not
+rewrite these commands to a relative path, and do not substitute a variable for
+the prefix — the skill loader does not expand one, so an unresolved placeholder
+becomes a literal directory name and every command fails with
+`No such file or directory`.
+
 Requirements: bare `python3` only — `openpyxl` and `pypdf` are **vendored** in
-`{baseDir}/vendor/` (the sandbox wipes `~/.local` between exec calls, so
+`/home/node/.openclaw/workspace/skills/plusim-reports/vendor/` (the sandbox wipes `~/.local` between exec calls, so
 `pip install --user` does not survive; `run_job.py` adds `vendor/` to
 `sys.path` itself). If `vendor/` is ever missing, rebuild it once:
 
 ```
-python3 -m pip install --target {baseDir}/vendor openpyxl pypdf
+python3 -m pip install --target /home/node/.openclaw/workspace/skills/plusim-reports/vendor openpyxl pypdf
 ```
 
 ## Pipeline
@@ -40,7 +49,7 @@ python3 -m pip install --target {baseDir}/vendor openpyxl pypdf
    `,timeout:300}` in the skill folder and leaked a statement into it):
 
    ```
-   python3 {baseDir}/scripts/run_job.py prepare --manifest-url '<manifest url>' --workdir $WD
+   python3 /home/node/.openclaw/workspace/skills/plusim-reports/scripts/run_job.py prepare --manifest-url '<manifest url>' --workdir $WD
    ```
 
    This downloads the manifest + statement files (authenticated with
@@ -57,7 +66,7 @@ python3 -m pip install --target {baseDir}/vendor openpyxl pypdf
      overrides are made app-side via the merchant dictionary, which runs first).
 
 3. **Judge (the only model step).** Following
-   `{baseDir}/reference/categorization-rules.md` **plus** any `reportRules` from
+   `/home/node/.openclaw/workspace/skills/plusim-reports/reference/categorization-rules.md` **plus** any `reportRules` from
    `needs_judgment.json` (when `reportRules` conflicts with the reference doc,
    follow `reportRules`; an empty `reportRules` means the static playbook only),
    assign a category to each merchant in `merchants` and write `$WD/judgments.json`:
@@ -78,7 +87,7 @@ python3 -m pip install --target {baseDir}/vendor openpyxl pypdf
 4. **Finalize.**
 
    ```
-   python3 {baseDir}/scripts/run_job.py finalize --workdir $WD
+   python3 /home/node/.openclaw/workspace/skills/plusim-reports/scripts/run_job.py finalize --workdir $WD
    ```
 
    This builds the workbook, verifies **to the agora** against the statements'
@@ -89,7 +98,7 @@ python3 -m pip install --target {baseDir}/vendor openpyxl pypdf
 5. **Cleanup (mandatory — statements are personal financial data).**
 
    ```
-   python3 {baseDir}/scripts/run_job.py cleanup --workdir $WD
+   python3 /home/node/.openclaw/workspace/skills/plusim-reports/scripts/run_job.py cleanup --workdir $WD
    ```
 
 6. **Reply** in chat with ONE short line (the callback is the source of truth,
