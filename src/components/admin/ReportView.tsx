@@ -8,12 +8,15 @@
  * with the exact transactions behind it, which can be copied out as TSV
  * (paste-ready into Excel or WhatsApp).
  *
- * All numbers arrive precomputed from src/lib/reportAnalysis.ts; this file only
- * renders and filters — no second source of truth for any sum.
+ * All numbers come from src/lib/reportAnalysis.ts — this file never sums
+ * anything itself. The month filter re-runs that same builder over the kept
+ * rows, so there is still exactly one source of truth for every figure.
  */
 import { useEffect, useMemo, useState } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import type { TaxonomySection } from "@/config/reportTaxonomy";
 import {
+  buildAnalysis,
   shekel,
   monthShort,
   monthTitle,
@@ -46,6 +49,68 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "uncategorized", label: "ללא סיווג" },
 ];
 
+/**
+ * Month picker for the whole view. A native <details> popover — no open state,
+ * no click-outside handler, no dependency; Esc and outside-click come free.
+ *
+ * State is the HIDDEN set, not the shown one: a report that gains a month on
+ * the next run then appears by default instead of being silently excluded by a
+ * stale selection.
+ */
+function MonthFilter({
+  allMonths,
+  hidden,
+  onChange,
+}: {
+  allMonths: string[];
+  hidden: Set<string>;
+  onChange: (next: Set<string>) => void;
+}) {
+  const shown = allMonths.length - hidden.size;
+  const filtering = hidden.size > 0;
+  return (
+    <details className="relative">
+      <summary
+        className={`cursor-pointer list-none rounded-full border px-3 py-1 text-sm transition-colors hover:bg-muted ${
+          filtering ? "border-foreground font-medium" : ""
+        }`}
+      >
+        חודשים ({shown}/{allMonths.length})
+      </summary>
+      <div className="absolute end-0 z-20 mt-1 max-h-72 w-52 overflow-y-auto rounded-xl border bg-background p-2 shadow-lg">
+        <div className="flex gap-1 border-b pb-2">
+          <button
+            onClick={() => onChange(new Set())}
+            className="flex-1 rounded border px-2 py-1 text-xs transition-colors hover:bg-muted"
+          >
+            הכל
+          </button>
+          <button
+            onClick={() => onChange(new Set(allMonths))}
+            className="flex-1 rounded border px-2 py-1 text-xs transition-colors hover:bg-muted"
+          >
+            נקה
+          </button>
+        </div>
+        {allMonths.map((m) => (
+          <label key={m} className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted">
+            <input
+              type="checkbox"
+              checked={!hidden.has(m)}
+              onChange={() => {
+                const next = new Set(hidden);
+                if (!next.delete(m)) next.add(m);
+                onChange(next);
+              }}
+            />
+            {monthTitle(m)}
+          </label>
+        ))}
+      </div>
+    </details>
+  );
+}
+
 /** Brand chart tokens, cycled at two weights so 10 sections stay distinguishable. */
 const SLICE_COLORS = [
   "var(--chart-1)",
@@ -72,18 +137,41 @@ export function ReportView({
   job,
   analysis,
   transactions,
+  taxonomy,
 }: {
   job: { id: string; title: string; user: string; publishedAt: string | null; sheetUrl: string | null };
   analysis: Analysis;
   transactions: AnalysisTxn[];
+  taxonomy: TaxonomySection[];
 }) {
   const [tab, setTab] = useState<Tab>("matrix");
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [drill, setDrill] = useState<Drill | null>(null);
   const [search, setSearch] = useState("");
   const [showEmpty, setShowEmpty] = useState(false);
+  // Months the admin has hidden. Empty = show everything, so a report that
+  // gains a month later shows it without the filter silently dropping it.
+  const [hidden, setHidden] = useState<Set<string>>(new Set());
 
-  const { months, sections, monthTotals, grandTotal, avgPerMonth, distribution } = analysis;
+  const allMonths = analysis.months;
+  // ONE filtered row set feeds everything — the recomputed matrix, the
+  // drill-downs and the ledger. Splitting it would let a "all months" drill or
+  // the ledger show rows from a month the matrix above it is hiding.
+  const visibleTxns = useMemo(
+    () => (hidden.size === 0 ? transactions : transactions.filter((t) => !hidden.has(t.month))),
+    [transactions, hidden],
+  );
+  // Re-run the SAME builder over the kept rows rather than slicing the built
+  // matrix: averages, section/month totals, the distribution and the header
+  // stats all derive from `months`, so recomputing is the only way they stay
+  // consistent with each other. Filtering nothing must be identity, so the
+  // server-built analysis is reused verbatim when nothing is hidden.
+  const view = useMemo(
+    () => (hidden.size === 0 ? analysis : buildAnalysis(visibleTxns, taxonomy)),
+    [analysis, visibleTxns, taxonomy, hidden],
+  );
+
+  const { months, sections, monthTotals, grandTotal, avgPerMonth, distribution } = view;
   // A section keeps its leaves whenever any transaction lands in it, so an
   // empty `leaves` means a row of dashes — hidden unless asked for.
   const emptyCount = sections.filter((s) => s.leaves.length === 0).length;
@@ -100,7 +188,7 @@ export function ReportView({
   /** Rows behind a cell: one leaf or a whole section, one month or all of them. */
   function openDrill(label: string, leaves: string[], month: string | null) {
     const leafSet = new Set(leaves);
-    const rows = transactions
+    const rows = visibleTxns
       .filter((t) => !t.uncategorized && t.category !== null && leafSet.has(t.category))
       .filter((t) => (month === null ? true : t.month === month))
       .sort((a, b) => a.date.localeCompare(b.date));
@@ -113,12 +201,12 @@ export function ReportView({
 
   const filteredTxns = useMemo(() => {
     const q = search.trim().toLowerCase();
-    const rows = [...transactions].sort((a, b) => b.date.localeCompare(a.date));
+    const rows = [...visibleTxns].sort((a, b) => b.date.localeCompare(a.date));
     if (!q) return rows;
     return rows.filter((t) =>
       [t.merchant, t.category ?? "", t.sourceLabel, t.note ?? "", t.date].join(" ").toLowerCase().includes(q),
     );
-  }, [transactions, search]);
+  }, [visibleTxns, search]);
 
   return (
     <div className="space-y-6">
@@ -159,9 +247,9 @@ export function ReportView({
           <Stat label="חודשים" value={String(months.length)} />
           <Stat
             label="ללא סיווג"
-            value={String(analysis.uncategorized.length)}
-            sub={analysis.uncategorized.length > 0 ? shekel(analysis.uncategorizedTotal) : undefined}
-            tone={analysis.uncategorized.length > 0 ? "warn" : undefined}
+            value={String(view.uncategorized.length)}
+            sub={view.uncategorized.length > 0 ? shekel(view.uncategorizedTotal) : undefined}
+            tone={view.uncategorized.length > 0 ? "warn" : undefined}
           />
         </div>
 
@@ -177,9 +265,9 @@ export function ReportView({
               }`}
             >
               {t.label}
-              {t.id === "uncategorized" && analysis.uncategorized.length > 0 && (
+              {t.id === "uncategorized" && view.uncategorized.length > 0 && (
                 <span className="ms-1 rounded-full bg-accent px-1.5 text-xs text-accent-foreground">
-                  {analysis.uncategorized.length}
+                  {view.uncategorized.length}
                 </span>
               )}
             </button>
@@ -187,9 +275,18 @@ export function ReportView({
         </nav>
       </header>
 
-      {months.length === 0 ? (
+      {allMonths.length === 0 ? (
         <p className="rounded-xl border p-6 text-center text-muted-foreground">
           אין תנועות בדוח הזה.
+        </p>
+      ) : months.length === 0 ? (
+        // Every month filtered out — say so, and give the way back. Reusing the
+        // "no transactions" copy here would blame the report for a filter.
+        <p className="rounded-xl border p-6 text-center text-muted-foreground">
+          כל החודשים מוסתרים.{" "}
+          <button onClick={() => setHidden(new Set())} className="text-blue-600 underline">
+            הצגת כל החודשים
+          </button>
         </p>
       ) : tab === "matrix" ? (
         <section className="space-y-2">
@@ -198,6 +295,7 @@ export function ReportView({
               לחיצה על סכום פותחת את התנועות שמרכיבות אותו. לחיצה על שם מדור פותחת את הקטגוריות שבו.
             </p>
             <span className="flex shrink-0 items-center gap-2">
+              <MonthFilter allMonths={allMonths} hidden={hidden} onChange={setHidden} />
               {emptyCount > 0 && (
                 <button
                   onClick={() => setShowEmpty((v) => !v)}
@@ -206,7 +304,7 @@ export function ReportView({
                   {showEmpty ? "הסתרת מדורים ריקים" : `הצגת מדורים ריקים (${emptyCount})`}
                 </button>
               )}
-              <CopyButton label="העתקת הטבלה" text={() => matrixTsv(analysis)} />
+              <CopyButton label="העתקת הטבלה" text={() => matrixTsv(view)} />
             </span>
           </div>
           <div className="overflow-x-auto rounded-xl border">
@@ -291,8 +389,8 @@ export function ReportView({
           <p className="text-xs text-muted-foreground">
             הסכומים הם ממוצע חודשי, כמו בגיליון. עסק, מע&quot;מ, מס הכנסה וביטוח לאומי אינם נכללים
             בהתפלגות
-            {analysis.distributionExcludedAvg !== 0 && (
-              <> (ממוצע חודשי של {shekel(Math.round(analysis.distributionExcludedAvg))})</>
+            {view.distributionExcludedAvg !== 0 && (
+              <> (ממוצע חודשי של {shekel(Math.round(view.distributionExcludedAvg))})</>
             )}
             .
           </p>
@@ -317,17 +415,17 @@ export function ReportView({
         <section className="space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-sm text-muted-foreground">
-              תנועות שהסוכן לא סיווג ({shekel(analysis.uncategorizedTotal)} בסך הכול, לא נכללות
+              תנועות שהסוכן לא סיווג ({shekel(view.uncategorizedTotal)} בסך הכול, לא נכללות
               בטבלאות). אפשר לסווג אותן בעמוד עבודת הדוח.
             </p>
-            <CopyButton label="העתקה" text={() => txnsTsv(analysis.uncategorized)} />
+            <CopyButton label="העתקה" text={() => txnsTsv(view.uncategorized)} />
           </div>
-          {analysis.uncategorized.length === 0 ? (
+          {view.uncategorized.length === 0 ? (
             <p className="rounded-xl border p-6 text-center text-muted-foreground">
               כל התנועות סווגו ✓
             </p>
           ) : (
-            <TxnTable rows={analysis.uncategorized} />
+            <TxnTable rows={view.uncategorized} />
           )}
         </section>
       )}

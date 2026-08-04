@@ -90,6 +90,7 @@ export default async function AdminReportViewPage({ params }: { params: Promise<
       }}
       analysis={analysis}
       transactions={job.transactions}
+      taxonomy={taxonomy}
     />
   );
 }
