@@ -134,6 +134,59 @@ describe("buildAnalysis", () => {
     expect(a.distribution).toEqual([]);
   });
 
+  // The online report's month filter works by re-running this builder over the
+  // kept rows (ReportView). What it buys is that every derived figure moves
+  // together — slicing the built matrix instead would leave averages, the
+  // distribution and the header stats computed over months no longer shown.
+  describe("a month subset recomputes every derived figure", () => {
+    const THREE = [
+      tx({ month: "2026-01", amountAgorot: 300 }),
+      tx({ month: "2026-02", amountAgorot: 600 }),
+      tx({ month: "2026-03", amountAgorot: 900 }),
+    ];
+
+    it("averages divide by the KEPT months, not the original count", () => {
+      const all = buildAnalysis(THREE, TAX);
+      expect(all.months).toHaveLength(3);
+      expect(all.avgPerMonth).toBe(600); // 1800 / 3
+
+      const kept = buildAnalysis(THREE.filter((t) => t.month !== "2026-01"), TAX);
+      expect(kept.months).toEqual(["2026-02", "2026-03"]);
+      expect(kept.grandTotal).toBe(1500);
+      expect(kept.avgPerMonth).toBe(750); // 1500 / 2 — not 1500/3
+      expect(kept.sections.find((s) => s.section === "בית")!.avg).toBe(750);
+    });
+
+    it("month columns shrink to the kept months, in order", () => {
+      const kept = buildAnalysis(THREE.filter((t) => t.month === "2026-02"), TAX);
+      expect(kept.months).toEqual(["2026-02"]);
+      expect(kept.monthTotals).toEqual([600]);
+      expect(kept.sections.find((s) => s.section === "בית")!.leaves[0].byMonth).toEqual([600]);
+    });
+
+    it("the distribution is recomputed over the kept months too", () => {
+      const rows = [
+        ...THREE,
+        tx({ month: "2026-01", category: "ביט", amountAgorot: 1200 }),
+      ];
+      const all = buildAnalysis(rows, TAX);
+      const kept = buildAnalysis(rows.filter((t) => t.month !== "2026-01"), TAX);
+      // שונות existed only in the dropped month, so it leaves the distribution.
+      expect(all.distribution.some((d) => d.section === "שונות")).toBe(true);
+      expect(kept.distribution.some((d) => d.section === "שונות")).toBe(false);
+      // ...and the remaining slice is an average over 2 months, not 3.
+      expect(kept.distribution.find((d) => d.section === "בית")!.amount).toBe(750);
+    });
+
+    it("dropping every month yields an empty analysis, not a divide-by-zero", () => {
+      const none = buildAnalysis([], TAX);
+      expect(none.months).toEqual([]);
+      expect(none.avgPerMonth).toBe(0);
+      expect(none.grandTotal).toBe(0);
+      expect(none.distribution).toEqual([]);
+    });
+  });
+
   it("monthTitle renders Hebrew months and passes junk through", () => {
     expect(monthTitle("2026-06")).toBe("יוני 2026");
     expect(monthTitle("nope")).toBe("nope");
