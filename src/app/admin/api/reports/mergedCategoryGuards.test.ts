@@ -12,7 +12,9 @@ vi.mock("@/lib/reportsAdminAuth", () => ({ authorizeReportsRequest: vi.fn() }));
 vi.mock("@/lib/db", () => ({
   db: {
     reportCategory: { findMany: vi.fn() },
-    reportTransaction: { findFirst: vi.fn(), update: vi.fn() },
+    // updateMany, not update: the assign write is conditional on the parent
+    // job not being mid-run, so `count` is the success signal.
+    reportTransaction: { findFirst: vi.fn(), updateMany: vi.fn() },
     merchantMapping: { findUnique: vi.fn(), update: vi.fn(), upsert: vi.fn(), findMany: vi.fn() },
     reportJob: { findUnique: vi.fn() },
   },
@@ -27,7 +29,7 @@ import { GET as detailGET } from "./[jobId]/route";
 const auth = authorizeReportsRequest as unknown as ReturnType<typeof vi.fn>;
 const categories = db.reportCategory.findMany as unknown as ReturnType<typeof vi.fn>;
 const txFind = db.reportTransaction.findFirst as unknown as ReturnType<typeof vi.fn>;
-const txUpdate = db.reportTransaction.update as unknown as ReturnType<typeof vi.fn>;
+const txUpdate = db.reportTransaction.updateMany as unknown as ReturnType<typeof vi.fn>;
 const mapFind = db.merchantMapping.findUnique as unknown as ReturnType<typeof vi.fn>;
 const mapMany = db.merchantMapping.findMany as unknown as ReturnType<typeof vi.fn>;
 const jobFind = db.reportJob.findUnique as unknown as ReturnType<typeof vi.fn>;
@@ -53,6 +55,7 @@ describe("assign route uses the merged set", () => {
 
   it("accepts a DB category (test_assign_accepts_db_category)", async () => {
     txFind.mockResolvedValue({ id: "tx1", jobId: "jobA", merchant: "חנות" });
+    txUpdate.mockResolvedValue({ count: 1 });
     const res = await assignPATCH(
       patchReq("https://plusim.xyz/admin/api/reports/jobA/transactions/tx1", { category: DB_LEAF }),
       params,

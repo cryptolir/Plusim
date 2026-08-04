@@ -286,3 +286,75 @@ describe("a small total gap is a note, not a publish blocker", () => {
     expect(v.notes).toHaveLength(1);
   });
 });
+
+// An installment no charge date could be found for — not its block's, not the
+// statement header's — keeps its ORIGINAL DEAL date and may sit in the wrong
+// month. Owner rule (2026-08-04): that must NOT block the report; it surfaces
+// as a note naming the rows, and the admin corrects the date in place.
+describe("an undated installment is a note, never a publish blocker", () => {
+  const INSTALLMENT_NOTE = "תשלום 8 מתוך 12";
+
+  it("notes the row without making the job fatal", () => {
+    const r = result({
+      transactions: [
+        tx({ note: INSTALLMENT_NOTE, date: "2025-09-28", month: "2025-09", undatedInstallment: true }),
+      ],
+    });
+    const v = verifyAgentResult(r, BASE_LEAVES);
+    expect(v.fatal).toBe(false);
+    expect(v.problems).toHaveLength(0);
+    expect(v.notes).toHaveLength(1);
+    expect(v.notes[0]).toContain("2025-09-28");
+    expect(v.notes[0]).toContain("יוחננוף");
+  });
+
+  it("date/month still agree — the flag is the ONLY thing that surfaces this", () => {
+    const r = result({
+      transactions: [tx({ date: "2025-09-28", month: "2025-09", undatedInstallment: true })],
+    });
+    const v = verifyAgentResult(r, BASE_LEAVES);
+    // Prove the date-outside-month rule does NOT fire here.
+    expect(v.problems.some((p) => p.includes("אינו בחודש"))).toBe(false);
+    expect(v.notes).toHaveLength(1);
+  });
+
+  // Skill versions predating the flag never send it; their payloads must verify
+  // exactly as before (the app deploys ahead of the skill).
+  it("a payload without the flag verifies exactly as today", () => {
+    const r = result({ transactions: [tx({ note: INSTALLMENT_NOTE })] });
+    const v = verifyAgentResult(r, BASE_LEAVES);
+    expect(v.fatal).toBe(false);
+    expect(v.problems).toHaveLength(0);
+    expect(v.notes).toHaveLength(0);
+  });
+
+  it("parseAgentResult accepts the flag and treats non-true as absent", () => {
+    const raw = (over: Record<string, unknown>) => ({
+      status: "ok",
+      transactions: [{ ...tx(), ...over }],
+      sourceTotals: [{ label: "isracard-4962", statementTotalAgorot: 1579, computedTotalAgorot: 1579 }],
+      // parseAgentResult requires a non-empty payload; content is irrelevant here.
+      xlsxBase64: "UEsDBA==",
+      proposedMappings: [],
+    });
+    expect(parseAgentResult(raw({ undatedInstallment: true }), BASE_LEAVES).transactions[0].undatedInstallment).toBe(true);
+    for (const bogus of [false, "true", 1, null, undefined]) {
+      const parsed = parseAgentResult(raw({ undatedInstallment: bogus }), BASE_LEAVES);
+      expect(parsed.transactions[0].undatedInstallment).toBeUndefined();
+    }
+  });
+
+  it("names only the flagged rows, and one note covers them all", () => {
+    const r = result({
+      transactions: [
+        tx({ dedupKey: "v-1", merchant: "אלף", note: INSTALLMENT_NOTE, undatedInstallment: true }),
+        tx({ dedupKey: "v-2", merchant: "בית", note: "תשלום 2 מתוך 2" }),
+      ],
+    });
+    const v = verifyAgentResult(r, BASE_LEAVES);
+    expect(v.notes).toHaveLength(1);
+    expect(v.notes[0]).toContain("אלף");
+    expect(v.notes[0]).not.toContain("בית");
+    expect(v.fatal).toBe(false);
+  });
+});

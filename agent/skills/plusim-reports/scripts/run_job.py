@@ -405,6 +405,9 @@ def cmd_prepare(args) -> None:
                     "note": t.note,
                     "max_category": t.max_category,
                     "dedupKey": t.dedup_key,
+                    # Only PDF card parsers set this; xlsx parsers have no such
+                    # attribute, hence getattr with a False default.
+                    "undatedInstallment": getattr(t, "undated_installment", False),
                 }
             )
         for label, total in r.source_totals.items():
@@ -482,6 +485,17 @@ def cmd_finalize(args) -> None:
 
     ok, problems, summary = verify(state["txns"], state["sourceTotals"], manifest["taxonomy"])
 
+    # An installment left on its deal date may sit in the wrong MONTH, so say so
+    # — but do NOT flip `ok`: a missing charge date must never block the report
+    # (owner 2026-08-04). It rides agentNotes to the admin, and the app raises
+    # the same thing as a non-blocking note naming the rows to correct.
+    undated = [t for t in state["txns"] if t.get("undatedInstallment")]
+    if undated:
+        problems.append(
+            f"{len(undated)} תשלומים ללא תאריך חיוב — נותרו בתאריך העסקה המקורי; "
+            f"ניתן לתקן בעמוד העבודה"
+        )
+
     xlsx_path = os.path.join(wd, "report.xlsx")
     build_workbook(manifest["taxonomy"], state["txns"], xlsx_path)
     with open(xlsx_path, "rb") as f:
@@ -500,6 +514,11 @@ def cmd_finalize(args) -> None:
                 "sourceLabel": t["sourceLabel"],
                 "note": t.get("note") or None,
                 "dedupKey": t["dedupKey"],
+                # Transient integrity flag — the app turns it into a FATAL
+                # verification problem so an installment stuck on its deal date
+                # (wrong month) can never be published. Omitted when false so
+                # the payload shape is unchanged for ordinary rows.
+                **({"undatedInstallment": True} if t.get("undatedInstallment") else {}),
             }
             for t in state["txns"]
         ],

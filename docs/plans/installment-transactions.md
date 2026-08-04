@@ -1,8 +1,36 @@
 # Plusim — Installment transactions (תשלומים / קרדיט): correct month, visible badge, editable date
 
-> **Status:** **Rev 5 — APPROVED TO IMPLEMENT** (Codex rounds 1–4 folded; owner decision
+> **Status:** **Rev 7 — IMPLEMENTED** in PR #48 (Codex rounds 1–4 folded; owner decision
 > 2026-08-04 at the protocol-3c round bound: fold the final two docs-contract fixes and proceed to
 > implementation, which carries its own adversarial review).
+>
+> **Rev 6 — owner deviation, 2026-08-04 (supersedes P1-b's fail-closed rule).** During
+> implementation the owner ruled that a missing charge date must **never block the report**:
+> *"keep it on admin date or statement date, but not block the report because of it."* Investigating
+> the fallback surfaced a fact the earlier revs did not have: the statement carries **its own header
+> date** (`פרוט פעולותיך לתאריך`, observed at lines 16-17 of a real Isracard export, equal to the
+> block charge date). So the chain is now
+>
+>     block charge date  →  statement header date  →  the deal date it already has
+>
+> and the admin's manual edit overrides any of them. `undatedInstallment` still exists and still
+> names the affected rows — but as a **non-blocking note** (the `notes` channel from #41), not a
+> FATAL problem, and `run_job` no longer flips `ok`. The wrong-month risk P1-b guarded against is
+> now carried by visibility plus the date editor rather than by refusal. Everything else in Revs
+> 1–5 (per-block dates, the bounded scan, the atomic edit guard, the docs contract) is unchanged.
+>
+> **Rev 7 — implementation-review folds (Codex on PR #48, 2026-08-04).**
+> **P1-i** the Rev 6 header fallback ignored block boundaries: on a multi-block statement an
+> earlier block with an unreadable date borrowed the header date (a DIFFERENT cycle) and filed
+> its installments in the wrong month with no flag — this feature's own bug, re-created by its
+> own fallback. The header now stands in only for a section with exactly ONE charge block, where
+> it cannot be contradicted; otherwise the block stays undated and flagged. Test
+> `test_multi_block_statement_gets_no_header_fallback` fails against the unconditional version.
+> **P1-j** date corrections never reach the exports — see the corrected §5 entry below; owner
+> chose to ship with the limitation documented.
+> The round-1 edit/rerun-serialization finding was argued and held (locking orders the two
+> operations; the re-run discards manual edits either way — the real fix is preserving edits
+> across a run, which §5 defers).
 >
 > **Review log:**
 > - Rev 1 — authored from a file-anchored read plus a fresh parse of the real statement with the
@@ -328,8 +356,21 @@ Route (`transactions PATCH` tests, mocked db — same style as `deleteJob.test.t
   hand; that parser extracts no תשלום text today. The shared badge lights up automatically the day
   its notes carry the pattern. Follow-up when a real MAX statement with installments exists.
 - **An app-side workbook rebuilder** so date edits reach the exported sheet without a re-run.
-  Date edits inherit the exact staleness rule category assignments already have; building a second
-  xlsx builder to fix both is its own plan.
+  Building a second xlsx builder is its own plan.
+
+  > **Rev 7 correction (Codex, PR #48 — the sentence above was wrong).** Date edits do NOT "inherit
+  > the exact staleness rule category assignments already have". Categories have an escape hatch
+  > dates lack: an assignment saved with "לזכור" becomes a `MerchantMapping`, rides the next
+  > manifest, and the agent bakes it into a fresh artifact. A manual date has no such path — a
+  > re-run recomputes the date from the statement and discards the edit — so **no sequence of
+  > supported actions reconciles the exports with the app**. `ReportArtifact` is written only by the
+  > result callback (`result/route.ts:89`) and both exports read those bytes, so a corrected date
+  > shows in `/report` and the online view while the XLSX and Sheet keep the original month.
+  >
+  > Owner decision 2026-08-04: **ship with the limitation documented** (ADMIN_GUIDE §3 states it and
+  > tells the admin to correct the Sheet by hand when it matters). Closing it needs either this
+  > rebuilder or a persisted per-transaction override re-applied after each run (schema migration) —
+  > both deviate from this plan and get their own plan when picked up.
 - **Editing merchant/amount.** Amounts are reconciled to the agora against the statement — an
   editable amount breaks the reconciliation invariant. Not asked for, not building.
 - **Statement-period validation of edited dates** (e.g. "date must fall within the statement

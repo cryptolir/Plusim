@@ -17,10 +17,25 @@ import {
   shekel,
   monthShort,
   monthTitle,
+  installmentInfo,
   DISTRIBUTION_EXCLUDED_LEAVES,
   type Analysis,
   type AnalysisTxn,
 } from "@/lib/reportAnalysis";
+
+/** "8/12" chip for an installment row — display-only, read from the note. */
+function InstallmentBadge({ note }: { note: string | null | undefined }) {
+  const inst = installmentInfo(note);
+  if (!inst) return null;
+  return (
+    <span
+      className="ms-1 whitespace-nowrap rounded bg-muted px-1 text-[0.7rem] text-muted-foreground"
+      title={note ?? undefined}
+    >
+      🔁 {inst.n}/{inst.of}
+    </span>
+  );
+}
 
 type Tab = "matrix" | "distribution" | "transactions" | "uncategorized";
 
@@ -480,6 +495,7 @@ function TxnTable({ rows, showCategory = false }: { rows: AnalysisTxn[]; showCat
               <td className="px-3 py-1.5 whitespace-nowrap">{t.date}</td>
               <td className="px-3 py-1.5" dir="auto">
                 {t.merchant}
+                <InstallmentBadge note={t.note} />
               </td>
               <td className="px-3 py-1.5 tabular-nums whitespace-nowrap">{shekel(t.amountAgorot)}</td>
               {showCategory && (
@@ -545,6 +561,7 @@ function DrillPanel({ drill, onClose }: { drill: Drill; onClose: () => void }) {
                   <div className="flex items-baseline justify-between gap-3">
                     <span className="min-w-0 flex-1 truncate font-medium" dir="auto" title={t.merchant}>
                       {t.merchant}
+                      <InstallmentBadge note={t.note} />
                     </span>
                     <span className="shrink-0 tabular-nums whitespace-nowrap">{shekel(t.amountAgorot)}</span>
                   </div>

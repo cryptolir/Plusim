@@ -7,7 +7,7 @@
  */
 import { useEffect, useState } from "react";
 import { SECTION_NAMES } from "@/config/reportTaxonomy";
-import { shekel } from "@/lib/reportAnalysis";
+import { shekel, installmentInfo } from "@/lib/reportAnalysis";
 
 const STALE_DISPATCH_MS = 2 * 60_000;
 
@@ -42,6 +42,23 @@ export function computeRunGate(
  */
 export function mappingOptions(proposed: string, leaves: string[]): string[] {
   return leaves.includes(proposed) ? leaves : [proposed, ...leaves];
+}
+
+/**
+ * Chip for an installment row ("8/12"), from the note text. Display-only —
+ * shared with the online report and the client page via installmentInfo.
+ */
+function InstallmentBadge({ note }: { note: string | null }) {
+  const inst = installmentInfo(note);
+  if (!inst) return null;
+  return (
+    <span
+      className="ms-1 whitespace-nowrap rounded bg-muted px-1 text-[0.7rem] text-muted-foreground"
+      title={note ?? undefined}
+    >
+      🔁 {inst.n}/{inst.of}
+    </span>
+  );
 }
 
 // Hebrew display labels for job.status (keys stay English — they are the status
@@ -171,7 +188,7 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
       !window.confirm(
         "הרצה מחדש של דוח שפורסם:\n\n" +
           "• הדוח ייעלם מהתצוגה של הלקוח עד לפרסום מחדש.\n" +
-          "• הסוכן יבנה מחדש את כל השורות — סיווגים ידניים שלא נשמרו עם סימון “לזכור” יחושבו מחדש.\n\n" +
+          "• הסוכן יבנה מחדש את כל השורות — סיווגים ידניים שלא נשמרו עם סימון “לזכור”, וכן תאריכים שתוקנו ידנית, יחושבו מחדש.\n\n" +
           "להמשיך?",
       )
     ) {
@@ -217,6 +234,17 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ category, rememberMerchant: remember }),
+    });
+  }
+
+  // Date only — the route leaves category/uncategorized untouched when the
+  // field is absent, and derives month from the date in the same write.
+  async function editDate(txId: string, date: string) {
+    if (!date) return;
+    await action(`date-${txId}`, `/admin/api/reports/${jobId}/transactions/${txId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ date }),
     });
   }
 
@@ -396,7 +424,13 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
               </thead>
               <tbody>
                 {uncategorized.map((t) => (
-                  <UncatRow key={t.id} txn={t} leaves={categoryLeaves} onAssign={assignCategory} />
+                  <UncatRow
+                    key={t.id}
+                    txn={t}
+                    leaves={categoryLeaves}
+                    running={running}
+                    onAssign={assignCategory}
+                  />
                 ))}
               </tbody>
             </table>
@@ -449,8 +483,25 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
               {job.transactions.map((t) => (
                 <tr key={t.id} className="border-t">
                   <td className="py-1 pr-3 whitespace-nowrap">{t.month}</td>
-                  <td className="py-1 pr-3 whitespace-nowrap">{t.date}</td>
-                  <td className="py-1 pr-3" dir="auto">{t.merchant}</td>
+                  {/* Editable: an installment the parser could not re-date, or
+                      any row whose date needs correcting. Disabled on `running`
+                      as well as `busy` — busy clears when the enqueue request
+                      returns, while the agent still owns these rows and the
+                      route would 409 every edit. */}
+                  <td className="py-1 pr-3 whitespace-nowrap">
+                    <input
+                      type="date"
+                      defaultValue={t.date}
+                      disabled={busy !== null || running}
+                      onChange={(e) => void editDate(t.id, e.target.value)}
+                      className="rounded border bg-background px-1 py-0.5 disabled:opacity-50"
+                      title={running ? "לא ניתן לערוך בזמן שהסוכן עובד" : "תאריך העסקה"}
+                    />
+                  </td>
+                  <td className="py-1 pr-3" dir="auto">
+                    {t.merchant}
+                    <InstallmentBadge note={t.note} />
+                  </td>
                   <td className="py-1 pr-3 whitespace-nowrap">{shekel(t.amountAgorot)}</td>
                   <td className="py-1 pr-3" dir="auto">{t.uncategorized ? "— ללא סיווג —" : t.category}</td>
                   <td className="py-1" dir="auto">{t.sourceLabel}</td>
@@ -584,10 +635,13 @@ function MappingRow({
 function UncatRow({
   txn,
   leaves,
+  running,
   onAssign,
 }: {
   txn: Txn;
   leaves: string[];
+  /** Agent owns the rows — the route refuses the write, so don't offer it. */
+  running: boolean;
   onAssign: (txId: string, category: string, remember: boolean) => Promise<void>;
 }) {
   const [category, setCategory] = useState("");
@@ -595,7 +649,10 @@ function UncatRow({
   return (
     <tr className="border-t">
       <td className="py-1 pr-3 whitespace-nowrap">{txn.date}</td>
-      <td className="py-1 pr-3" dir="auto">{txn.merchant}</td>
+      <td className="py-1 pr-3" dir="auto">
+        {txn.merchant}
+        <InstallmentBadge note={txn.note} />
+      </td>
       <td className="py-1 pr-3 whitespace-nowrap">{shekel(txn.amountAgorot)}</td>
       <td className="py-1 pr-3 text-muted-foreground" dir="auto">{txn.note}</td>
       <td className="py-1">
@@ -603,7 +660,8 @@ function UncatRow({
           <select
             value={category}
             onChange={(e) => setCategory(e.target.value)}
-            className="rounded border bg-background px-1 py-0.5"
+            disabled={running}
+            className="rounded border bg-background px-1 py-0.5 disabled:opacity-50"
             dir="rtl"
           >
             <option value="">בחר קטגוריה…</option>
@@ -619,8 +677,9 @@ function UncatRow({
           </label>
           <button
             onClick={() => void onAssign(txn.id, category, remember)}
-            disabled={!category}
+            disabled={!category || running}
             className="rounded border px-2 py-0.5 text-xs disabled:opacity-50"
+            title={running ? "לא ניתן לסווג בזמן שהסוכן עובד" : undefined}
           >
             הקצאה
           </button>

@@ -24,6 +24,16 @@ export interface AgentTxn {
   sourceLabel: string;
   note?: string;
   dedupKey: string;
+  /**
+   * Set by a card parser when a row is an installment (תשלום N מתוך M) that no
+   * charge date could be found for — neither its own total block's nor the
+   * statement header's — so it still holds the ORIGINAL DEAL date and may sit
+   * in the wrong month. Surfaces as a non-blocking NOTE naming the rows, since
+   * a missing charge date must never block the report; the admin corrects the
+   * date in place. Optional: skill versions predating the flag never send it,
+   * and its absence must verify exactly as before. Transient — never persisted.
+   */
+  undatedInstallment?: boolean;
 }
 
 export interface AgentSourceTotal {
@@ -116,6 +126,8 @@ export function parseAgentResult(body: unknown, validLeaves: Set<string>): Agent
       sourceLabel,
       note: typeof raw.note === "string" ? raw.note.slice(0, MAX_STR) : undefined,
       dedupKey,
+      // Strict === true: anything else (absent, null, "false") is not a flag.
+      undatedInstallment: raw.undatedInstallment === true ? true : undefined,
     };
   });
 
@@ -251,6 +263,25 @@ export function verifyAgentResult(result: AgentResult, validLeaves: Set<string>)
     if (!t.date.startsWith(t.month)) {
       problems.push(`תאריך העסקה ${t.date} אינו בחודש ${t.month} (${t.merchant})`);
     }
+  }
+
+  // Installments the parser could not re-date: no block charge date and no
+  // statement header date either, so the row still holds its DEAL date and may
+  // sit in the wrong month. A NOTE, not a problem — the owner's rule is that a
+  // missing charge date never blocks the report (2026-08-04); the admin fixes
+  // the date in place, which is why the message names the editor. date/month
+  // agree with each other, so nothing else surfaces these at all.
+  const undated = result.transactions.filter((t) => t.undatedInstallment);
+  if (undated.length > 0) {
+    const names = undated
+      .slice(0, 5)
+      .map((t) => `${t.merchant} (${t.date})`)
+      .join(", ");
+    const more = undated.length > 5 ? ` ועוד ${undated.length - 5}` : "";
+    notes.push(
+      `${undated.length} תשלומים ללא תאריך חיוב נותרו בתאריך העסקה המקורי — ${names}${more}. ` +
+        `ניתן לתקן את התאריך בטבלת כל העסקאות.`,
+    );
   }
 
   // Duplicate identity check.

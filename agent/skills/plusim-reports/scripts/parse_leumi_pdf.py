@@ -28,6 +28,15 @@ AMOUNT_RE = re.compile(r"^-?[\d,]+\.\d{2}$")
 
 CARD_TYPES = {"נייד.תש", "הוצג לא", "קבע.ה", "אינט"}
 
+# Installment rows ("תשלום 8 מתוך 12", and the RTL-reordered credit wording
+# "תשלום - קרדיט 6 מתוך 13"). The statement prints the ORIGINAL DEAL date on
+# these, not the date they are actually charged — so they must be re-dated to
+# their block's charge date (see _block_charge_date). The gap between "תשלום"
+# and the number is bounded so unrelated text cannot bridge a false match; it
+# must mirror installmentInfo() in src/lib/reportAnalysis.ts, which drives the
+# UI badge off the same note text.
+INSTALLMENT_RE = re.compile(r"תשלום(?:[^0-9]{0,20})(\d{1,3})\s*מתוך\s*(\d{1,3})")
+
 
 @dataclass
 class Txn:
@@ -38,6 +47,12 @@ class Txn:
     dedup_key: str
     note: str = ""
     max_category: str = ""
+    # True when this row is an installment that no charge date could be found
+    # for — not the block's, not the statement header's — so it still holds its
+    # ORIGINAL DEAL date and may sit in the wrong month. Transient: it rides the
+    # result payload so the app can surface a non-blocking note pointing the
+    # admin at the date editor. Never stored, never blocks (owner 2026-08-04).
+    undated_installment: bool = False
 
 
 @dataclass
@@ -100,9 +115,13 @@ def parse_leumi_pdf(path: str, label: str) -> ParseResult:
         foreign_total = f_total
 
     # ── Phase 3: Parse domestic transactions ──
+    # The statement's header date backs up any total block that prints none.
+    stmt_date = _statement_date(all_lines)
     domestic_total: int | None = None
     if domestic_start is not None:
-        d_txns, d_total = _parse_domestic_section(all_lines, domestic_start, credit_terms_start, domestic_label)
+        d_txns, d_total = _parse_domestic_section(
+            all_lines, domestic_start, credit_terms_start, domestic_label, stmt_date
+        )
         res.transactions.extend(d_txns)
         domestic_total = d_total
 
@@ -125,6 +144,13 @@ def parse_leumi_pdf(path: str, label: str) -> ParseResult:
             res.warnings.append(f"{path}: no foreign section total found")
         if has_domestic and domestic_total is None:
             res.warnings.append(f"{path}: no domestic section total found")
+
+    undated = sum(1 for t in res.transactions if t.undated_installment)
+    if undated:
+        res.warnings.append(
+            f"{path}: {undated} תשלומים ללא תאריך חיוב — נותרו בתאריך העסקה המקורי; "
+            f"ניתן לתקן את התאריך בעמוד העבודה"
+        )
 
     return res
 
@@ -234,7 +260,7 @@ def _read_foreign_row(
 # ────────────────────────────────────────────────────────────────────
 
 def _parse_domestic_section(
-    lines: list[str], start: int, end: int, label: str
+    lines: list[str], start: int, end: int, label: str, stmt_date: str | None = None
 ) -> tuple[list[Txn], int | None]:
     """Parse domestic ("בארץ") transactions.
 
@@ -245,6 +271,20 @@ def _parse_domestic_section(
     txns: list[Txn] = []
     section_total: int | None = None
     i = start
+    # Index into `txns` of the first row not yet closed by a total block.
+    block_start = 0
+
+    # The header date may only stand in for a block when it cannot be
+    # contradicted — i.e. when this section has exactly ONE charge block, so the
+    # statement's "as of" date and that block's charge date are necessarily the
+    # same cycle. With several blocks (an early-repayment subtotal charged on D1
+    # plus the regular cycle on D2) the header describes one of them, and using
+    # it for the other silently files those rows under the wrong month with no
+    # flag raised — re-creating this feature's own bug (Codex, PR #48). Multiple
+    # blocks therefore get no fallback: an undated block stays undated, keeps
+    # its deal date, and is surfaced to the admin to correct.
+    block_count = sum(1 for k in range(start, end) if 'לתאריך חיוב סה"כ' in lines[k])
+    fallback = stmt_date if block_count <= 1 else None
 
     # Skip to first transaction date (past headers)
     while i < end:
@@ -264,6 +304,14 @@ def _parse_domestic_section(
             total = _extract_total(lines, i, min(i + 12, end))
             if total is not None:
                 section_total = (section_total or 0) + total
+            # This block CLOSES every row parsed since the previous block, so it
+            # supplies their charge date — never a statement-wide date. Rows on
+            # either side of an early-repayment subtotal belong to different
+            # charge cycles (plan Rev 2, Codex P1-a).
+            _apply_charge_date(
+                txns[block_start:], _block_charge_date(lines, i, min(i + 12, end)), fallback
+            )
+            block_start = len(txns)
             i += 1
             continue
 
@@ -312,6 +360,9 @@ def _parse_domestic_section(
         else:
             i += 1
 
+    # Rows after the last total block have no block to close them, so they fall
+    # straight through to the statement header date.
+    _apply_charge_date(txns[block_start:], None, fallback)
     return txns, section_total
 
 
@@ -457,6 +508,90 @@ def _extract_total(lines: list[str], start: int, end: int) -> int | None:
         s = lines[j].strip()
         if AMOUNT_RE.match(s):
             return _to_agorot(s)
+    return None
+
+
+def _apply_charge_date(
+    rows: list[Txn], charge_date: str | None, fallback: str | None = None
+) -> None:
+    """Re-date the installment rows of one total block to its charge date.
+
+    Non-installment rows are left alone — their printed date IS the charge for
+    this cycle. Installment rows keep their deal date in the note so the row can
+    still be traced back to the paper statement.
+
+    Owner decision 2026-08-04, superseding the plan's fail-closed rule: a
+    missing charge date must NOT block the report. The fallback chain is
+
+        block charge date  →  statement header date  →  the deal date it has
+
+    `fallback` is the statement's own header date ("פרוט פעולותיך לתאריך"),
+    which belongs to the same cycle as the block that lost its date. Rows dated
+    that way say so in the note. If the statement carries no date anywhere the
+    row simply keeps its deal date and is flagged `undated_installment` — a
+    non-blocking NOTE app-side, so the admin sees which rows to correct with the
+    date editor. Nothing here ever refuses to publish.
+    """
+    for t in rows:
+        if not INSTALLMENT_RE.search(t.note):
+            continue
+        date = charge_date or fallback
+        if date is None:
+            t.undated_installment = True
+            continue
+        if date == t.date:
+            continue
+        origin = f"עסקה מקורית: {t.date}"
+        if charge_date is None:
+            origin += " · תאריך לפי כותרת הדוח"
+        t.note = f"{t.note} · {origin}" if t.note else origin
+        t.date = date
+
+
+def _statement_date(lines: list[str]) -> str | None:
+    """The statement's own header date — "פרוט פעולותיך לתאריך: 15/05/26".
+
+    Fallback charge date for a total block that prints none of its own. It is
+    the same billing cycle, so it dates those rows far better than the deal date
+    they arrived with. Observed on a real Isracard export at line 16-17, where
+    it equals the block charge date exactly.
+
+    The block footer 'לתאריך חיוב סה"כ' also contains "לתאריך", so a bare
+    substring match would pick up the LAST block instead of the header. Rows
+    carrying 'סה"כ' are excluded, and "פעולותיך" (header-only) is preferred.
+    """
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if "פעולותיך" not in s and ("לתאריך" not in s or 'סה"כ' in s):
+            continue
+        for j in range(i + 1, min(i + 4, len(lines))):
+            dm = DATE_RE.match(lines[j].strip())
+            if dm:
+                dd, mm, yy = dm.groups()
+                return f"20{yy}-{mm}-{dd}"
+    return None
+
+
+def _block_charge_date(lines: list[str], start: int, end: int) -> str | None:
+    """Charge date of the total block starting at `start`, or None.
+
+    Block layout is: 'לתאריך חיוב סה"כ' → date → total-amount. The scan is
+    BOUNDED to that window — it stops at the block's own total amount and never
+    walks past it. An unbounded "first date after the label" scan would, when a
+    block's date is missing or truncated, run into the NEXT transaction's date
+    line and return that row's DEAL date as the charge date. Every installment
+    row above would then be silently re-dated to a wrong date without being
+    flagged undated, which is precisely the wrong-month bug this exists to
+    prevent (plan Rev 3, Codex P1-e).
+    """
+    for j in range(start + 1, end):
+        s = lines[j].strip()
+        dm = DATE_RE.match(s)
+        if dm:
+            dd, mm, yy = dm.groups()
+            return f"20{yy}-{mm}-{dd}"
+        if AMOUNT_RE.match(s):
+            return None  # block's total reached with no date — bounded, give up
     return None
 
 

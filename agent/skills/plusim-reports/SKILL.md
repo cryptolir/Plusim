@@ -56,6 +56,14 @@ python3 -m pip install --target /home/node/.openclaw/workspace/skills/plusim-rep
    `PLUSIM_RUNTIME_TOKEN`), parses every statement, dedups, applies the
    merchant dictionary + deterministic rules, and prints a JSON summary.
 
+   Installment rows (`תשלום N מתוך M`, incl. the `קרדיט` wording) are re-dated
+   here: statements print the ORIGINAL DEAL date on them, so each is moved to
+   the charge date of the total block that closes it — falling back to the
+   statement's header date — with the deal date kept in the note. A row that
+   gets neither keeps its date and is flagged for the admin, who corrects it in
+   the app. None of this blocks the report. Nothing for you to do; do NOT "fix"
+   such dates by hand in judgments.json.
+
 2. **Read the shortlist.** `$WD/needs_judgment.json` is an object with two keys:
    - `merchants` — the merchants the deterministic pass (merchant dictionary →
      built-in rules → MAX category) could NOT place, with sample
