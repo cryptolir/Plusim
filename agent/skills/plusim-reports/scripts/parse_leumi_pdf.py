@@ -274,6 +274,18 @@ def _parse_domestic_section(
     # Index into `txns` of the first row not yet closed by a total block.
     block_start = 0
 
+    # The header date may only stand in for a block when it cannot be
+    # contradicted — i.e. when this section has exactly ONE charge block, so the
+    # statement's "as of" date and that block's charge date are necessarily the
+    # same cycle. With several blocks (an early-repayment subtotal charged on D1
+    # plus the regular cycle on D2) the header describes one of them, and using
+    # it for the other silently files those rows under the wrong month with no
+    # flag raised — re-creating this feature's own bug (Codex, PR #48). Multiple
+    # blocks therefore get no fallback: an undated block stays undated, keeps
+    # its deal date, and is surfaced to the admin to correct.
+    block_count = sum(1 for k in range(start, end) if 'לתאריך חיוב סה"כ' in lines[k])
+    fallback = stmt_date if block_count <= 1 else None
+
     # Skip to first transaction date (past headers)
     while i < end:
         s = lines[i].strip()
@@ -297,7 +309,7 @@ def _parse_domestic_section(
             # either side of an early-repayment subtotal belong to different
             # charge cycles (plan Rev 2, Codex P1-a).
             _apply_charge_date(
-                txns[block_start:], _block_charge_date(lines, i, min(i + 12, end)), stmt_date
+                txns[block_start:], _block_charge_date(lines, i, min(i + 12, end)), fallback
             )
             block_start = len(txns)
             i += 1
@@ -350,7 +362,7 @@ def _parse_domestic_section(
 
     # Rows after the last total block have no block to close them, so they fall
     # straight through to the statement header date.
-    _apply_charge_date(txns[block_start:], None, stmt_date)
+    _apply_charge_date(txns[block_start:], None, fallback)
     return txns, section_total
 
 

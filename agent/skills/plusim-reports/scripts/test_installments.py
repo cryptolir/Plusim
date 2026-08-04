@@ -29,6 +29,7 @@ from parse_leumi_pdf import (  # noqa: E402
     Txn,
     _apply_charge_date,
     _block_charge_date,
+    _parse_domestic_section,
     _statement_date,
 )
 
@@ -130,6 +131,53 @@ class TestStatementDateFallback(unittest.TestCase):
         _apply_charge_date(rows, None, None)
         self.assertEqual(rows[0].date, "2025-09-28")
         self.assertTrue(rows[0].undated_installment)
+
+
+class TestFallbackRespectsBlockBoundaries(unittest.TestCase):
+    """The header date may only stand in when it cannot be contradicted.
+
+    A statement with an early-repayment subtotal (charged D1) plus the regular
+    cycle (charged D2) has one header date describing ONE of them. Using it for
+    the other files those rows under the wrong month with no flag — this
+    feature's own bug, re-created by its own fallback (Codex, PR #48).
+    """
+
+    def _section(self, lines: list[str]):
+        return _parse_domestic_section(lines, 0, len(lines), "max-1-domestic", "2026-05-15")
+
+    def _row_lines(self, date: str, merchant: str, amount: str, note_n: str) -> list[str]:
+        # date → blank → card-type → merchant → category → tx amt → charge amt
+        # → installment note (the shape _read_domestic_row walks).
+        return [date, "", "אינט", merchant, "שונות", amount, amount, f"תשלום {note_n}", "מתוך", "12"]
+
+    def test_multi_block_statement_gets_no_header_fallback(self):
+        lines = (
+            self._row_lines("28/09/25", "תאילנד", "533.86", "8")
+            + ['לתאריך חיוב סה"כ', "533.86"]  # block 1: NO date, only a total
+            + self._row_lines("29/09/25", "סופר", "199.00", "2")
+            + ['לתאריך חיוב סה"כ', "15/05/26", "199.00"]  # block 2: dated
+        )
+        txns, _ = self._section(lines)
+        by_merchant = {t.merchant: t for t in txns}
+        first = by_merchant["תאילנד"]
+        # Block 1 lost its date and must NOT borrow block 2's cycle.
+        self.assertEqual(first.date, "2025-09-28", "borrowed a date across blocks")
+        self.assertTrue(first.undated_installment, "wrong month shipped unflagged")
+        self.assertNotIn("כותרת הדוח", first.note)
+        # Block 2 has its own date and still re-dates normally.
+        self.assertEqual(by_merchant["סופר"].date, "2026-05-15")
+        self.assertFalse(by_merchant["סופר"].undated_installment)
+
+    def test_single_block_statement_still_gets_the_header_fallback(self):
+        """The common case — one cycle, so the header cannot be contradicted."""
+        lines = self._row_lines("28/09/25", "תאילנד", "533.86", "8") + [
+            'לתאריך חיוב סה"כ',
+            "533.86",  # no date in the block
+        ]
+        txns, _ = self._section(lines)
+        self.assertEqual(txns[0].date, "2026-05-15")
+        self.assertFalse(txns[0].undated_installment)
+        self.assertIn("כותרת הדוח", txns[0].note)
 
 
 class TestStatementDate(unittest.TestCase):
