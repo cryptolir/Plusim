@@ -1,6 +1,8 @@
 # Plusim — Installment transactions (תשלומים / קרדיט): correct month, visible badge, editable date
 
-> **Status:** Draft — **Rev 4** (Codex rounds 1–3 folded). Nothing implemented yet.
+> **Status:** **Rev 5 — APPROVED TO IMPLEMENT** (Codex rounds 1–4 folded; owner decision
+> 2026-08-04 at the protocol-3c round bound: fold the final two docs-contract fixes and proceed to
+> implementation, which carries its own adversarial review).
 >
 > **Review log:**
 > - Rev 1 — authored from a file-anchored read plus a fresh parse of the real statement with the
@@ -30,6 +32,13 @@
 >   **P1-g** the documentation contract (`docs/guides/README.md:33`) requires a new client-visible
 >   feature to add a ROADMAP **"Shipped"** entry alongside the client guide — verified against the
 >   contract table, added to §2.4.
+> - Rev 5 — folds Codex round 4 (two findings, accepted; both docs/contract wording, no design
+>   change): **P1-h** the "עודכן לאחרונה" bump is an explicit deliverable for the admin guide too,
+>   not only the client guide (§2.4). **P2-a** §2.3's concrete UI line said `disabled while busy`,
+>   contradicting the section's own `running` directive — now `busy || running` (§2.3).
+>   Round 4 completed without a clean verdict, so per protocol 3c the loop stopped and the owner
+>   chose (b): fold these and implement. Rounds converged from design holes (1–2) to docs nits
+>   (3–4); the implementation PR still gets a full adversarial review.
 >
 > **Process** (self-contained — canonical protocol in `docs/PLAN_REVIEW_PROTOCOL.md`): plan PR →
 > adversarial Codex review → each round becomes a new Rev with resolution notes (never silently
@@ -224,14 +233,18 @@ Widen `transactions/[txId]/route.ts` — same auth gate, no new surface:
   `month = date.slice(0, 7)` in one `update` call — `date`/`month` can never diverge.
 - UI (`ReportJobDetail.tsx`): in the כל העסקאות table the date cell becomes a native
   `<input type="date">` (platform rung — no picker lib) that PATCHes on change; disabled while
-  `busy`. The published-re-run confirm dialog (`:172-175`) gains one clause: manual date edits are
+  **`busy || running`** (Rev 5 — Codex P2-a: `busy` clears as soon as the enqueue request returns,
+  while the job stays `dispatched`/`processing`, so a `busy`-only guard leaves the input live
+  against a route that will 409 every edit). The published-re-run confirm dialog (`:172-175`) gains one clause: manual date edits are
   also recomputed on re-run — same clobber rule as unsaved category assignments.
 
 ### 2.4 Guides (same impl PR, per AGENTS.md rule 4)
 
 `ADMIN_GUIDE.he.md`: what the badge means (N מתוך M), that installment rows are dated by the
 statement charge date with the original deal date kept in the note, how to edit a date, that
-editing is unavailable while the agent works, and that a re-run recomputes both.
+editing is unavailable while the agent works, and that a re-run recomputes both — **and its
+"עודכן לאחרונה" date bumped (Rev 5 — Codex P1-h; AGENTS.md:58 requires the bump for every guide
+touched, not just the client one).**
 `CLIENT_GUIDE.he.md`: **mandatory, same PR (Rev 2 — Codex P1-d, AGENTS.md rule 4)** — the client
 page's ללא-סיווג rows gain a visible badge, so the client guide documents it and bumps its
 "עודכן לאחרונה" date. **`ROADMAP.md`: a "Shipped" entry for the feature (Rev 4 — Codex P1-g;
