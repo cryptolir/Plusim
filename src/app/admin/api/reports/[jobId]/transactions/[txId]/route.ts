@@ -12,6 +12,24 @@
  * update's own `where`, and `count === 0` is the rejection (same count-CAS the
  * result route uses). This covers category assignment too: that race predates
  * the date feature and is fixed here at the shared write.
+ *
+ * EXACT boundary this makes, and the one it does not:
+ *   - guaranteed: no edit lands on a job that is ALREADY dispatched/processing.
+ *   - NOT guaranteed: that an accepted edit survives a re-run started later.
+ *
+ * ponytail: the second is deliberate, not an oversight. A re-run rebuilds every
+ * row from the statements, so it discards manual dates and unremembered
+ * categories BY DESIGN — the confirm dialog and ADMIN_GUIDE both say so. The
+ * relation predicate reads the parent at this statement's snapshot and does not
+ * lock it, so a run CASing to `dispatched` immediately after this commit still
+ * erases the edit (Codex, PR #48). Serializing the two with a row lock or a
+ * shared generation guard would only ORDER them — the run would acquire the
+ * lock next and wipe the row anyway — so it buys ordering, not survival, at the
+ * cost of coupling two routes. Closing it for real means PRESERVING admin edits
+ * across a re-run (re-applying them after the agent's rebuild), which is a
+ * feature the plan explicitly deferred, not a lock. Until then the window is
+ * milliseconds wide and its outcome is identical to the documented case of
+ * editing a minute before clicking re-run.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";

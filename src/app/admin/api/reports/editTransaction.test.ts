@@ -158,6 +158,26 @@ describe("PATCH a transaction", () => {
     expect(upsert).not.toHaveBeenCalled();
   });
 
+  // Pins the guard's exact promise so nobody later reads it as stronger than it
+  // is (Codex, PR #48). The predicate reads the parent at the statement's
+  // snapshot and does not lock it: an edit accepted a moment before a re-run
+  // starts is still discarded by that re-run — by design, since a re-run
+  // rebuilds every row. What the guard DOES promise is the case below.
+  it("guard_covers_already_running_only_not_a_later_rerun", async () => {
+    // Promised: a job already running refuses the write outright.
+    updateMany.mockResolvedValue({ count: 0 });
+    findFirst.mockResolvedValue({ merchant: "יוחננוף", job: { status: "processing" } });
+    expect((await PATCH(req({ date: "2026-05-15" }), { params })).status).toBe(409);
+
+    // Not promised: a settled job accepts the write. Whether a re-run later
+    // discards it is the documented re-run semantic, not this route's contract.
+    vi.clearAllMocks();
+    leafSet.mockResolvedValue(new Set([FOOD]));
+    updateMany.mockResolvedValue({ count: 1 });
+    findFirst.mockResolvedValue({ merchant: "יוחננוף", job: { status: "completed" } });
+    expect((await PATCH(req({ date: "2026-05-15" }), { params })).status).toBe(200);
+  });
+
   it("404s when the transaction does not exist", async () => {
     updateMany.mockResolvedValue({ count: 0 });
     findFirst.mockResolvedValue(null);
