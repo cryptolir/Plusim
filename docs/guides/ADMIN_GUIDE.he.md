@@ -5,7 +5,7 @@
 > מדריך תפעולי לאזור הניהול בכתובת **[plusim.xyz/admin](https://plusim.xyz/admin)**.
 > מיועד למנהלי המערכת. ללקוחות יש מדריך נפרד: [CLIENT_GUIDE.he.md](./CLIENT_GUIDE.he.md).
 >
-> **עודכן לאחרונה:** אוגוסט 2026 (דוח מקוון · מחיקת קובץ · מחיקת דוח · קבצים נתמכים · דיווח תקלה מהסוכן · פער סכומים קטן · בחירת קטגוריה במיפוי מוצע · מחיקת דוח מנקה גם את הגיליון · עסקאות בתשלומים ועריכת תאריך · בחירת חודשים בדוח המקוון)
+> **גרסה 1.10** — אוגוסט 2026 (בחירת חודשים בדוח המקוון). היסטוריית הגרסאות המלאה בתחתית המדריך.
 >
 > מדריך זה מתאר את **התפעול היומיומי**. לפרטים טכניים ראו:
 > [REPORTS_PIPELINE](../REPORTS_PIPELINE.md) · [DRIVE_INTEGRATION](../DRIVE_INTEGRATION.md) · [DEPLOY](../../DEPLOY.md)
@@ -221,9 +221,29 @@
 
 ---
 
+## היסטוריית גרסאות
+
+מספר הגרסה עולה בכל פעם שתכונה מנהלתית חדשה משנה את מה שמתואר במדריך. גרסה = PR אחד; ה־PR מקושר לתיעוד המלא של השינוי בקוד.
+
+| גרסה | PR | מה נוסף / השתנה |
+|---|---|---|
+| 1.10 | [#49](https://github.com/cryptolir/Plusim/pull/49) | בחירת חודשים בדוח המקוון (ניתוח תוצאות) |
+| 1.9 | [#48](https://github.com/cryptolir/Plusim/pull/48) | עסקאות בתשלומים — תאריך חיוב נכון, סימון N מתוך M, עריכת תאריך |
+| 1.8 | [#45](https://github.com/cryptolir/Plusim/pull/45) | מחיקת דוח מנקה גם את הגיליון המיוצא, לא רק את דפי החשבון |
+| 1.7 | [#43](https://github.com/cryptolir/Plusim/pull/43) | בחירת קטגוריה במיפוי בית עסק מוצע, לפני אישור |
+| 1.6 | [#41](https://github.com/cryptolir/Plusim/pull/41) | פער סכומים קטן (≈) מוצג כהערה ואינו חוסם פרסום |
+| 1.5 | [#39](https://github.com/cryptolir/Plusim/pull/39) | הודעה כתומה בעבודה שעדיין "בעיבוד" כשהסוכן מדווח על תקלה |
+| 1.4 | [#38](https://github.com/cryptolir/Plusim/pull/38) | רשימת קבצים נתמכים; קובץ לא מזוהה עוצר את ההרצה עם הודעה |
+| 1.3 | [#34](https://github.com/cryptolir/Plusim/pull/34) | מחיקת קובץ דף חשבון בודד מעבודה |
+| 1.2 | [#31](https://github.com/cryptolir/Plusim/pull/31) | הדוח המקוון (ניתוח תוצאות / התפלגות / פירוט תנועות) |
+| 1.1 | [#29](https://github.com/cryptolir/Plusim/pull/29) | שליחה לסוכן נרשמת בתור ומאושרת מיד, לא ממתינה לסוכן |
+| 1.0 | [#27](https://github.com/cryptolir/Plusim/pull/27) | גרסה ראשונה של המדריך |
+
+---
+
 <div dir="ltr">
 
-*This guide is versioned in the Plusim repo (`docs/guides/ADMIN_GUIDE.he.md`) and updated whenever admin-facing features ship.*
+*This guide is versioned in the Plusim repo (`docs/guides/ADMIN_GUIDE.he.md`) and updated whenever admin-facing features ship. Version number bumps once per PR — see the version history above.*
 
 </div>
 
