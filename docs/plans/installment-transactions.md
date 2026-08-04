@@ -1,8 +1,23 @@
 # Plusim — Installment transactions (תשלומים / קרדיט): correct month, visible badge, editable date
 
-> **Status:** **Rev 5 — APPROVED TO IMPLEMENT** (Codex rounds 1–4 folded; owner decision
+> **Status:** **Rev 6 — IMPLEMENTED** in PR #48 (Codex rounds 1–4 folded; owner decision
 > 2026-08-04 at the protocol-3c round bound: fold the final two docs-contract fixes and proceed to
 > implementation, which carries its own adversarial review).
+>
+> **Rev 6 — owner deviation, 2026-08-04 (supersedes P1-b's fail-closed rule).** During
+> implementation the owner ruled that a missing charge date must **never block the report**:
+> *"keep it on admin date or statement date, but not block the report because of it."* Investigating
+> the fallback surfaced a fact the earlier revs did not have: the statement carries **its own header
+> date** (`פרוט פעולותיך לתאריך`, observed at lines 16-17 of a real Isracard export, equal to the
+> block charge date). So the chain is now
+>
+>     block charge date  →  statement header date  →  the deal date it already has
+>
+> and the admin's manual edit overrides any of them. `undatedInstallment` still exists and still
+> names the affected rows — but as a **non-blocking note** (the `notes` channel from #41), not a
+> FATAL problem, and `run_job` no longer flips `ok`. The wrong-month risk P1-b guarded against is
+> now carried by visibility plus the date editor rather than by refusal. Everything else in Revs
+> 1–5 (per-block dates, the bounded scan, the atomic edit guard, the docs contract) is unchanged.
 >
 > **Review log:**
 > - Rev 1 — authored from a file-anchored read plus a fresh parse of the real statement with the

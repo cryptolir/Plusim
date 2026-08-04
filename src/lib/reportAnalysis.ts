@@ -83,6 +83,26 @@ export function shekel(agorot: number): string {
   return (agorot / 100).toLocaleString("he-IL", { style: "currency", currency: "ILS" });
 }
 
+/**
+ * Installment info from a transaction note: "תשלום 8 מתוך 12" → {n: 8, of: 12},
+ * including the RTL-reordered credit wording "תשלום - קרדיט 6 מתוך 13".
+ *
+ * The marker rides the existing free-text `note` — the card parsers already put
+ * it there and it survives every hop (payload → DB → views → workbook), so no
+ * column and no stored field. Display-only by design: nothing in verification,
+ * month bucketing, or export may branch on this.
+ *
+ * The bounded gap (≤20 non-digits) is what stops "תשלום" in one clause and
+ * digits from an unrelated later clause — notes are concatenated with " · " —
+ * from bridging into a false match. Mirrors INSTALLMENT_RE in
+ * agent/skills/plusim-reports/scripts/parse_leumi_pdf.py; the two must agree,
+ * or a row the parser re-dated would show no badge (or the reverse).
+ */
+export function installmentInfo(note: string | null | undefined): { n: number; of: number } | null {
+  const m = /תשלום(?:[^0-9]{0,20})(\d{1,3})\s*מתוך\s*(\d{1,3})/.exec(note ?? "");
+  return m ? { n: Number(m[1]), of: Number(m[2]) } : null;
+}
+
 const MONTH_NAMES = [
   "ינואר",
   "פברואר",

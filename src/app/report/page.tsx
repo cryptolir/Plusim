@@ -3,7 +3,7 @@ import { auth } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
 import { db } from "@/lib/db";
 import { getMergedTaxonomy } from "@/lib/reportCategories";
-import { shekel, monthTitle } from "@/lib/reportAnalysis";
+import { shekel, monthTitle, installmentInfo } from "@/lib/reportAnalysis";
 
 export const dynamic = "force-dynamic";
 
@@ -31,6 +31,7 @@ export default async function ReportPage() {
           amountAgorot: true,
           category: true,
           uncategorized: true,
+          note: true,
         },
       },
       artifacts: { select: { id: true }, take: 1 },
@@ -55,10 +56,22 @@ export default async function ReportPage() {
       {jobs.map((job) => {
         // month → leaf → sum, from the stored transaction rows.
         const months = new Map<string, Map<string, number>>();
-        const uncat: { month: string; date: string; merchant: string; amountAgorot: number }[] = [];
+        const uncat: {
+          month: string;
+          date: string;
+          merchant: string;
+          amountAgorot: number;
+          note: string | null;
+        }[] = [];
         for (const t of job.transactions) {
           if (t.uncategorized) {
-            uncat.push({ month: t.month, date: t.date, merchant: t.merchant, amountAgorot: t.amountAgorot });
+            uncat.push({
+              month: t.month,
+              date: t.date,
+              merchant: t.merchant,
+              amountAgorot: t.amountAgorot,
+              note: t.note,
+            });
             continue;
           }
           const byLeaf = months.get(t.month) ?? new Map<string, number>();
@@ -146,6 +159,17 @@ export default async function ReportPage() {
                         <td className="px-3 py-1.5 whitespace-nowrap">{t.date}</td>
                         <td className="px-3 py-1.5" dir="auto">
                           {t.merchant}
+                          {(() => {
+                            const inst = installmentInfo(t.note);
+                            return inst ? (
+                              <span
+                                className="ms-1 whitespace-nowrap rounded bg-muted px-1 text-[0.7rem] text-muted-foreground"
+                                title={t.note ?? undefined}
+                              >
+                                🔁 {inst.n}/{inst.of}
+                              </span>
+                            ) : null;
+                          })()}
                         </td>
                         <td className="px-3 py-1.5 whitespace-nowrap">{shekel(t.amountAgorot)}</td>
                       </tr>
