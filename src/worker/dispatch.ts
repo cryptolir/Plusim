@@ -84,6 +84,35 @@ export function isOwnDispatchAbort(e: unknown): boolean {
   return /abort|timeout/i.test(msg);
 }
 
+/**
+ * The sentence an admin should read, from a callAgent failure. AgentGlob wraps
+ * agent-side errors as escaped JSON two layers deep — e.g.
+ * `agentglob 502: {"error":"Agent error: {\"detail\":\"The 'gpt-5.5' model is
+ * not supported…\"}"}` — so the raw message is unreadable on screen. Unwraps
+ * `detail` / `error` / `message` up to two layers. Anything that does not parse
+ * (a bare gateway status, a transport error, an HTML error page) comes back
+ * verbatim. DISPLAY ONLY — no classification ever reads this.
+ */
+export function readableSendError(msg: string): string {
+  let text = msg.replace(/^agentglob \d{3}:\s*/, "");
+  let unwrapped = false;
+  for (let layer = 0; layer < 2; layer++) {
+    const start = text.indexOf("{");
+    if (start < 0) break;
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(text.slice(start)) as Record<string, unknown>;
+    } catch {
+      break;
+    }
+    const inner = [obj.detail, obj.error, obj.message].find((v): v is string => typeof v === "string");
+    if (!inner) break;
+    text = text.slice(0, start) + inner;
+    unwrapped = true;
+  }
+  return (unwrapped ? text.trim() : msg).slice(0, 500);
+}
+
 /** jobId is a cuid today; escaping keeps the FAILED matcher literal regardless. */
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -231,7 +260,7 @@ export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<v
       // handler reconciles AFTER the callback grace window (Codex round 2, F24).
       await db.reportJob.updateMany({
         where: { id: jobId, status: "processing", queueJobId: entry.id },
-        data: { status: "failed", error: `השליחה לסוכן נכשלה: ${msg.slice(0, 500)}` },
+        data: { status: "failed", error: `השליחה לסוכן נכשלה: ${readableSendError(msg)}` },
       });
     } else if (entry.retryCount < entry.retryLimit && isDefinitiveSendFailure(msg)) {
       // The AgentGlob APP answered with an error status — THIS attempt's request
@@ -245,6 +274,22 @@ export async function handleReportDispatch(entry: DispatchQueueEntry): Promise<v
       await db.reportJob.updateMany({
         where: { id: jobId, status: "processing", queueJobId: entry.id, agentTokenHash: tokenHash },
         data: { dispatchAttemptedAt: null },
+      });
+    } else if (!isDefinitiveSendFailure(msg)) {
+      // AMBIGUOUS (gateway 502/504, transport error): the run may be live, so
+      // nothing is settled — but record what the send actually got back, the
+      // same way an agent FAILED ack is recorded (F36). Without this the only
+      // trace was the worker log, and the dead-letter fallback told the admin
+      // the job "crashed before it was sent" while the real cause was
+      // AgentGlob's `502 Agent error: model not supported` (job שמאי,
+      // 2026-10-22). Status untouched, so acceptingWhere still admits a live
+      // run's callback — which clears `error` on success (result/route.ts:63);
+      // the DLQ keeps a present reason instead of overwriting it. The
+      // deliberate "don't re-send" throw sits BEFORE the try, so it can never
+      // reach here and replace this reason with an internal message.
+      await db.reportJob.updateMany({
+        where: { id: jobId, status: "processing", queueJobId: entry.id },
+        data: { error: `השליחה לסוכן נכשלה: ${readableSendError(msg)}` },
       });
     }
     throw e instanceof Error ? e : new Error(msg);
@@ -312,7 +357,7 @@ export async function handleReportDispatchDead(payload: ReportDispatchPayload): 
   });
   const res = kept.count === 1 ? kept : await db.reportJob.updateMany({
     where: { ...settleWhere, error: null },
-    data: { status: "failed", error: "תהליך הרקע קרס או פג תוקפו לפני שהעבודה נשלחה" },
+    data: { status: "failed", error: "תהליך הרקע נעצר ולא התקבלה תוצאה מהסוכן" },
   });
   if (res.count === 1) {
     console.warn(`[worker] job=${payload.jobId} gen=${payload.gen} dead-lettered — reconciled to failed`);

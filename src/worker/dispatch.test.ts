@@ -25,6 +25,7 @@ import {
   handleReportDispatchDead,
   isOwnDispatchAbort,
   AgentGaveUpError,
+  readableSendError,
 } from "./dispatch";
 
 const updateMany = db.reportJob.updateMany as unknown as ReturnType<typeof vi.fn>;
@@ -337,7 +338,7 @@ it("dead-letter reconciliation marks failed only for the matching generation key
   // F24 — never-sent rows reconcile immediately; sent rows only after the grace.
   expect(cas.where.OR[0]).toEqual({ dispatchAttemptedAt: null });
   expect(cas.where.OR[1].dispatchAttemptedAt.lt).toBeInstanceOf(Date);
-  expect(cas.data).toEqual({ status: "failed", error: "תהליך הרקע קרס או פג תוקפו לפני שהעבודה נשלחה" });
+  expect(cas.data).toEqual({ status: "failed", error: "תהליך הרקע נעצר ולא התקבלה תוצאה מהסוכן" });
 });
 
 // ---- Codex round 3, F36 ---------------------------------------------------------
@@ -403,4 +404,54 @@ it("a real AbortSignal.timeout rejection IS our own abort", () => {
 it("an unnamed transport abort still falls back to the text signal", () => {
   expect(isOwnDispatchAbort(new Error("socket hang up: aborted"))).toBe(true);
   expect(isOwnDispatchAbort(new Error("ECONNRESET"))).toBe(false);
+});
+
+// ---- 2026-10-22: the real send error must reach the screen ----------------------
+// Verbatim from the worker log of job שמאי: AgentGlob reports an agent-side error
+// as a 502 with escaped JSON two layers deep.
+const REAL_AGENT_502 = String.raw`agentglob 502: {"error":"Agent error: {\"detail\":\"The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account.\"}"}`;
+
+it("readableSendError unwraps AgentGlob's nested agent error into one sentence", () => {
+  expect(readableSendError(REAL_AGENT_502)).toBe(
+    "Agent error: The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account.",
+  );
+});
+
+it("readableSendError returns anything it cannot unwrap verbatim", () => {
+  for (const raw of [
+    "agentglob 502: bad gateway",
+    "fetch failed: socket hang up",
+    "agentglob 502: <html><body>{not json}</body></html>",
+    'agentglob 500: {"code":17}',
+  ]) {
+    expect(readableSendError(raw), raw).toBe(raw);
+  }
+  expect(readableSendError("x".repeat(900))).toHaveLength(500);
+});
+
+it("an AMBIGUOUS send failure records the readable reason without settling, then rethrows", async () => {
+  agent.mockRejectedValue(new Error(REAL_AGENT_502));
+  await expect(handleReportDispatch(entry({ retryCount: 0 }))).rejects.toThrow("agentglob 502");
+  const reasonWrites = updateMany.mock.calls.filter(([a]) => typeof a.data?.error === "string");
+  expect(reasonWrites).toHaveLength(1);
+  expect(reasonWrites[0][0].where).toEqual({ id: "jobA", status: "processing", queueJobId: "pgb-1" });
+  expect(reasonWrites[0][0].data).toEqual({
+    error: "השליחה לסוכן נכשלה: Agent error: The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account.",
+  });
+  // never settles and never clears the marker: the run may still be live
+  expect(updateMany.mock.calls.filter(([a]) => a.data?.status)).toHaveLength(1); // the claim only
+  expect(updateMany.mock.calls.filter(([a]) => a.data?.dispatchAttemptedAt === null && !a.data?.status)).toHaveLength(0);
+});
+
+it("a transport error is recorded verbatim on the same ambiguous path", async () => {
+  agent.mockRejectedValue(new Error("fetch failed: socket hang up"));
+  await expect(handleReportDispatch(entry())).rejects.toThrow("fetch failed");
+  const reasonWrites = updateMany.mock.calls.filter(([a]) => typeof a.data?.error === "string");
+  expect(reasonWrites.map(([a]) => a.data.error)).toEqual(["השליחה לסוכן נכשלה: fetch failed: socket hang up"]);
+});
+
+it("our own timeout writes no reason — the run is live and the callback is coming", async () => {
+  agent.mockRejectedValue(new Error("The operation was aborted due to timeout"));
+  await expect(handleReportDispatch(entry())).resolves.toBeUndefined();
+  expect(updateMany.mock.calls.filter(([a]) => typeof a.data?.error === "string")).toHaveLength(0);
 });
