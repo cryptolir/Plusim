@@ -1,6 +1,7 @@
 # Plusim — Bank current-account statements: income, credit-card settlements, and the reconciliation card
 
-> **Status:** Draft — **Rev 1**, awaiting adversarial review. Nothing implemented yet.
+> **Status:** Draft — **Rev 2**, Codex round-1 findings folded in; awaiting re-review. Nothing
+> implemented yet.
 >
 > **Process** (self-contained): plan PR → adversarial Codex review → each round becomes a new
 > Rev on this branch with resolution notes → every caught hole becomes a named test the
@@ -10,6 +11,18 @@
 > - Rev 1 — authored from two real bank PDFs (Bank Hapoalim 6-month export, Bank Leumi
 >   current-account export, text layer, no OCR) and a file-anchored read of the pipeline.
 >   Ponytail pass ran before handoff (see "Ponytail cuts").
+> - Rev 2 — Codex review round 1 (PR #52): **P1** the Leumi balance delta is in *bank* sign
+>   (credit positive) and must be negated into the pipeline convention — A1 now says so, with
+>   separate debit/credit sign tests (the abs-value suffix cross-check cannot catch an
+>   inversion). **P1** `categorize()` applied expense RULES to income rows, so a `ביטוח לאומי`
+>   *payout* hit the expense leaf `ביטוח לאומי` before the model ever saw it — A2 now makes
+>   dictionary/RULES eligibility kind-aware (income rows consult `INCOME_RULES` and income
+>   leaves only; expense rows never land in `הכנסות`). **P1** the settlement PATCH could pass
+>   ownership on one job and update a settlement of another — B4 now binds the update predicate
+>   to `{id, jobId}` with a cross-job 404 test. **P2** `suggestMatches` had no billing month to
+>   enforce Decision 5's same-month rule — B2/B5 add `billingMonth` on each card source total,
+>   carried into `perSource`; no billing month ⇒ no suggestion (manual pick), with an
+>   equal-amounts-different-months test.
 
 ## Context
 
@@ -143,10 +156,17 @@ and both statements in this plan are text-layer PDFs that need none of it.
     `##1` ⇒ credit ⇒ **negative** agorot; `##2` ⇒ debit ⇒ positive. Balance = group 4.
   - Leumi row: `^(\d{2}/\d{2}/\d{4})(\d{2}/\d{2}/\d{4})(.+?)(\d+?)([\d,]+\.\d{2})​?(-?[\d,]+\.\d{2})\s*$`
     after stripping `​`. Because reference and amount are glued, the amount is **not** taken
-    from the regex for any row that has an older neighbour: `amount = balance_this −
-    balance_older` (signed; newer rows come first), then the glued text must end with
-    `abs(amount)` formatted — a mismatch is a warning naming the row. The oldest row uses the
-    text suffix (Decision 6) and is flagged.
+    from the regex for any row that has an older neighbour: `delta = balance_this −
+    balance_older` (newer rows come first) is in **bank sign** — a credit raises the balance,
+    so `delta > 0` is a credit. The pipeline convention is the opposite (expense positive,
+    credit negative), so `amount_agorot = −delta`: a debit ₪1,000 → ₪900 gives `delta = −100`,
+    stored as `+10000` agorot; a salary credit gives a negative amount. The glued text must then
+    end with `abs(amount)` formatted — a mismatch is a warning naming the row (this cross-check
+    is sign-blind by construction, which is why the sign has its own tests). The oldest row uses
+    the text suffix (Decision 6) for its magnitude, takes its sign from whether the glued text
+    sits in the `בחובה` or `בזכות` position — unknowable after extraction — so it is stored with
+    the Hapoalim-style rule *credit if the description matches a known income payer, else
+    debit*, and is flagged `unverifiable` in warnings either way.
   - Both: date = `תאריך` (the first date; Leumi's second is the value date — never used, mirrors
     Discount), `source_label = hapoalim-<last 4 of account>` / `leumi-<last 4>`, dedup key =
     `label|date|description|amount|seq` (Leumi: `label|reference` when the reference is non-empty,
@@ -201,7 +221,12 @@ and both statements in this plan are text-layer PDFs that need none of it.
   (`{date, month, payee, amountAgorot (> 0), sourceLabel, dedupKey}`), **optional** — a skill
   predating this sends none and verifies exactly as before (the `undatedInstallment` precedent).
   `parseAgentResult` validates each field with the same `str`/`intAgorot`/regex guards, caps the
-  list at 2 000, rejects `amountAgorot <= 0`. `verifyAgentResult` adds: duplicate settlement
+  list at 2 000, rejects `amountAgorot <= 0`. `AgentSourceTotal.billingMonth?: string`
+  (`"YYYY-MM"`, optional, `MONTH_RE`-validated) — the card parsers already locate the charge
+  date (MAX: the `חיוב ב dd.mm.yyyy` summary line; Leumi card: the block charge date; Isracard
+  xlsx: the header date) and now report its month per source; bank sources send none. It is
+  carried verbatim onto `perSource[].billingMonth` so the client can enforce Decision 5
+  (Codex round-1 P2). `verifyAgentResult` adds: duplicate settlement
   `dedupKey` ⇒ fatal; a settlement `dedupKey` also present in `transactions` ⇒ fatal;
   `monthTotalsAgorot` and `uncategorizedCount` exclude nothing new (settlements are not in
   `transactions`), but a new `incomeTotalsAgorot` per month is computed from `הכנסות` rows and
@@ -229,11 +254,15 @@ and both statements in this plan are text-layer PDFs that need none of it.
 - **B4. Client write route** `PATCH /api/reports/[jobId]/settlements/[id]` — body
   `{ matchedSource: string | null }`. Auth exactly as the download route: Clerk `userId`,
   `job.targetUserId === userId`, `job.status === "published"`; additionally `matchedSource` must
-  be one of the job's **card** `perSource` labels (from `verification`) or null. Thin handler;
-  the allowed-label check is a pure function `allowedMatchTargets(verification)` in
-  `reportAnalysis.ts` under test. 404 for any job the user does not own (never 403 — the
-  download route's precedent).
-- **B5. Manifest**: unchanged. The taxonomy it serializes picks up `הכנסות` through
+  be one of the job's **card** `perSource` labels (from `verification`) or null. The update is
+  **one conditional `updateMany` whose predicate is `{ id: settlementId, jobId }`** — the
+  authorized job, never the id alone — and `count === 0` ⇒ 404 (Codex round-1 P1: ownership of
+  the job and validity of the label say nothing about which job the settlement row belongs to;
+  the download route authorizes one resource, this route names two, so both must be bound).
+  Thin handler; the allowed-label check is a pure function `allowedMatchTargets(verification)`
+  in `reportAnalysis.ts` under test. 404 for any job the user does not own and for a
+  settlement outside the job (never 403 — the download route's precedent).
+- **B5. Manifest**: unchanged in shape. The taxonomy it serializes picks up `הכנסות` through
   `getMergedTaxonomy()`; `constraints.amounts` text gains *"bank credits are income, negative;
   card-settlement debits are reported in `settlements`, never as transactions"*.
 
@@ -243,7 +272,11 @@ and both statements in this plan are text-layer PDFs that need none of it.
   total; avg }` built from `הכנסות` rows (sign flipped for display), and **removes them from
   `sections`/`monthTotals`/`grandTotal`/`distribution`**. New `netByMonth = income.byMonth −
   monthTotals` and `netAvg` (the workbook's `מצבנו`). New pure
-  `suggestMatches(settlements, perSource)` implementing Decision 5.
+  `suggestMatches(settlements, perSource)` implementing Decision 5: a card source is suggested
+  for a settlement only when it has a `billingMonth`, that month equals the settlement's
+  `month`, and `|settlement − statementTotal| ≤ 500` agorot; a source without a billing month
+  is never suggested (manual pick only), and two card sources with equal totals in different
+  months each attract only their own month's settlement.
 - **C2. `/report` page**: an **income table** per month above the expense table when the job has
   income rows (`הכנסות` header, leaf rows, `סה"כ הכנסות`), and a **`מצבנו`** row under the expense
   total: הכנסות · הוצאות · יתרה. A new card **`התאמת חיובי אשראי לחשבון הבנק`** per job that has
@@ -324,6 +357,15 @@ Skill (`python3 -m unittest`, synthetic text, no PII):
 - `test_hapoalim_sign_from_marker` — `##1` negative, `##2` positive, balance chain intact.
 - `test_leumi_amount_from_balance_delta_beats_glued_text` — ref `9562` + amount `46.32` parses as
   46.32; a deliberately wrong glued suffix produces the cross-check warning.
+- `test_leumi_debit_is_positive` / `test_leumi_credit_is_negative` — a balance falling ₪1,000 →
+  ₪900 stores `+10000`; a salary raising it stores a negative amount (Codex round-1 P1; the
+  abs-value cross-check cannot see an inversion, so each direction is asserted on its own).
+- `test_income_rules_do_not_apply_to_debits_and_expense_rules_not_to_credits` — a `ביטוח לאומי`
+  payout (credit) lands in `הכנסות נוספות`, a `ביטוח לאומי` premium (debit) from the same string
+  lands in the expense leaf `ביטוח לאומי`; a dictionary entry pointing an expense merchant at an
+  `הכנסות` leaf is ignored for a debit (Codex round-1 P1).
+- `test_card_parsers_report_billing_month` — MAX, Leumi card, Isracard each emit `billingMonth`
+  for their billed source; bank parsers emit none.
 - `test_leumi_oldest_row_is_flagged_unverifiable`
 - `test_balance_chain_break_is_a_warning_not_a_drop`
 - `test_settlement_rows_leave_transactions` — issuer debits land in `settlements`, never in
@@ -344,9 +386,13 @@ App (`pnpm test`):
 - `taxonomyInvariants.test.ts`: income section is last, disjoint from expenses and from
   `DISTRIBUTION_EXCLUDED_LEAVES`.
 - `reportAnalysis.test.ts`: income rows leave `sections`/`grandTotal`; `netByMonth`;
-  `suggestMatches` picks within ₪5 and same month only; `allowedMatchTargets` returns card
-  labels only.
-- `settlementsRoute.test.ts`: 404 not-owner, 404 unpublished, 400 label not in job, 200 sets and
+  `suggestMatches` picks within ₪5 **and** the same billing month only — two card sources with
+  equal statement totals in different months each get only their own month's settlement, and a
+  source without `billingMonth` is never suggested (Codex round-1 P2); `allowedMatchTargets`
+  returns card labels only.
+- `settlementsRoute.test.ts`: 404 not-owner, 404 unpublished, 400 label not in job, **404 when the
+  settlement id belongs to another job the caller does not own and also when it belongs to
+  another job the caller does own** (predicate is `{id, jobId}`, Codex round-1 P1), 200 sets and
   clears `matchedSource`.
 - `reportPage.test.ts`: the card renders only when settlements exist; income table only when
   income rows exist.
