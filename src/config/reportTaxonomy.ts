@@ -85,7 +85,41 @@ export const REPORT_TAXONOMY: TaxonomySection[] = [
       "מזומן ללא מעקב",
     ],
   },
+  // Income (docs/plans/bank-statements.md, Decision 1): bank-statement credits
+  // the agent recognizes as income land here. The LAST section — consumers that
+  // sum expenses skip it by name (INCOME_SECTION), never by position. Admins
+  // extend it like any section (add-only).
+  {
+    section: "הכנסות",
+    leaves: ["משכורת 1", "משכורת 2", "הכנסות נוספות", "קצבת ילדים"],
+  },
 ];
+
+/** The income section's name — the one section whose leaves are not expenses. */
+export const INCOME_SECTION = "הכנסות";
+
+/** Row kinds persisted on ReportTransaction.kind. */
+export type TxnKind = "expense" | "income" | "credit";
+
+/** True when `leaf` belongs to the income section of the given (merged) taxonomy. */
+export function isIncomeLeaf(leaf: string, taxonomy: TaxonomySection[]): boolean {
+  const sec = taxonomy.find((s) => s.section === INCOME_SECTION);
+  return !!sec && sec.leaves.includes(leaf);
+}
+
+/**
+ * The income invariant, as one predicate: a row of kind "income" may hold only
+ * an income leaf, and an income leaf may be held only by a row of kind
+ * "income". An undecided bank credit ("credit") may still go either way — into
+ * an income leaf (becoming income) or an expense leaf (becoming a refund) — so
+ * for it every leaf is allowed; the caller sets the resulting kind.
+ */
+export function leafAllowedForKind(kind: TxnKind, leaf: string, taxonomy: TaxonomySection[]): boolean {
+  const income = isIncomeLeaf(leaf, taxonomy);
+  if (kind === "income") return income;
+  if (kind === "expense") return !income;
+  return true;
+}
 
 /** Flat list of all BASE leaf category names, in display order. */
 export const TAXONOMY_LEAVES: string[] = REPORT_TAXONOMY.flatMap((s) => s.leaves);

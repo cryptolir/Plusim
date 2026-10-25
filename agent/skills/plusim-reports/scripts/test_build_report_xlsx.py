@@ -29,8 +29,10 @@ from build_report_xlsx import (  # noqa: E402
     DISTRIBUTION_SHEET,
     GOALS_SHEET,
     INCOME_LABELS,
+    INCOME_SECTION,
     MAPPING_FORM_CELLS,
     MAPPING_FORM_SHEET,
+    UNCAT_CREDITS_TITLE,
     build_workbook,
     month_title,
 )
@@ -358,3 +360,130 @@ class BuildWorkbookTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ── Bank statements: income rows, split un_categorized (docs/plans/bank-statements.md A4) ──
+
+INCOME_TAXONOMY = TAXONOMY + [
+    {"section": INCOME_SECTION, "leaves": ["משכורת 1", "משכורת 2", "הכנסות נוספות", "קצבת ילדים", "מלגה"]}
+]
+
+
+def bank_txn(month, day, merchant, agorot, category=None, kind="expense", uncat=False):
+    t = txn(month, day, merchant, agorot, category, uncat)
+    t["sourceLabel"] = "hapoalim-1812"
+    t["kind"] = kind
+    return t
+
+
+def income_sample(months=("2026-05", "2026-06")):
+    out = sample_txns(months)
+    for m in months:
+        out.append(bank_txn(m, 1, "מעסיק א", -1900000, "משכורת 1", kind="income"))
+        out.append(bank_txn(m, 10, "קצבת ילדים", -50000, "קצבת ילדים", kind="income"))
+        out.append(bank_txn(m, 12, "אוניברסיטה", -100000, "מלגה", kind="income"))
+        out.append(bank_txn(m, 15, "שירותי בריאות", -3000, "מזון ומכולת"))  # refund: expense kind
+        out.append(bank_txn(m, 20, "לא ידוע", -70000, None, kind="credit", uncat=True))
+    return out
+
+
+class IncomeWorkbookTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.wb, cls.path = build(INCOME_TAXONOMY, income_sample())
+        cls.month = month_title("2026-05")
+        cls.ws = cls.wb[cls.month]
+
+    @classmethod
+    def tearDownClass(cls):
+        os.unlink(cls.path)
+
+    def _income_rows(self):
+        grand = col_a_row(self.ws, 'סה"כ החודש')
+        labels = INCOME_TAXONOMY[-1]["leaves"]
+        return grand, {lbl: col_a_row(self.ws, lbl, after=grand) for lbl in labels}
+
+    # -- plan: test_workbook_income_block_follows_taxonomy_leaves ------------
+    def test_workbook_income_block_follows_taxonomy_leaves(self):
+        grand, rows = self._income_rows()
+        self.assertEqual(col_a_row(self.ws, "הכנסות :"), grand + 2)
+        # taxonomy order, including the admin-added leaf, 5 rows then סה"כ
+        self.assertEqual(
+            [self.ws.cell(grand + 3 + i, 1).value for i in range(6)],
+            ["משכורת 1", "משכורת 2", "הכנסות נוספות", "קצבת ילדים", "מלגה", 'סה"כ'],
+        )
+        # income cells are POSITIVE shekels (the template's זכות/חובה subtracts expenses)
+        self.assertEqual(self.ws.cell(rows["משכורת 1"], 2).value, 19000.0)
+        self.assertEqual(self.ws.cell(rows["קצבת ילדים"], 2).value, 500.0)
+        self.assertEqual(self.ws.cell(rows["מלגה"], 2).value, 1000.0)
+        self.assertIsNone(self.ws.cell(rows["משכורת 2"], 2).value)  # still hand-fillable
+        # the analysis income block iterates the same list
+        an = self.wb[ANALYSIS_SHEET]
+        hdr = col_a_row(an, "כמה כסף הבאנו הביתה")
+        self.assertEqual([an.cell(hdr + 1 + i, 1).value for i in range(5)], INCOME_TAXONOMY[-1]["leaves"])
+        self.assertEqual(an.cell(hdr + 1, 2).value, f"='{self.month}'!K{rows['משכורת 1']}")
+
+    # -- plan: test_income_rows_never_render_as_expense_rows ------------------
+    def test_income_rows_never_render_as_expense_rows(self):
+        grand, _ = self._income_rows()
+        # No הכנסות section / leaf appears in the expense skeleton (above the grand total)...
+        above = [self.ws.cell(r, 1).value for r in range(3, grand)]
+        for name in [INCOME_SECTION, "משכורת 1", "קצבת ילדים", "מלגה"]:
+            self.assertNotIn(name, above)
+        # ...nor on Main, the analysis expense rows, or the distribution.
+        main = [self.wb["Main"].cell(r, 1).value for r in range(3, self.wb["Main"].max_row + 1)]
+        self.assertNotIn(INCOME_SECTION, main)
+        an = self.wb[ANALYSIS_SHEET]
+        exp_total = col_a_row(an, 'סה"כ', after=3)
+        self.assertNotIn(INCOME_SECTION, [an.cell(r, 1).value for r in range(4, exp_total)])
+        dist = self.wb[DISTRIBUTION_SHEET]
+        self.assertEqual(dist.max_row - 1, len(TAXONOMY))  # expense sections only
+        # the refund credit (kind expense) IS an expense-leaf amount, as before
+        tcol, rows, *_ = month_geometry(self.ws, TAXONOMY)
+        food = [self.ws.cell(rows["מזון ומכולת"], c).value for c in range(2, tcol)]
+        self.assertIn(-30.0, food)
+        self.assertNotIn(-19000.0, food)
+
+    # -- plan: test_uncategorized_sheet_splits_debits_and_credits ------------
+    def test_uncategorized_sheet_splits_debits_and_credits(self):
+        ws = self.wb["un_categorized"]
+        self.assertEqual(ws.cell(4, 3).value, "מסתורי")  # debits group starts where it always did
+        debit_rows = [r for r in range(4, ws.max_row + 1) if ws.cell(r, 3).value == "מסתורי"]
+        credit_hdr = col_a_row(ws, UNCAT_CREDITS_TITLE)
+        self.assertTrue(all(r < credit_hdr for r in debit_rows))
+        # each group closes with its own live sum
+        debit_sum = next(r for r in range(4, credit_hdr) if ws.cell(r, 3).value == 'סה"כ')
+        self.assertEqual(ws.cell(debit_sum, 4).value, f"=SUM(D4:D{debit_rows[-1]})")
+        credit_rows = [r for r in range(credit_hdr, ws.max_row + 1) if ws.cell(r, 3).value == "לא ידוע"]
+        self.assertEqual(len(credit_rows), 2)
+        credit_sum = next(r for r in range(credit_hdr, ws.max_row + 1) if ws.cell(r, 3).value == 'סה"כ')
+        self.assertEqual(ws.cell(credit_sum, 4).value, f"=SUM(D{credit_rows[0]}:D{credit_rows[-1]})")
+        self.assertEqual(ws.cell(credit_rows[0], 4).value, -700.0)
+
+    # -- plan: test_card_only_job_totals_unchanged ----------------------------
+    def test_card_only_job_totals_unchanged(self):
+        """Same card-only rows under the old and the new taxonomy: every expense
+        formula, amount and total is identical; only the income block's row
+        list follows the taxonomy."""
+        old_wb, old_path = build(TAXONOMY, sample_txns())
+        new_wb, new_path = build(INCOME_TAXONOMY, sample_txns())
+        try:
+            for name in [month_title("2026-05"), month_title("2026-06")]:
+                o, n = old_wb[name], new_wb[name]
+                tcol_o, rows_o, grand_o, _, _ = month_geometry(o, TAXONOMY)
+                tcol_n, rows_n, grand_n, _, _ = month_geometry(n, TAXONOMY)
+                self.assertEqual((tcol_o, rows_o, grand_o), (tcol_n, rows_n, grand_n))
+                for r in range(1, grand_o + 1):
+                    for c in range(1, tcol_o + 1):
+                        self.assertEqual(o.cell(r, c).value, n.cell(r, c).value, f"{name} r{r}c{c}")
+                inc_n = [n.cell(r, 1).value for r in range(grand_n + 3, grand_n + 8)]
+                self.assertEqual(inc_n, INCOME_TAXONOMY[-1]["leaves"])
+                inc_o = [o.cell(r, 1).value for r in range(grand_o + 3, grand_o + 7)]
+                self.assertEqual(inc_o, INCOME_LABELS)
+            for name in [DISTRIBUTION_SHEET]:
+                o, n = old_wb[name], new_wb[name]
+                for r in range(2, o.max_row + 1):
+                    self.assertEqual(o.cell(r, 2).value, n.cell(r, 2).value)
+        finally:
+            os.unlink(old_path)
+            os.unlink(new_path)

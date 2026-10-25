@@ -18,7 +18,21 @@ invariants the scripts enforce.
   identical same-day rows (two ₪15 vending charges) are distinct transactions.
 - **Reconciliation**: per source, sum(rows) must equal the statement's own
   printed total exactly. A mismatch is reported as `needs_review` — never
-  "fixed" by adding/removing/adjusting rows to force agreement.
+  "fixed" by adding/removing/adjusting rows to force agreement. A bank
+  current-account export prints no total: its completeness is the intact
+  running-balance chain (a break is a warning naming the row).
+- **Settlements** (bank statements): a bank *debit* whose payee is a card
+  issuer (`SETTLEMENT_PAYEES` in `../scripts/bank_rows.py`, matched on whole
+  tokens, observed strings only) pays a card statement that is itemized on its
+  own. It is never a transaction — not an expense, not in any total — and is
+  reported in `settlements` for the client's reconciliation card. An issuer
+  *credit* is NOT a settlement: it stays a transaction (a card refund landing
+  in the account) and is judged like any other credit.
+- **Kind** (bank statements): a categorized row has `kind = income` exactly when
+  its leaf is in the `הכנסות` section; such a row is a negative amount from a
+  bank source. A credit placed in an expense leaf is a refund (`kind =
+  expense`, a negative in that leaf — exactly a card refund). The sign never
+  decides on its own: income and refunds are both negative.
 
 ## Judgment rules (the model step)
 
@@ -47,4 +61,20 @@ invariants the scripts enforce.
    Its שונות / ביטוח / פנאי / העברת כספים labels are too broad — judge those
    yourself.
 6. **propose: true** only for stable, recurring merchants (restaurants, clubs,
-   utilities) — not one-off or ambiguous ones.
+   utilities) — not one-off or ambiguous ones. Credit entries are never
+   proposed (the dictionary is one direction per merchant).
+7. **Credits** (bank statements; shortlist entries with `kind: "credit"`, key
+   `<merchant>␟credit`). Money came IN. Decide which of two things it is:
+   - **Income** → a leaf of the `הכנסות` section: salary (`משכורת 1` /
+     `משכורת 2` — which payer is "1" is your call unless `reportRules` pins
+     it), `קצבת ילדים`, `הכנסות נוספות` for treasury/tax/national-insurance
+     refunds and incoming transfers that are income. The income rules already
+     place `קצבת ילדים`, `ביטוח לאומי`/`בטוח לאומי`, `זיכוי מאוצה"ח`,
+     `מס-הכנסה החז`.
+   - **Refund** → the matching expense leaf with `"refund": true`: a
+     reimbursement of a known expense (`שירותי בריאות` → `בריאות משלים`, an
+     issuer credit → the leaf it refunds, a loan over-payment return →
+     `הלוואות`).
+   - Never guess between the two → `uncategorized` with a reason. An incoming
+     transfer from a person or an unknown bank with no context is
+     uncategorized, not income.

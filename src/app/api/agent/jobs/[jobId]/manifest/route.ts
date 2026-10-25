@@ -54,7 +54,10 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     callback: { resultUrl: `${base}/api/agent/jobs/${jobId}/result${q}` },
     constraints: {
       monthAssignment: "calendar month of the transaction date, never the billing month",
-      amounts: "actual charge amount in agorot (integer); credits/cancellations negative",
+      amounts:
+        "actual charge amount in agorot (integer); credits/cancellations negative; " +
+        "bank credits carry `kind`: income (negative, הכנסות leaf) or refund (negative, expense leaf); " +
+        "card-settlement debits are reported in `settlements`, never as transactions",
       uncategorizedPolicy: "never guess — unidentifiable merchants go to un_categorized with a reason",
       dedup: "pending-vs-billed and cross-source duplicates must be removed (voucher id or date|merchant|amount)",
     },

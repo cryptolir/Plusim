@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeReportsRequest } from "@/lib/reportsAdminAuth";
 import { getMergedTaxonomy } from "@/lib/reportCategories";
+import { INCOME_SECTION } from "@/config/reportTaxonomy";
 import { trashFile, sheetIdFromUrl } from "@/lib/googleDrive";
 
 export const dynamic = "force-dynamic";
@@ -41,7 +42,12 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
           uncategorized: true,
           sourceLabel: true,
           note: true,
+          kind: true,
         },
+      },
+      settlements: {
+        orderBy: [{ month: "asc" }, { date: "asc" }],
+        select: { id: true, month: true, date: true, payee: true, amountAgorot: true, sourceLabel: true, matchedCycle: true },
       },
     },
   });
@@ -56,9 +62,13 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
 
   // Merged (base ∪ ReportCategory) leaves in section order — the assign
   // picker renders from this, never from the static base constant.
-  const categoryLeaves = (await getMergedTaxonomy()).flatMap((s) => s.leaves);
+  const taxonomy = await getMergedTaxonomy();
+  const categoryLeaves = taxonomy.flatMap((s) => s.leaves);
+  // The picker filters by the row's kind (plan B5): an expense row never sees
+  // an income leaf; a credit row sees everything and the route sets its kind.
+  const incomeLeaves = taxonomy.filter((s) => s.section === INCOME_SECTION).flatMap((s) => s.leaves);
 
-  return NextResponse.json({ job, pendingMappings, categoryLeaves });
+  return NextResponse.json({ job, pendingMappings, categoryLeaves, incomeLeaves });
 }
 
 /**

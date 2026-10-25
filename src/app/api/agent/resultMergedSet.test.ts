@@ -12,6 +12,7 @@ vi.mock("@/lib/db", () => {
     reportJob: { updateMany: vi.fn() },
     reportTransaction: { deleteMany: vi.fn(), createMany: vi.fn() },
     reportArtifact: { deleteMany: vi.fn(), create: vi.fn() },
+    reportSettlement: { deleteMany: vi.fn(), createMany: vi.fn() },
   };
   return {
     __tx: tx,

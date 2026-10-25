@@ -34,7 +34,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeReportsRequest } from "@/lib/reportsAdminAuth";
-import { getValidLeafSet } from "@/lib/reportCategories";
+import { getMergedTaxonomy, getValidLeafSet } from "@/lib/reportCategories";
+import { isIncomeLeaf, type TxnKind } from "@/config/reportTaxonomy";
+import { bankSources } from "@/lib/reportAnalysis";
 
 export const dynamic = "force-dynamic";
 
@@ -79,16 +81,42 @@ export async function PATCH(
   // Each field validates independently, and only the fields actually sent are
   // written: a date-only edit must never mark a row categorized, and a
   // category-only edit must never touch the date.
-  const data: { category?: string; uncategorized?: boolean; date?: string; month?: string } = {};
+  const data: { category?: string; uncategorized?: boolean; date?: string; month?: string; kind?: TxnKind } = {};
 
   let category = "";
+  let incomeLeaf = false;
   if (wantsCategory) {
     category = typeof body.category === "string" ? body.category : "";
     if (!(await getValidLeafSet()).has(category)) {
       return NextResponse.json({ error: "קטגוריה לא מוכרת" }, { status: 400 });
     }
+    // Income invariant (docs/plans/bank-statements.md B5): an הכנסות leaf makes
+    // the row income and is allowed only on a bank credit (negative amount from
+    // a source with no printed total); any other leaf makes it an expense — for
+    // a credit that is a refund. The kind is written in the SAME update as the
+    // category so the two can never diverge (verification treats a mismatch as
+    // fatal). The pre-read is for validation only; the write below is still the
+    // one conditional statement.
+    incomeLeaf = isIncomeLeaf(category, await getMergedTaxonomy());
+    if (incomeLeaf) {
+      const row = await db.reportTransaction.findFirst({
+        where: { id: txId, jobId },
+        select: { amountAgorot: true, sourceLabel: true, job: { select: { verification: true } } },
+      });
+      if (!row) return NextResponse.json({ error: "העסקה לא נמצאה" }, { status: 404 });
+      if (row.amountAgorot >= 0) {
+        return NextResponse.json({ error: "קטגוריית הכנסה אפשרית רק לזיכוי (סכום שלילי)" }, { status: 400 });
+      }
+      // Bank-ness is the parser's explicit flag on the stored verification
+      // (perSource[].bank) — never "no printed total". Fails closed on a null
+      // or old-shape verification.
+      if (!bankSources(row.job.verification).has(row.sourceLabel)) {
+        return NextResponse.json({ error: "קטגוריית הכנסה אפשרית רק לשורה מחשבון בנק" }, { status: 400 });
+      }
+    }
     data.category = category;
     data.uncategorized = false;
+    data.kind = incomeLeaf ? "income" : "expense";
   }
 
   if (wantsDate) {
@@ -121,13 +149,17 @@ export async function PATCH(
     );
   }
 
-  // Only after a write that actually landed, and only for a category edit.
-  if (wantsCategory && body.rememberMerchant === true) {
+  // Only after a write that actually landed, and only for an EXPENSE category
+  // edit: the dictionary holds one direction per merchant, so an income leaf
+  // (or a refund decision on a credit) is never remembered.
+  if (wantsCategory && body.rememberMerchant === true && !incomeLeaf) {
     const tx = await db.reportTransaction.findFirst({
       where: { id: txId, jobId },
-      select: { merchant: true },
+      select: { merchant: true, amountAgorot: true },
     });
-    if (tx) {
+    // A negative row that just took an expense leaf is a refund credit — its
+    // merchant's dictionary entry (if any) describes the DEBIT direction.
+    if (tx && tx.amountAgorot >= 0) {
       await db.merchantMapping.upsert({
         where: { merchantPattern: tx.merchant },
         create: { merchantPattern: tx.merchant, category, source: "admin", approved: true },

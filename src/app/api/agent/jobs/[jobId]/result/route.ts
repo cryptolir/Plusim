@@ -16,7 +16,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeAgentJobRequest } from "@/lib/agentRuntimeAuth";
 import { parseAgentResult, verifyAgentResult, decodeXlsx, rejectionHe } from "@/lib/reportResult";
-import { getValidLeafSet } from "@/lib/reportCategories";
+import { getMergedTaxonomy, getValidLeafSet } from "@/lib/reportCategories";
+import { isIncomeLeaf } from "@/config/reportTaxonomy";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -46,8 +47,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     // The merged (base ∪ ReportCategory) leaf set — read at callback time, so a
     // superset of whatever taxonomy the manifest served earlier (add-only).
     const validLeaves = await getValidLeafSet();
+    const taxonomy = await getMergedTaxonomy();
     const result = parseAgentResult(body, validLeaves);
-    const verification = verifyAgentResult(result, validLeaves);
+    const verification = verifyAgentResult(result, validLeaves, taxonomy);
     const xlsx = decodeXlsx(result.xlsxBase64);
 
     const completedOk = result.status === "ok" && !verification.fatal;
@@ -71,6 +73,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
         if (upd.count === 0) throw new JobClosedError();
 
         await tx.reportTransaction.deleteMany({ where: { jobId } });
+        await tx.reportSettlement.deleteMany({ where: { jobId } });
         await tx.reportArtifact.deleteMany({ where: { jobId } });
         await tx.reportTransaction.createMany({
           data: result.transactions.map((t) => ({
@@ -84,8 +87,26 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
             sourceLabel: t.sourceLabel,
             note: t.note ?? null,
             dedupKey: t.dedupKey,
+            // absent ⇒ "expense" — a skill predating the field stores as before
+            kind: t.kind ?? "expense",
           })),
         });
+        // Settlements are replaced together with the transactions, atomically —
+        // so a re-run can never leave last run's settlements beside this run's
+        // rows. Matches do not survive (the rows are new); the card re-suggests.
+        if (result.settlements && result.settlements.length > 0) {
+          await tx.reportSettlement.createMany({
+            data: result.settlements.map((s) => ({
+              jobId,
+              month: s.month,
+              date: s.date,
+              payee: s.payee,
+              amountAgorot: s.amountAgorot,
+              sourceLabel: s.sourceLabel,
+              dedupKey: s.dedupKey,
+            })),
+          });
+        }
         await tx.reportArtifact.create({
           data: {
             jobId,
@@ -106,7 +127,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     // Best-effort AFTER the job is committed: a mapping hiccup must not demote the
     // stored report (so it runs outside the outer try's error handling).
     try {
-      for (const m of result.proposedMappings.slice(0, 200)) {
+      // The dictionary is one direction per merchant (expense); an income-leaf
+      // proposal would be stored and never applied — the skill never sends one.
+      for (const m of result.proposedMappings.filter((m) => !isIncomeLeaf(m.category, taxonomy)).slice(0, 200)) {
         await db.merchantMapping.upsert({
           where: { merchantPattern: m.merchant },
           create: { merchantPattern: m.merchant, category: m.category, source: "agent", approved: false },

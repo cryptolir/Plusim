@@ -52,6 +52,7 @@ export default async function AdminReportViewPage({ params }: { params: Promise<
           uncategorized: true,
           sourceLabel: true,
           note: true,
+          kind: true,
         },
       },
     },

@@ -2,7 +2,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeReportsRequest } from "@/lib/reportsAdminAuth";
-import { getValidLeafSet } from "@/lib/reportCategories";
+import { getMergedTaxonomy, getValidLeafSet } from "@/lib/reportCategories";
+import { isIncomeLeaf } from "@/config/reportTaxonomy";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +26,12 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     typeof body.category === "string" && body.category ? body.category : mapping.category;
   if (!(await getValidLeafSet()).has(category)) {
     return NextResponse.json({ error: "קטגוריה לא מוכרת" }, { status: 400 });
+  }
+  // The dictionary is the EXPENSE direction of a merchant: the skill's
+  // categorize() ignores a dictionary hit in an income leaf, so approving one
+  // would store a mapping that never applies (docs/plans/bank-statements.md A2).
+  if (isIncomeLeaf(category, await getMergedTaxonomy())) {
+    return NextResponse.json({ error: "מילון בתי העסק שומר קטגוריות הוצאה בלבד — הכנסות מסווגות לפי כללי הסיווג" }, { status: 400 });
   }
 
   await db.merchantMapping.update({

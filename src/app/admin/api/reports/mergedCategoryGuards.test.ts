@@ -62,7 +62,7 @@ describe("assign route uses the merged set", () => {
     );
     expect(res.status).toBe(200);
     expect(txUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { category: DB_LEAF, uncategorized: false } }),
+      expect.objectContaining({ data: { category: DB_LEAF, uncategorized: false, kind: "expense" } }),
     );
   });
 
@@ -87,6 +87,18 @@ describe("mapping route uses the merged set", () => {
     expect(db.merchantMapping.update).toHaveBeenCalledWith(
       expect.objectContaining({ data: { approved: true, category: DB_LEAF } }),
     );
+  });
+});
+
+describe("mapping approval keeps the dictionary expense-only", () => {
+  it("rejects an הכנסות leaf with 400 — the skill ignores dictionary hits in income leaves", async () => {
+    mapFind.mockResolvedValue({ id: "m1", merchantPattern: "ביטוח לאומי", category: "ביט" });
+    const res = await mappingPATCH(
+      patchReq("https://plusim.xyz/admin/api/report-mappings/m1", { approved: true, category: "הכנסות נוספות" }),
+      { params: Promise.resolve({ id: "m1" }) },
+    );
+    expect(res.status).toBe(400);
+    expect(db.merchantMapping.update).not.toHaveBeenCalled();
   });
 });
 

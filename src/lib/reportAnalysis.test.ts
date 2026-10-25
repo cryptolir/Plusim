@@ -1,10 +1,19 @@
 import { describe, it, expect } from "vitest";
-import { buildAnalysis, monthTitle, DISTRIBUTION_EXCLUDED_LEAVES, type AnalysisTxn } from "./reportAnalysis";
+import {
+  buildAnalysis,
+  monthTitle,
+  DISTRIBUTION_EXCLUDED_LEAVES,
+  allowedMatchTargets,
+  matchTargets,
+  suggestMatches,
+  type AnalysisTxn,
+} from "./reportAnalysis";
 import type { TaxonomySection } from "@/config/reportTaxonomy";
 
 const TAX: TaxonomySection[] = [
   { section: "בית", leaves: ["חשמל", "גז"] },
   { section: "שונות", leaves: ["ביט", "עסק", "מעמ", "מס הכנסה", "ביטוח לאומי"] },
+  { section: "הכנסות", leaves: ["משכורת 1", "משכורת 2", "הכנסות נוספות", "קצבת ילדים"] },
 ];
 
 let n = 0;
@@ -59,7 +68,7 @@ describe("buildAnalysis", () => {
 
   it("drops leaves with no movement but keeps every section row", () => {
     const a = buildAnalysis([tx({ category: "חשמל" })], TAX);
-    expect(a.sections.map((s) => s.section)).toEqual(["בית", "שונות"]);
+    expect(a.sections.map((s) => s.section)).toEqual(["בית", "שונות"]); // never הכנסות
     expect(a.sections[0].leaves.map((l) => l.leaf)).toEqual(["חשמל"]);
     expect(a.sections[1].leaves).toEqual([]);
   });
@@ -190,5 +199,159 @@ describe("buildAnalysis", () => {
   it("monthTitle renders Hebrew months and passes junk through", () => {
     expect(monthTitle("2026-06")).toBe("יוני 2026");
     expect(monthTitle("nope")).toBe("nope");
+  });
+});
+
+// ── Bank statements (docs/plans/bank-statements.md C1) ────────────────────────
+describe("income, uncategorized credits, מצבנו", () => {
+  const salary = (over: Partial<AnalysisTxn> = {}) =>
+    tx({ merchant: "מעסיק", amountAgorot: -1900000, category: "משכורת 1", kind: "income", sourceLabel: "hapoalim-1812", ...over });
+
+  it("income rows leave sections/grandTotal and form a positive income block in taxonomy order", () => {
+    const a = buildAnalysis(
+      [
+        tx({ category: "חשמל", amountAgorot: 1000 }),
+        salary(),
+        salary({ category: "קצבת ילדים", amountAgorot: -43700 }),
+        salary({ category: "מלגה", amountAgorot: -100 }), // income leaf unknown to this taxonomy
+      ],
+      TAX,
+    );
+    expect(a.grandTotal).toBe(1000);
+    expect(a.monthTotals).toEqual([1000]);
+    expect(a.sections.flatMap((s) => s.leaves.map((l) => l.leaf))).toEqual(["חשמל"]);
+    expect(a.sections.some((s) => s.section === "מחוץ לטבלה")).toBe(false);
+    expect(a.income.leaves.map((l) => l.leaf)).toEqual(["משכורת 1", "קצבת ילדים", "מלגה"]);
+    expect(a.income.leaves[0].byMonth).toEqual([1900000]);
+    expect(a.income.total).toBe(1943800);
+    expect(a.income.avg).toBe(1943800);
+    expect(a.distribution.map((d) => d.section)).toEqual(["בית"]);
+  });
+
+  it("netByMonth = income − expenses, per month and on average", () => {
+    const a = buildAnalysis(
+      [
+        tx({ month: "2026-01", amountAgorot: 1000 }),
+        tx({ month: "2026-02", amountAgorot: 3000 }),
+        salary({ month: "2026-01", date: "2026-01-01", amountAgorot: -5000 }),
+      ],
+      TAX,
+    );
+    expect(a.netByMonth).toEqual([4000, -3000]);
+    expect(a.netAvg).toBe(500);
+  });
+
+  it("a refund credit (kind expense) stays in its expense leaf as a negative", () => {
+    const a = buildAnalysis([tx({ category: "חשמל", amountAgorot: -300, kind: "expense" })], TAX);
+    expect(a.grandTotal).toBe(-300);
+    expect(a.income.total).toBe(0);
+  });
+
+  it("uncategorized debits and credits are summed separately", () => {
+    const a = buildAnalysis(
+      [
+        tx({ uncategorized: true, category: null, amountAgorot: 700 }),
+        tx({ uncategorized: true, category: null, amountAgorot: -1900000, kind: "credit" }),
+      ],
+      TAX,
+    );
+    expect(a.uncategorized).toHaveLength(1);
+    expect(a.uncategorizedTotal).toBe(700);
+    expect(a.uncategorizedCredits).toHaveLength(1);
+    expect(a.uncategorizedCreditsTotal).toBe(-1900000);
+    expect(a.txCount).toBe(2);
+  });
+});
+
+describe("suggestMatches / allowedMatchTargets (Decision 5)", () => {
+  const per = (cycles: { chargeDate: string; amountAgorot: number }[], extra: object[] = []) => [
+    { label: "hapoalim-1812", statementTotalAgorot: null },
+    { label: "max-1-billed", statementTotalAgorot: cycles.reduce((n, c) => n + c.amountAgorot, 0), chargeCycles: cycles },
+    ...extra,
+  ] as Parameters<typeof suggestMatches>[1];
+  const s = (id: string, amountAgorot: number, over: Partial<{ month: string; payee: string }> = {}) => ({
+    id,
+    month: "2026-09",
+    payee: "מקס איט פיננ-י",
+    amountAgorot,
+    ...over,
+  });
+
+  it("same month and within ₪5 on ONE settlement", () => {
+    const m = suggestMatches([s("a", 1539514)], per([{ chargeDate: "2026-09-10", amountAgorot: 1539800 }]));
+    expect(m.get("a")).toBe("max-1-billed@2026-09-10");
+    const far = suggestMatches([s("a", 1539514)], per([{ chargeDate: "2026-09-10", amountAgorot: 1540100 }]));
+    expect(far.size).toBe(0);
+  });
+
+  it("two same-issuer same-month debits → one cycle (the Leumi/MAX shape)", () => {
+    const m = suggestMatches(
+      [s("a", 1539514), s("b", 675655)],
+      per([{ chargeDate: "2026-09-10", amountAgorot: 1539514 + 675655 }]),
+    );
+    expect(m.get("a")).toBe("max-1-billed@2026-09-10");
+    expect(m.get("b")).toBe("max-1-billed@2026-09-10");
+    // a different issuer in the same month does not join the sum
+    const other = suggestMatches(
+      [s("a", 1539514), s("b", 675655, { payee: 'ישראכרט בע"מ' })],
+      per([{ chargeDate: "2026-09-10", amountAgorot: 1539514 + 675655 }]),
+    );
+    expect(other.size).toBe(0);
+  });
+
+  it("the target includes a sibling -foreign total on the REGULAR (latest) cycle only; cycles stay domestic-only", () => {
+    const perSource = [
+      { label: "hapoalim-1812", statementTotalAgorot: null, bank: true },
+      { label: "card-domestic", statementTotalAgorot: 73286, chargeCycles: [{ chargeDate: "2026-09-02", amountAgorot: 73286 }] },
+      { label: "card-foreign", statementTotalAgorot: 4500 },
+    ];
+    const t = matchTargets(perSource);
+    expect(t).toEqual([
+      { id: "card-domestic@2026-09-02", label: "card-domestic", chargeDate: "2026-09-02", amountAgorot: 73286, targetAgorot: 77786 },
+    ]);
+    expect(suggestMatches([s("a", 77786)], perSource).get("a")).toBe("card-domestic@2026-09-02");
+    expect(suggestMatches([s("a", 73286)], perSource).size).toBe(0);
+    // an early-repayment block (earlier date) carries no foreign charges
+    const two = [
+      { label: "card-domestic", statementTotalAgorot: 400000, chargeCycles: [{ chargeDate: "2026-09-02", amountAgorot: 300000 }, { chargeDate: "2026-09-20", amountAgorot: 100000 }] },
+      { label: "card-foreign", statementTotalAgorot: 80000 },
+    ];
+    expect(matchTargets(two).map((x) => [x.chargeDate, x.targetAgorot])).toEqual([["2026-09-02", 300000], ["2026-09-20", 180000]]);
+  });
+
+  it("two cycles within ₪5 of one debit in the same month is ambiguous — no suggestion", () => {
+    const perSource = [
+      { label: "max-1-billed", statementTotalAgorot: 240000, chargeCycles: [{ chargeDate: "2026-09-10", amountAgorot: 240000 }] },
+      { label: "isracard-1-domestic", statementTotalAgorot: 239800, chargeCycles: [{ chargeDate: "2026-09-02", amountAgorot: 239800 }] },
+    ];
+    expect(suggestMatches([s("a", 239800, { payee: 'ישראכרט בע"מ' })], perSource).size).toBe(0);
+    // unambiguous when only one is within tolerance
+    perSource[0].chargeCycles[0].amountAgorot = 250000;
+    expect(suggestMatches([s("a", 239800, { payee: 'ישראכרט בע"מ' })], perSource).get("a")).toBe("isracard-1-domestic@2026-09-02");
+  });
+
+  it("two blocks in one month are two targets; equal cycles in different months take their own month", () => {
+    const perSource = per([
+      { chargeDate: "2026-09-02", amountAgorot: 53386 },
+      { chargeDate: "2026-09-15", amountAgorot: 19900 },
+    ]);
+    expect(allowedMatchTargets({ perSource })).toEqual(["max-1-billed@2026-09-02", "max-1-billed@2026-09-15"]);
+    const m = suggestMatches([s("a", 53386), s("b", 19900, { payee: "לאומי ויזה" })], perSource);
+    expect(m.get("a")).toBe("max-1-billed@2026-09-02");
+    expect(m.get("b")).toBe("max-1-billed@2026-09-15");
+    const twoMonths = per([
+      { chargeDate: "2026-08-10", amountAgorot: 1000 },
+      { chargeDate: "2026-09-10", amountAgorot: 1000 },
+    ]);
+    const mm = suggestMatches([s("aug", 1000, { month: "2026-08" }), s("sep", 1000)], twoMonths);
+    expect(mm.get("aug")).toBe("max-1-billed@2026-08-10");
+    expect(mm.get("sep")).toBe("max-1-billed@2026-09-10");
+  });
+
+  it("no cycles ⇒ no suggestion; allowedMatchTargets is [] on null or an old-shape verification", () => {
+    expect(suggestMatches([s("a", 1000)], [{ label: "hapoalim-1812", statementTotalAgorot: null }]).size).toBe(0);
+    expect(allowedMatchTargets(null)).toEqual([]);
+    expect(allowedMatchTargets({ problems: [] })).toEqual([]);
+    expect(allowedMatchTargets({ perSource: [{ label: "x", statementTotalAgorot: 5 }] })).toEqual([]);
   });
 });

@@ -36,7 +36,8 @@ import urllib.request
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "vendor"))
 sys.path.insert(0, _HERE)
-from build_report_xlsx import build_workbook  # noqa: E402
+from build_report_xlsx import INCOME_SECTION, build_workbook  # noqa: E402
+from parse_bank_pdf import detect_bank_pdf, parse_bank_pdf  # noqa: E402
 from parse_discount_xlsx import parse_discount_xlsx  # noqa: E402
 from parse_isracard_xlsx import parse_isracard_xlsx  # noqa: E402
 from parse_leumi_pdf import detect_leumi_pdf, parse_leumi_pdf  # noqa: E402
@@ -120,7 +121,33 @@ RULES: list[tuple[str, str]] = [
     ("CELLO", "אפליקציות"),
     ("בראנד אספקה טכנית", "אחזקה ותיקונים"),
     ("מפעל הפיס", "פיס"),
+    # Bank current-account debits (docs/plans/bank-statements.md A2) — rows no
+    # card statement carries. Expense direction only: RULES never place a credit.
+    ("לאומי למשכנתאו", 'שכ"ד/משכנתא'),
+    ("פרעון הלוואה", "הלוואות"),
+    ("פריסה לתשלומים", "הלוואות"),
+    ("ע.מפעולות", "עמלות+ריביות"),
+    ("עמל.ערוץ", "עמלות+ריביות"),
+    ("ריבית חובה", "עמלות+ריביות"),
+    ("שיק", "צ'קים ללא מעקב"),
+    ("העב' לאחר", "העברות בנקאיות"),
 ]
+
+# Bank CREDIT rows run these and ONLY these (never RULES: a reimbursement from
+# "שירותי בריאות" must not be auto-filed as the expense leaf — it is the model's
+# call whether a credit is income or a refund). A hit makes the row income.
+INCOME_RULES: list[tuple[str, str]] = [
+    ("קצבת ילדים", "קצבת ילדים"),
+    ("ביטוח לאומי", "הכנסות נוספות"),
+    ("בטוח לאומי", "הכנסות נוספות"),  # spelling without yod, as printed by Hapoalim
+    ('זיכוי מאוצה"ח', "הכנסות נוספות"),
+    ("מס-הכנסה החז", "הכנסות נוספות"),
+]
+
+# Shortlist / judgments.json key for a credit row: "<merchant>␟credit". U+241F is
+# never produced by normalize_merchant, so an expense key and a credit key for
+# the same counterparty can never collide (plan Rev 3).
+CREDIT_KEY_SEP = "\u241f"
 
 # When no dictionary/rule hit, MAX's own printed category may be trusted for
 # these unambiguous leaves only (the rest need judgment).
@@ -273,14 +300,19 @@ def parse_pdf_auto(path: str, label: str, name: str):
     current-account export, another issuer) was parsed as a MAX statement and
     silently produced zero rows.
     """
+    # Bank FIRST: both real bank exports contain "ישראכרט" settlement rows and
+    # dd/mm/yyyy dates, so a card detector run first could claim them (plan
+    # Rev 4 P1). The card detectors are tightened too, so order is belt and braces.
+    if detect_bank_pdf(path):
+        return parse_bank_pdf(path, label)
     if detect_leumi_pdf(path):
         return parse_leumi_pdf(path, label)
     if detect_max_pdf(path):
         return parse_max_pdf(path, label)
     raise UnknownStatementError(
-        f"{name}: unrecognized PDF — not a MAX or Leumi/Isracard card statement. "
-        "Bank current-account (עובר ושב) statements are supported as xlsx only; "
-        "re-export from the bank site as Excel."
+        f"{name}: unrecognized PDF — not a MAX or Leumi/Isracard card statement and "
+        "not a Bank Hapoalim / Bank Leumi current-account (עובר ושב) export. "
+        "Supported bank exports: Hapoalim and Leumi as PDF, Discount as xlsx."
     )
 
 
@@ -326,29 +358,73 @@ def http_download(url: str, dest: str) -> None:
         shutil.copyfileobj(res, f)
 
 
-def categorize(txns: list[dict], dictionary: dict[str, str], leaves: set[str]) -> list[dict]:
-    """Deterministic pass. Returns the still-unresolved merchant shortlist."""
+def income_leaves(taxonomy: list[dict]) -> set[str]:
+    return {leaf for sec in taxonomy if sec["section"] == INCOME_SECTION for leaf in sec["leaves"]}
+
+
+def judgment_key(merchant: str, kind: str) -> str:
+    """The shortlist / judgments.json key: "<merchant>" for an expense row,
+    "<merchant>␟credit" for a credit row (plan A2)."""
+    m = normalize_merchant(merchant)
+    return m + CREDIT_KEY_SEP + "credit" if kind == "credit" else m
+
+
+def normalize_judgment_key(raw: str) -> str:
+    head, sep, tail = raw.partition(CREDIT_KEY_SEP)
+    return normalize_merchant(head) + (sep + tail.strip() if sep else "")
+
+
+def categorize(
+    txns: list[dict], dictionary: dict[str, str], leaves: set[str], income: set[str] | None = None
+) -> list[dict]:
+    """Deterministic pass. Returns the still-unresolved shortlist, one entry per
+    (merchant, kind) key.
+
+    Kind-aware (plan A2): expense rows (every card row, bank debits) run
+    dictionary → RULES → MAX map but never take an income leaf; credit rows
+    (bank credits) run INCOME_RULES only — a hit makes them income, anything
+    else is the model's call (income leaf, or an expense leaf with "refund").
+    """
+    income = income if income is not None else set()
     unresolved: dict[str, dict] = {}
     for t in txns:
         if t.get("category") or t.get("uncategorized"):
             continue
         merchant = normalize_merchant(t["merchant"])
-        hit = dictionary.get(merchant)
-        if hit and hit in leaves:
-            t["category"] = hit
-            continue
-        for pattern, leaf in RULES:
-            if pattern in merchant or pattern.upper() in merchant.upper():
-                t["category"] = leaf
-                break
-        if t.get("category"):
-            continue
-        mapped = MAX_CATEGORY_MAP.get(t.get("max_category", ""))
-        if mapped:
-            t["category"] = mapped
-            continue
+        kind = t.get("kind") or "expense"
+        if kind == "credit":
+            for pattern, leaf in INCOME_RULES:
+                if pattern in merchant and leaf in income:
+                    t["category"] = leaf
+                    t["kind"] = "income"
+                    break
+            if t.get("category"):
+                continue
+        else:
+            hit = dictionary.get(merchant)
+            if hit and hit in leaves and hit not in income:
+                t["category"] = hit
+                continue
+            for pattern, leaf in RULES:
+                if (pattern in merchant or pattern.upper() in merchant.upper()) and leaf not in income:
+                    t["category"] = leaf
+                    break
+            if t.get("category"):
+                continue
+            mapped = MAX_CATEGORY_MAP.get(t.get("max_category", ""))
+            if mapped:
+                t["category"] = mapped
+                continue
+        key = judgment_key(merchant, kind)
         entry = unresolved.setdefault(
-            merchant, {"merchant": merchant, "samples": [], "maxCategory": t.get("max_category", "")}
+            key,
+            {
+                "key": key,
+                "merchant": merchant,
+                "kind": kind,
+                "samples": [],
+                "maxCategory": t.get("max_category", ""),
+            },
         )
         if len(entry["samples"]) < 5:
             entry["samples"].append(
@@ -375,7 +451,10 @@ def cmd_prepare(args) -> None:
         json.dump(manifest, f, ensure_ascii=False)
 
     all_txns: list[dict] = []
+    settlements: list[dict] = []
     source_totals: dict[str, int | None] = {}
+    charge_cycles: dict[str, list[dict]] = {}
+    bank_labels: set[str] = set()
     warnings: list[str] = []
     max_seq = 0
     for file in manifest["files"]:
@@ -393,6 +472,22 @@ def cmd_prepare(args) -> None:
         if not r.transactions:
             warnings.append(f"{file['name']}: parsed 0 transactions — check the file covers a billed period")
         for t in r.transactions:
+            kind = getattr(t, "kind", "expense")
+            if kind == "settlement":
+                # A bank debit paying a card statement: every shekel of it is
+                # itemized on the card statement, so it never enters the
+                # transaction stream. Kept for the reconciliation card (plan A2).
+                settlements.append(
+                    {
+                        "date": t.date,
+                        "month": t.date[:7],
+                        "payee": normalize_merchant(t.merchant),
+                        "amountAgorot": t.amount_agorot,
+                        "sourceLabel": t.source_label,
+                        "dedupKey": t.dedup_key,
+                    }
+                )
+                continue
             all_txns.append(
                 {
                     "month": t.date[:7],
@@ -405,6 +500,10 @@ def cmd_prepare(args) -> None:
                     "note": t.note,
                     "max_category": t.max_category,
                     "dedupKey": t.dedup_key,
+                    # "expense" (default, every card row) | "credit" (a bank
+                    # credit the model still has to place) — becomes "income"
+                    # or stays "expense" (refund) once categorized.
+                    "kind": kind,
                     # Only PDF card parsers set this; xlsx parsers have no such
                     # attribute, hence getattr with a False default.
                     "undatedInstallment": getattr(t, "undated_installment", False),
@@ -414,6 +513,10 @@ def cmd_prepare(args) -> None:
             if label in source_totals:
                 warnings.append(f"duplicate source label {label} across files")
             source_totals[label] = total
+        for label, cycles in getattr(r, "charge_cycles", {}).items():
+            if cycles:
+                charge_cycles[label] = cycles
+        bank_labels |= set(getattr(r, "bank_labels", ()))
         warnings.extend(r.warnings)
 
     leaves = {leaf for sec in manifest["taxonomy"] for leaf in sec["leaves"]}
@@ -421,7 +524,7 @@ def cmd_prepare(args) -> None:
         normalize_merchant(d["merchantPattern"]): d["category"]
         for d in manifest.get("merchantDictionary", [])
     }
-    shortlist = categorize(all_txns, dictionary, leaves)
+    shortlist = categorize(all_txns, dictionary, leaves, income_leaves(manifest["taxonomy"]))
 
     # Admin-authored extra categorization rules (edited in the Plusim app's
     # /admin/settings, carried in the manifest). The model applies these ON TOP
@@ -429,7 +532,14 @@ def cmd_prepare(args) -> None:
     # string ⇒ the static playbook only (behavior unchanged from before).
     report_rules = manifest.get("reportRules") or ""
 
-    state = {"txns": all_txns, "sourceTotals": source_totals, "warnings": warnings}
+    state = {
+        "txns": all_txns,
+        "settlements": settlements,
+        "sourceTotals": source_totals,
+        "chargeCycles": charge_cycles,
+        "bankLabels": sorted(bank_labels),
+        "warnings": warnings,
+    }
     with open(os.path.join(wd, "state.json"), "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False)
     with open(os.path.join(wd, "needs_judgment.json"), "w", encoding="utf-8") as f:
@@ -441,6 +551,7 @@ def cmd_prepare(args) -> None:
                 "phase": "prepare",
                 "files": len(manifest["files"]),
                 "transactions": len(all_txns),
+                "settlements": len(settlements),
                 "autoCategorized": sum(1 for t in all_txns if t["category"]),
                 "needsJudgment": len(shortlist),
                 "reportRules": bool(report_rules),
@@ -462,28 +573,55 @@ def cmd_finalize(args) -> None:
     jpath = os.path.join(wd, "judgments.json")
     if os.path.exists(jpath):
         with open(jpath, encoding="utf-8") as f:
-            judgments = {normalize_merchant(k): v for k, v in json.load(f).items()}
+            judgments = {normalize_judgment_key(k): v for k, v in json.load(f).items()}
 
     leaves = {leaf for sec in manifest["taxonomy"] for leaf in sec["leaves"]}
+    income = income_leaves(manifest["taxonomy"])
     proposed: list[dict] = []
+
+    def add_note(t: dict, text: str) -> None:
+        t["note"] = (t.get("note") or "") + (" · " if t.get("note") else "") + text
+
     for t in state["txns"]:
         if t["category"] or t["uncategorized"]:
             continue
-        j = judgments.get(normalize_merchant(t["merchant"]))
-        if j and j.get("category") in leaves and not j.get("uncategorized"):
+        kind = t.get("kind") or "expense"
+        j = judgments.get(judgment_key(t["merchant"], kind))
+        decided = bool(j) and j.get("category") in leaves and not j.get("uncategorized")
+        if decided and kind == "credit":
+            # A credit decision is either an income leaf (⇒ income) or an
+            # expense leaf flagged "refund": true (⇒ a negative in that leaf,
+            # like a card refund). Any other shape is rejected, not guessed.
+            if j["category"] in income:
+                t["kind"] = "income"
+            elif j.get("refund") is True:
+                t["kind"] = "expense"
+            else:
+                decided = False
+                j = {"note": f"זיכוי סווג ל-{j['category']} ללא דגל refund — נדרשת הכרעה"}
+        elif decided and j["category"] in income:
+            # An expense row (card or bank debit) can never be income.
+            decided = False
+            j = {"note": f"חיוב סווג לענף הכנסות {j['category']} — לא ייתכן"}
+        if decided:
             t["category"] = j["category"]
             if j.get("note"):
-                t["note"] = (t.get("note") or "") + (" · " if t.get("note") else "") + j["note"]
-            if j.get("propose"):
+                add_note(t, j["note"])
+            # The dictionary is one direction per merchant (unique pattern), so
+            # only expense decisions may be proposed into it (plan A2).
+            if j.get("propose") and kind != "credit":
                 entry = {"merchant": normalize_merchant(t["merchant"]), "category": j["category"], "evidence": j.get("note", "")}
                 if entry not in proposed:
                     proposed.append(entry)
         else:
             t["uncategorized"] = True
-            reason = (j or {}).get("note") or "לא זוהה סיווג ודאי"
-            t["note"] = (t.get("note") or "") + (" · " if t.get("note") else "") + reason
+            add_note(t, (j or {}).get("note") or "לא זוהה סיווג ודאי")
 
-    ok, problems, summary = verify(state["txns"], state["sourceTotals"], manifest["taxonomy"])
+    settlements = state.get("settlements", [])
+    bank_labels = set(state.get("bankLabels", []))
+    ok, problems, summary = verify(
+        state["txns"], state["sourceTotals"], manifest["taxonomy"], settlements=settlements, bank_labels=bank_labels
+    )
 
     # An installment left on its deal date may sit in the wrong MONTH, so say so
     # — but do NOT flip `ok`: a missing charge date must never block the report
@@ -514,6 +652,9 @@ def cmd_finalize(args) -> None:
                 "sourceLabel": t["sourceLabel"],
                 "note": t.get("note") or None,
                 "dedupKey": t["dedupKey"],
+                # "income" / "credit" explicit, "expense" omitted — an app that
+                # predates the field sees the exact payload it always did.
+                **({"kind": t["kind"]} if t.get("kind") in ("income", "credit") else {}),
                 # Transient integrity flag — the app turns it into a FATAL
                 # verification problem so an installment stuck on its deal date
                 # (wrong month) can never be published. Omitted when false so
@@ -529,9 +670,19 @@ def cmd_finalize(args) -> None:
                 "computedTotalAgorot": sum(
                     t["amountAgorot"] for t in state["txns"] if t["sourceLabel"] == label
                 ),
+                # One per charge block of a card source; Σ == the total (B2).
+                **(
+                    {"chargeCycles": state["chargeCycles"][label]}
+                    if state.get("chargeCycles", {}).get(label)
+                    else {}
+                ),
+                # A bank current-account source — the only kind income may
+                # come from. Explicit, never inferred from a missing total.
+                **({"bank": True} if label in bank_labels else {}),
             }
             for label, total in state["sourceTotals"].items()
         ],
+        "settlements": settlements,
         "xlsxBase64": xlsx_b64,
         "xlsxFilename": f"plusim-report-{manifest['job']['id']}.xlsx",
         "proposedMappings": proposed,
