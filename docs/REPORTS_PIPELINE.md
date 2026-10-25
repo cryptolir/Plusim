@@ -1,8 +1,9 @@
 # Statement-categorization pipeline (admin upload → onlyclaw → client report)
 
-Admin uploads credit-card statements, the `onlyclaw` AgentGlob agent
-categorizes them into the household budget taxonomy, and the target user sees
-the processed report in `/report`. Agent-side skill + ops runbook:
+Admin uploads credit-card statements and bank current-account exports, the
+`onlyclaw` AgentGlob agent categorizes them into the household budget taxonomy
+(expenses AND income), sets card-settlement debits aside for reconciliation, and
+the target user sees the processed report in `/report`. Agent-side skill + ops runbook:
 [`agent/skills/plusim-reports/`](../agent/skills/plusim-reports/) (see
 `AGENT_SETUP.md` there).
 
@@ -19,17 +20,25 @@ the processed report in `/report`. Agent-side skill + ops runbook:
    → onlyclaw (plusim-reports skill):
         GET  /api/agent/jobs/:id/manifest   (files, taxonomy, dictionary, report_rules, callback)
         GET  /api/agent/jobs/:id/files/:fid
-        python: parse (Isracard xlsx / MAX pdf) → dedup → deterministic categorize
-        model: judge the unknown-merchant shortlist (never guesses → un_categorized),
-               applying the admin report_rules carried in the manifest
+        python: parse (bank PDF first: Hapoalim / Leumi current account; then
+                Leumi/Isracard card pdf; MAX pdf; Isracard xlsx / Discount xlsx)
+                → bank debits to a card issuer become `settlements`, bank credits
+                become kind=credit → dedup → deterministic categorize (expense rows:
+                dictionary → RULES; credit rows: INCOME_RULES only)
+        model: judge the unresolved (merchant, kind) shortlist (never guesses →
+               un_categorized; a credit takes an הכנסות leaf or an expense leaf
+               with "refund": true), applying the admin report_rules in the manifest
         python: build workbook (month sheets + income block, ניתוח תוצאות,
                 התפלגות ההוצאות + pie, טופס עזר למיפוי, חישוב יעדים,
                 un_categorized, ledger) → verify to the agora
-        POST /api/agent/jobs/:id/result     (transactions, totals, xlsx, proposed mappings)
+        POST /api/agent/jobs/:id/result     (transactions with kind, settlements,
+                                             totals with chargeCycles, xlsx, proposed mappings)
    → app re-verifies INDEPENDENTLY (lib/reportResult.ts) → completed | needs_review
    → admin reviews uncategorized rows + approves merchant mappings → Publish
         publish exports the xlsx to Google Sheets (owner Drive OAuth, user's folder)
-   → /report shows published reports: native RTL tables + xlsx download + Sheet link
+   → /report shows published reports: native RTL tables, income + מצבנו, the
+     settlement-matching card (PATCH /api/reports/:id/settlements/:sid), xlsx
+     download + Sheet link
 ```
 
 **Updating a ready report** (many statements arrive in batches — one report, not
@@ -61,6 +70,22 @@ format, no schema change, and no agent-skill change.
   `needs_review` with per-source diagnostics, never a silent partial report.
 - **Month = transaction calendar month**, not billing month; charge amount
   after discounts/installments; credits negative; pending-vs-billed deduped.
+- **Bank statements** (`docs/plans/bank-statements.md`): detection runs the
+  bank detector FIRST (both real bank exports also carry `ישראכרט` rows and
+  slash dates, which the card detectors used to accept); completeness is the
+  running-balance chain (no printed total ⇒ `statementTotalAgorot: null`; a break
+  is a warning). A bank **debit** to a card issuer (whole-token
+  `SETTLEMENT_PAYEES`, observed strings only) is a **settlement**: never a
+  transaction, stored in `ReportSettlement`, matched by the client to a card
+  **charge cycle** (`sourceTotals[].chargeCycles`, id `<label>@<chargeDate>`,
+  Σ = the source total; MAX from the charge-summary date, Leumi card per block,
+  Isracard xlsx none). A bank **credit** is `kind: "credit"` until placed:
+  `"income"` in the הכנסות section (verified: negative, bank source, kind ⇔
+  section), or a refund (`"expense"`, a negative in its leaf). Income is
+  recognized by the persisted `kind`, never by sign; `monthTotalsAgorot`, the
+  matrix, the distribution and the workbook's expense rows exclude it; the
+  workbook's income block is filled from it. Settlements with no cycle to match
+  raise a non-blocking note naming the unmatched sum.
 - **Learning loop**: agent-proposed mappings land unapproved; admin approval
   (or "remember" during review) adds them to every future manifest, shrinking
   the judgment tail over time.
@@ -123,8 +148,9 @@ format, no schema change, and no agent-skill change.
   per-sheet geometry maps (`reference/layout-spec.md`). App-side verification
   never parses workbook sheets — their correctness is guarded by the named
   tests in `agent/skills/plusim-reports/scripts/test_build_report_xlsx.py`
-  plus the operator baseline. Income is manual-fill (no bank-statement source);
-  analysis totals cover categorized spend only.
+  plus the operator baseline. The income block's rows are the taxonomy's
+  הכנסות leaves; bank income fills them, the rest stays manual-fill; analysis
+  totals cover categorized spend only.
 
 ## Files
 
@@ -132,6 +158,7 @@ format, no schema change, and no agent-skill change.
 prisma/…/20260719120000_report_pipeline   ReportJob, StatementFile, ReportArtifact,
                                           ReportTransaction, MerchantMapping
 prisma/…/20260722130000_report_category   ReportCategory (admin-added taxonomy leaves, add-only)
+prisma/…/20261025120000_report_settlement_income   ReportTransaction.kind, ReportSettlement
 src/config/reportTaxonomy.ts              BASE taxonomy + pure merge (mergeTaxonomy/mergedLeafSet)
 src/lib/reportCategories.ts               DB-backed merged-taxonomy accessors (the only
                                           ReportCategory reader)
@@ -149,6 +176,10 @@ src/app/admin/(dash)/reports/…            admin UI (upload form, job list, job
 src/components/admin/ReportUploadForm.tsx, ReportJobDetail.tsx
 src/app/report/page.tsx                   client report section (published only)
 src/app/api/reports/[jobId]/download      xlsx download (Clerk + ownership)
+src/app/api/reports/[jobId]/settlements/[id]   client settlement ↔ charge-cycle match (one bound write)
+src/lib/reportAnalysis.ts                 online analysis: income block, מצבנו, uncategorized split,
+                                          matchTargets / allowedMatchTargets / suggestMatches
+src/components/report/IncomeBlock.tsx, SettlementMatchCard.tsx   shared by /report and the admin view
 src/lib/googleDrive.ts                    + uploadBinaryFile() (raw statement upload),
                                           getFileBytes() (agent download), uploadXlsxAsSpreadsheet()
                                           (publish export), updateXlsxSpreadsheet() (in-place
@@ -186,7 +217,14 @@ src/app/api/agent/resultMergedSet.test.ts result callback verifies against the m
 src/app/admin/api/report-categories/createCategory.test.ts   create endpoint fail-closed matrix
 src/app/admin/api/reports/mergedCategoryGuards.test.ts       assign/mapping accept DB leaves; picker
                                           source (categoryLeaves) carries them in section order
-src/app/report/reportPage.test.ts         /report renders a published DB-leaf txn under its section
+src/app/report/reportPage.test.ts         /report renders a published DB-leaf txn under its section;
+                                          settlement card only with settlements (no-cycles note),
+                                          income table only with income rows, two uncategorized groups
+src/app/api/reports/settlementsRoute.test.ts   404 not-owner/unpublished/other job, 400 unknown cycle,
+                                          one bound updateMany, never 403
+src/lib/reportAnalysis.test.ts            income leaves sections/grandTotal, netByMonth, uncategorized
+                                          split, suggestMatches / allowedMatchTargets matrix
+src/app/admin/api/reports/editTransaction.test.ts   income invariant on writes, remember disabled for credits
 ```
 
 Test files are excluded from the production TypeScript build (`tsconfig` +

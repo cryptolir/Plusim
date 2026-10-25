@@ -25,6 +25,7 @@ import {
   type Analysis,
   type AnalysisTxn,
 } from "@/lib/reportAnalysis";
+import { IncomeBlock } from "@/components/report/IncomeBlock";
 
 /** "8/12" chip for an installment row — display-only, read from the note. */
 function InstallmentBadge({ note }: { note: string | null | undefined }) {
@@ -247,11 +248,27 @@ export function ReportView({
           <Stat label="חודשים" value={String(months.length)} />
           <Stat
             label="ללא סיווג"
-            value={String(view.uncategorized.length)}
-            sub={view.uncategorized.length > 0 ? shekel(view.uncategorizedTotal) : undefined}
-            tone={view.uncategorized.length > 0 ? "warn" : undefined}
+            value={String(view.uncategorized.length + view.uncategorizedCredits.length)}
+            sub={
+              view.uncategorized.length + view.uncategorizedCredits.length > 0
+                ? [
+                    view.uncategorized.length > 0 ? shekel(view.uncategorizedTotal) : null,
+                    view.uncategorizedCredits.length > 0 ? `זיכויים ${shekel(view.uncategorizedCreditsTotal)}` : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")
+                : undefined
+            }
+            tone={view.uncategorized.length + view.uncategorizedCredits.length > 0 ? "warn" : undefined}
           />
         </div>
+        {view.income.leaves.length > 0 && (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <Stat label='סה"כ הכנסות' value={shekel(view.income.total)} />
+            <Stat label="ממוצע הכנסה חודשי" value={shekel(Math.round(view.income.avg))} />
+            <Stat label="מצבנו (ממוצע)" value={shekel(Math.round(view.netAvg))} tone={view.netAvg < 0 ? "warn" : undefined} />
+          </div>
+        )}
 
         <nav className="flex flex-wrap gap-1 border-b">
           {TABS.map((t) => (
@@ -345,6 +362,15 @@ export function ReportView({
               </tbody>
             </table>
           </div>
+          {/* Income rows + מצבנו (docs/plans/bank-statements.md C2) — the same
+              component the client's /report renders, fed by the same builder. */}
+          <IncomeBlock
+            columns={[...months.map(monthShort), "ממוצע"]}
+            leaves={view.income.leaves.map((l) => ({ leaf: l.leaf, byColumn: [...l.byMonth, Math.round(l.avg)] }))}
+            incomeByColumn={[...view.income.byMonth, Math.round(view.income.avg)]}
+            expenseByColumn={[...monthTotals, Math.round(avgPerMonth)]}
+            showIncome={view.income.leaves.length > 0}
+          />
         </section>
       ) : tab === "distribution" ? (
         <section className="space-y-4">
@@ -412,7 +438,7 @@ export function ReportView({
           <TxnTable rows={filteredTxns} showCategory />
         </section>
       ) : (
-        <section className="space-y-2">
+        <section className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-sm text-muted-foreground">
               תנועות שהסוכן לא סיווג ({shekel(view.uncategorizedTotal)} בסך הכול, לא נכללות
@@ -420,12 +446,24 @@ export function ReportView({
             </p>
             <CopyButton label="העתקה" text={() => txnsTsv(view.uncategorized)} />
           </div>
-          {view.uncategorized.length === 0 ? (
+          {view.uncategorized.length === 0 && view.uncategorizedCredits.length === 0 ? (
             <p className="rounded-xl border p-6 text-center text-muted-foreground">
               כל התנועות סווגו ✓
             </p>
           ) : (
-            <TxnTable rows={view.uncategorized} />
+            view.uncategorized.length > 0 && <TxnTable rows={view.uncategorized} />
+          )}
+          {view.uncategorizedCredits.length > 0 && (
+            <>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm text-muted-foreground">
+                  זיכויים מחשבון הבנק שטרם הוכרע אם הם הכנסה או החזר ({shekel(view.uncategorizedCreditsTotal)} בסך
+                  הכול) — נספרים בנפרד מההוצאות שלא סווגו.
+                </p>
+                <CopyButton label="העתקת הזיכויים" text={() => txnsTsv(view.uncategorizedCredits)} />
+              </div>
+              <TxnTable rows={view.uncategorizedCredits} />
+            </>
           )}
         </section>
       )}
@@ -755,6 +793,14 @@ function matrixTsv(a: Analysis): string {
     amount(Math.round(a.avgPerMonth)),
     amount(a.grandTotal),
   ]);
+  if (a.income.leaves.length > 0) {
+    rows.push(["הכנסות"]);
+    for (const l of a.income.leaves) {
+      rows.push([`  ${l.leaf}`, ...l.byMonth.map(amount), amount(Math.round(l.avg)), amount(l.total)]);
+    }
+    rows.push(['סה"כ הכנסות', ...a.income.byMonth.map(amount), amount(Math.round(a.income.avg)), amount(a.income.total)]);
+    rows.push(["מצבנו", ...a.netByMonth.map(amount), amount(Math.round(a.netAvg)), amount(a.income.total - a.grandTotal)]);
+  }
   return tsv(rows);
 }
 

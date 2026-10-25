@@ -3,7 +3,33 @@ import { auth } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
 import { db } from "@/lib/db";
 import { getMergedTaxonomy } from "@/lib/reportCategories";
-import { shekel, monthTitle, installmentInfo } from "@/lib/reportAnalysis";
+import {
+  shekel,
+  monthTitle,
+  installmentInfo,
+  buildAnalysis,
+  matchTargets,
+  suggestMatches,
+  type PerSourceCycles,
+} from "@/lib/reportAnalysis";
+import { INCOME_SECTION } from "@/config/reportTaxonomy";
+import { IncomeBlock } from "@/components/report/IncomeBlock";
+import { SettlementMatchCard } from "@/components/report/SettlementMatchCard";
+
+/** The verification's perSource list, or [] for a null / old-shape verification (fail closed). */
+function perSourceOf(verification: unknown): PerSourceCycles[] {
+  if (typeof verification !== "object" || verification === null) return [];
+  const per = (verification as { perSource?: unknown }).perSource;
+  return Array.isArray(per) ? (per as PerSourceCycles[]) : [];
+}
+
+/** The B2 note — the one line of the verification that names unmatched settlements. */
+function noCyclesNote(verification: unknown): string | null {
+  if (typeof verification !== "object" || verification === null) return null;
+  const notes = (verification as { notes?: unknown }).notes;
+  if (!Array.isArray(notes)) return null;
+  return (notes as unknown[]).find((n): n is string => typeof n === "string" && n.includes("ללא מחזור חיוב")) ?? null;
+}
 
 export const dynamic = "force-dynamic";
 
@@ -23,16 +49,24 @@ export default async function ReportPage() {
       title: true,
       sheetUrl: true,
       publishedAt: true,
+      verification: true,
       transactions: {
         select: {
+          id: true,
           month: true,
           merchant: true,
           date: true,
           amountAgorot: true,
           category: true,
           uncategorized: true,
+          sourceLabel: true,
           note: true,
+          kind: true,
         },
+      },
+      settlements: {
+        orderBy: [{ month: "asc" }, { date: "asc" }],
+        select: { id: true, month: true, date: true, payee: true, amountAgorot: true, sourceLabel: true, matchedCycle: true },
       },
       artifacts: { select: { id: true }, take: 1 },
     },
@@ -54,18 +88,17 @@ export default async function ReportPage() {
     <main className="mx-auto max-w-3xl space-y-8 p-4 pb-24" dir="rtl">
       <h1 className="font-heading text-3xl tracking-tight">דוחות</h1>
       {jobs.map((job) => {
-        // month → leaf → sum, from the stored transaction rows.
+        // month → leaf → sum, from the stored transaction rows. Income rows
+        // (kind === "income") never enter the expense buckets — they feed the
+        // income table below each month; uncategorized bank credits are listed
+        // apart from uncategorized debits (docs/plans/bank-statements.md C2).
         const months = new Map<string, Map<string, number>>();
-        const uncat: {
-          month: string;
-          date: string;
-          merchant: string;
-          amountAgorot: number;
-          note: string | null;
-        }[] = [];
+        type UncatRow = { month: string; date: string; merchant: string; amountAgorot: number; note: string | null };
+        const uncat: UncatRow[] = [];
+        const uncatCredits: UncatRow[] = [];
         for (const t of job.transactions) {
           if (t.uncategorized) {
-            uncat.push({
+            (t.kind === "credit" ? uncatCredits : uncat).push({
               month: t.month,
               date: t.date,
               merchant: t.merchant,
@@ -74,11 +107,22 @@ export default async function ReportPage() {
             });
             continue;
           }
+          if (t.kind === "income") continue;
           const byLeaf = months.get(t.month) ?? new Map<string, number>();
           byLeaf.set(t.category ?? "", (byLeaf.get(t.category ?? "") ?? 0) + t.amountAgorot);
           months.set(t.month, byLeaf);
         }
+        // Income and מצבנו come from the same builder the admin view uses, so
+        // the two surfaces can never disagree on a figure.
+        const analysis = buildAnalysis(job.transactions, taxonomy);
+        const hasIncome = analysis.income.leaves.length > 0;
+        for (const m of analysis.months) if (!months.has(m)) months.set(m, new Map());
         const monthKeys = [...months.keys()].sort();
+        const expenseTaxonomy = taxonomy.filter((s) => s.section !== INCOME_SECTION);
+
+        const perSource = perSourceOf(job.verification);
+        const targets = matchTargets(perSource);
+        const suggestions = Object.fromEntries(suggestMatches(job.settlements, perSource));
 
         return (
           <section key={job.id} className="space-y-4 rounded-2xl border p-4">
@@ -123,7 +167,7 @@ export default async function ReportPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {taxonomy.map((section) => {
+                      {expenseTaxonomy.map((section) => {
                         const rows = section.leaves
                           .map((leaf) => ({ leaf, sum: byLeaf.get(leaf) ?? 0 }))
                           .filter((r) => r.sum !== 0);
@@ -139,22 +183,52 @@ export default async function ReportPage() {
                       </tr>
                     </tbody>
                   </table>
+                  {(() => {
+                    const mi = analysis.months.indexOf(month);
+                    const income = mi >= 0 ? analysis.income.byMonth[mi] : 0;
+                    return (
+                      <IncomeBlock
+                        className="border-t"
+                        columns={[monthTitle(month)]}
+                        leaves={analysis.income.leaves
+                          .filter((l) => mi >= 0 && l.byMonth[mi] !== 0)
+                          .map((l) => ({ leaf: l.leaf, byColumn: [l.byMonth[mi]] }))}
+                        incomeByColumn={[income]}
+                        expenseByColumn={[grand]}
+                        showIncome={hasIncome}
+                      />
+                    );
+                  })()}
                 </div>
               );
             })}
 
-            {uncat.length > 0 && (
-              <div className="overflow-x-auto rounded-xl border">
+            {job.settlements.length > 0 && (
+              <SettlementMatchCard
+                jobId={job.id}
+                settlements={job.settlements}
+                targets={targets}
+                suggestions={suggestions}
+                note={targets.length === 0 ? noCyclesNote(job.verification) : null}
+              />
+            )}
+
+            {[
+              { title: "ללא סיווג", rows: uncat },
+              { title: "זיכויים ללא סיווג (הכנסה או החזר — טרם הוכרע)", rows: uncatCredits },
+            ].map(({ title, rows }) =>
+              rows.length === 0 ? null : (
+              <div key={title} className="overflow-x-auto rounded-xl border">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-muted/50 text-right">
                       <th className="px-3 py-2 font-semibold" colSpan={3}>
-                        ללא סיווג ({uncat.length})
+                        {title} ({rows.length}) · {shekel(rows.reduce((a, t) => a + t.amountAgorot, 0))}
                       </th>
                     </tr>
                   </thead>
                   <tbody>
-                    {uncat.map((t, i) => (
+                    {rows.map((t, i) => (
                       <tr key={i} className="border-t">
                         <td className="px-3 py-1.5 whitespace-nowrap">{t.date}</td>
                         <td className="px-3 py-1.5" dir="auto">
@@ -177,6 +251,7 @@ export default async function ReportPage() {
                   </tbody>
                 </table>
               </div>
+              ),
             )}
           </section>
         );
