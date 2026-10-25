@@ -90,6 +90,18 @@ describe("mapping route uses the merged set", () => {
   });
 });
 
+describe("mapping approval keeps the dictionary expense-only", () => {
+  it("rejects an הכנסות leaf with 400 — the skill ignores dictionary hits in income leaves", async () => {
+    mapFind.mockResolvedValue({ id: "m1", merchantPattern: "ביטוח לאומי", category: "ביט" });
+    const res = await mappingPATCH(
+      patchReq("https://plusim.xyz/admin/api/report-mappings/m1", { approved: true, category: "הכנסות נוספות" }),
+      { params: Promise.resolve({ id: "m1" }) },
+    );
+    expect(res.status).toBe(400);
+    expect(db.merchantMapping.update).not.toHaveBeenCalled();
+  });
+});
+
 describe("assign picker source (job-detail GET)", () => {
   it("categoryLeaves includes DB categories after their section's base leaves (test_assign_picker_includes_db_category)", async () => {
     jobFind.mockResolvedValue({ id: "jobA", transactions: [], files: [], artifacts: [] });

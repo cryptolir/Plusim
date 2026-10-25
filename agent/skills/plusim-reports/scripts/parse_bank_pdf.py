@@ -124,8 +124,8 @@ def _hapoalim_label(lines: list[str]) -> str:
 def _parse_hapoalim(path: str, lines: list[str]) -> ParseResult:
     res = ParseResult()
     label = _hapoalim_label(lines)
-    chain: list[tuple[int, int, str]] = []
-    rows: list[tuple[str, str, int]] = []
+    # (date, glued description+amount, regex amount with marker sign, balance)
+    located: list[tuple[str, str, int, int]] = []
     for ln in lines:
         m = HAPOALIM_ROW_RE.match(ln.strip())
         if not m:
@@ -136,13 +136,31 @@ def _parse_hapoalim(path: str, lines: list[str]) -> ParseResult:
         amount = _agorot(amount_s)
         if marker == "1":  # זכות — money in
             amount = -amount
-        date = _iso(date_s)
-        desc = desc.strip()
+        located.append((_iso(date_s), desc + amount_s, amount, _agorot(balance_s)))
+
+    chain: list[tuple[int, int, str]] = []
+    rows: list[tuple[str, str, int]] = []
+    for i, (date, glued, rx_amount, bal) in enumerate(located):
+        amount, desc = rx_amount, glued[: -len(_fmt(rx_amount))].strip()
+        if i + 1 < len(located):
+            # The description and the amount are glued with no separator, so a
+            # description ending in digits ("שיק 1234" + "500.00") would be split
+            # wrong by the regex. The balance delta is exact; it wins whenever the
+            # printed text ends with it and its sign agrees with the marker.
+            delta_amount = -(bal - located[i + 1][3])
+            suffix = _fmt(delta_amount)
+            if (
+                delta_amount != rx_amount
+                and glued.endswith(suffix)
+                and (delta_amount < 0) == (rx_amount < 0)
+            ):
+                amount, desc = delta_amount, glued[: -len(suffix)].strip()
         rows.append((date, desc, amount))
-        chain.append((amount, _agorot(balance_s), f"{date} {desc}"))
+        chain.append((amount, bal, f"{date} {desc}"))
     _emit(res, label, rows, notes=None)
     res.warnings.extend(check_balance_chain(chain, path))
     res.source_totals[label] = None
+    res.bank_labels.add(label)
     if not res.transactions:
         res.warnings.append(f"{path}: no transactions parsed")
     return res
@@ -228,6 +246,7 @@ def _parse_leumi(path: str, lines: list[str]) -> ParseResult:
     _emit(res, label, rows, notes)
     res.warnings.extend(check_balance_chain(chain, path))
     res.source_totals[label] = None
+    res.bank_labels.add(label)
     if not res.transactions:
         res.warnings.append(f"{path}: no transactions parsed")
     return res

@@ -136,6 +136,7 @@ def finalize(txns, judgments, settlements=None, source_totals=None, cycles=None)
                 "settlements": settlements or [],
                 "sourceTotals": source_totals or {"hapoalim-1812": None},
                 "chargeCycles": cycles or {},
+                "bankLabels": ["hapoalim-1812"],
                 "warnings": [],
             },
         )
@@ -223,6 +224,8 @@ class TestFinalize(unittest.TestCase):
         src = {s["label"]: s for s in out["sourceTotals"]}
         self.assertEqual(src["max-1-billed"]["chargeCycles"], cycles["max-1-billed"])
         self.assertNotIn("chargeCycles", src["hapoalim-1812"])
+        self.assertIs(src["hapoalim-1812"]["bank"], True)
+        self.assertNotIn("bank", src["max-1-billed"])
         self.assertEqual(out["status"], "ok")
 
 
@@ -235,6 +238,7 @@ class TestPrepareMovesSettlements(unittest.TestCase):
             Txn("2026-09-11", "חברת חשמל", 10000, "hapoalim-1812", "k3"),
         ]
         res.source_totals = {"hapoalim-1812": None}
+        res.bank_labels = {"hapoalim-1812"}
         w = _Workdir()
         try:
             w.write(
@@ -253,6 +257,7 @@ class TestPrepareMovesSettlements(unittest.TestCase):
         finally:
             w.cleanup()
         self.assertEqual([t["dedupKey"] for t in state["txns"]], ["k2", "k3"])
+        self.assertEqual(state["bankLabels"], ["hapoalim-1812"])
         self.assertEqual(state["txns"][0]["kind"], "credit")
         self.assertEqual(state["txns"][1]["kind"], "expense")
         self.assertEqual(
@@ -263,6 +268,24 @@ class TestPrepareMovesSettlements(unittest.TestCase):
 
 
 class TestVerify(unittest.TestCase):
+    def test_bank_source_is_the_parser_flag_not_a_missing_total(self):
+        """A MAX -pending source has no printed total either; it is never a bank."""
+        pending = row("מעסיק", -1000, "income", category="משכורת 1", source="max-1-pending")
+        ok, problems, _ = verify(
+            [pending], {"max-1-pending": None, "hapoalim-1812": None}, TAXONOMY, bank_labels={"hapoalim-1812"}
+        )
+        self.assertFalse(ok)
+        self.assertTrue(any("non-credit or card-source" in p for p in problems), problems)
+        s = {"dedupKey": "s1", "sourceLabel": "max-1-pending", "payee": "x", "date": "2026-09-10"}
+        ok, problems, _ = verify([], {"max-1-pending": None}, TAXONOMY, settlements=[s], bank_labels=set())
+        self.assertTrue(any("non-bank source" in p for p in problems), problems)
+
+    def test_categorized_credit_kind_is_flagged(self):
+        t = row("מעסיק", -1000, "credit", category="חשמל")
+        ok, problems, _ = verify([t], {"hapoalim-1812": None}, TAXONOMY)
+        self.assertFalse(ok)
+        self.assertTrue(any("still kind=credit" in p for p in problems), problems)
+
     def test_verify_income_kind_section_mismatch_is_flagged(self):
         a = row("מעסיק", -1000, "income", category="חשמל")  # income kind, expense leaf
         b = row("מעסיק2", -1000, "expense", category="משכורת 1")  # income leaf, expense kind
@@ -282,7 +305,7 @@ class TestVerify(unittest.TestCase):
 
     def test_verify_flags_settlement_dedup_collision(self):
         t = row("חנות", 1000, category="חשמל")
-        s = {"dedupKey": t["dedupKey"]}
+        s = {"dedupKey": t["dedupKey"], "sourceLabel": "hapoalim-1812", "payee": "x", "date": "2026-09-10"}
         ok, problems, summary = verify([t], {"hapoalim-1812": None}, TAXONOMY, settlements=[s, dict(s, dedupKey="z"), dict(s, dedupKey="z")])
         self.assertFalse(ok)
         self.assertTrue(any("collides with a transaction" in p for p in problems))

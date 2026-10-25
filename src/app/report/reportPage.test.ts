@@ -154,7 +154,7 @@ it("the settlement card renders only when the job has settlements", async () => 
         notes: [],
         perSource: [
           { label: "isracard-4962", statementTotalAgorot: 1579, chargeCycles: [{ chargeDate: "2026-06-10", amountAgorot: 1579 }] },
-          { label: "hapoalim-1812", statementTotalAgorot: null },
+          { label: "hapoalim-1812", statementTotalAgorot: null, bank: true },
         ],
       },
     }),
@@ -187,7 +187,11 @@ it("with settlements but no charge cycles the card carries the no-cycles note ve
   jobs.mockResolvedValue([
     job({
       settlements: [SETTLEMENT],
-      verification: { notes: [NOTE], perSource: [{ label: "hapoalim-1812", statementTotalAgorot: null }] },
+      verification: {
+        notes: [NOTE],
+        unmatchedSettlementsAgorot: 1579,
+        perSource: [{ label: "hapoalim-1812", statementTotalAgorot: null, bank: true }],
+      },
     }),
   ]);
   const tree = await ReportPage();

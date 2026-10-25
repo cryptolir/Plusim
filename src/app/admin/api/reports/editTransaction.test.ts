@@ -37,7 +37,13 @@ const mergedTax = getMergedTaxonomy as unknown as ReturnType<typeof vi.fn>;
 
 const FOOD = "מזון ומכולת";
 const SALARY = "משכורת 1";
-const BANK_VERIFICATION = { perSource: [{ label: "hapoalim-1812", statementTotalAgorot: null }, { label: "isracard-4962", statementTotalAgorot: 1579 }] };
+const BANK_VERIFICATION = {
+  perSource: [
+    { label: "hapoalim-1812", statementTotalAgorot: null, bank: true },
+    { label: "max-1-pending", statementTotalAgorot: null }, // a card source without a total is NOT a bank
+    { label: "isracard-4962", statementTotalAgorot: 1579 },
+  ],
+};
 const params = Promise.resolve({ jobId: "jobA", txId: "txA" });
 const req = (body: unknown) =>
   new NextRequest("http://localhost/admin/api/reports/jobA/transactions/txA", {
@@ -223,6 +229,12 @@ describe("PATCH — income leaves and bank credits", () => {
     const res = await PATCH(req({ category: SALARY }), { params });
     expect(res.status).toBe(400);
     expect((await res.json()).error).toMatch(/חשבון בנק/);
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it("הכנסות leaf on a card source that merely lacks a total ⇒ 400 (bank is the explicit flag)", async () => {
+    findFirst.mockResolvedValue(bankCredit({ sourceLabel: "max-1-pending" }));
+    expect((await PATCH(req({ category: SALARY }), { params })).status).toBe(400);
     expect(updateMany).not.toHaveBeenCalled();
   });
 

@@ -9,26 +9,19 @@ import {
   installmentInfo,
   buildAnalysis,
   matchTargets,
+  perSourceOf,
   suggestMatches,
-  type PerSourceCycles,
 } from "@/lib/reportAnalysis";
+import { noCyclesNote } from "@/lib/reportResult";
 import { INCOME_SECTION } from "@/config/reportTaxonomy";
 import { IncomeBlock } from "@/components/report/IncomeBlock";
 import { SettlementMatchCard } from "@/components/report/SettlementMatchCard";
 
-/** The verification's perSource list, or [] for a null / old-shape verification (fail closed). */
-function perSourceOf(verification: unknown): PerSourceCycles[] {
-  if (typeof verification !== "object" || verification === null) return [];
-  const per = (verification as { perSource?: unknown }).perSource;
-  return Array.isArray(per) ? (per as PerSourceCycles[]) : [];
-}
-
-/** The B2 note — the one line of the verification that names unmatched settlements. */
-function noCyclesNote(verification: unknown): string | null {
+/** The structured "nothing to match against" field of the stored verification (plan B2). */
+function unmatchedSettlementsAgorot(verification: unknown): number | null {
   if (typeof verification !== "object" || verification === null) return null;
-  const notes = (verification as { notes?: unknown }).notes;
-  if (!Array.isArray(notes)) return null;
-  return (notes as unknown[]).find((n): n is string => typeof n === "string" && n.includes("ללא מחזור חיוב")) ?? null;
+  const v = (verification as { unmatchedSettlementsAgorot?: unknown }).unmatchedSettlementsAgorot;
+  return typeof v === "number" ? v : null;
 }
 
 export const dynamic = "force-dynamic";
@@ -116,7 +109,11 @@ export default async function ReportPage() {
         // the two surfaces can never disagree on a figure.
         const analysis = buildAnalysis(job.transactions, taxonomy);
         const hasIncome = analysis.income.leaves.length > 0;
-        for (const m of analysis.months) if (!months.has(m)) months.set(m, new Map());
+        // A month with income but no categorized spend still gets its table
+        // (income + מצבנו); a month of only uncategorized rows does not, as before.
+        analysis.months.forEach((m, i) => {
+          if (analysis.income.byMonth[i] !== 0 && !months.has(m)) months.set(m, new Map());
+        });
         const monthKeys = [...months.keys()].sort();
         const expenseTaxonomy = taxonomy.filter((s) => s.section !== INCOME_SECTION);
 
@@ -209,7 +206,10 @@ export default async function ReportPage() {
                 settlements={job.settlements}
                 targets={targets}
                 suggestions={suggestions}
-                note={targets.length === 0 ? noCyclesNote(job.verification) : null}
+                note={(() => {
+                  const sum = unmatchedSettlementsAgorot(job.verification);
+                  return targets.length === 0 && sum !== null ? noCyclesNote(job.settlements.length, sum) : null;
+                })()}
               />
             )}
 

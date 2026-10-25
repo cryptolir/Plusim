@@ -196,6 +196,20 @@ class TestHapoalim(unittest.TestCase):
     def test_transfer_to_michael_is_not_a_settlement(self):
         self.assertEqual(self.by["העברה למיכאל"].kind, "expense")
 
+    def test_hapoalim_description_ending_in_digits_uses_balance_delta(self):
+        """'שיק 1234' + '500.00' is one glued run of digits; the regex alone would
+        read ₪1,234,500.00. The balance delta is exact and wins."""
+        page = HAPOALIM_HEADER + (
+            "04/10/2026ע.מפעולות-ישיר38.50₪1,000.00##2\n"
+            "02/10/2026שיק 1234500.00₪1,038.50##2\n"
+            "01/10/2026מדיסון פארמה ב500.00₪1,538.50##1\n"
+        )
+        r = parse([page])
+        cheque = next(t for t in r.transactions if t.date == "2026-10-02")
+        self.assertEqual((cheque.merchant, cheque.amount_agorot), ("שיק 1234", 50000))
+        self.assertEqual(r.warnings, [])
+        self.assertEqual(r.bank_labels, {"hapoalim-1812"})
+
 
 class TestLeumi(unittest.TestCase):
     def setUp(self):

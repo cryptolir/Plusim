@@ -81,7 +81,7 @@ describe("PATCH a settlement match", () => {
   });
 
   it("400 for a malformed body", async () => {
-    for (const body of [{}, { matchedCycle: 5 }, { matchedCycle: undefined }]) {
+    for (const body of [{}, { matchedCycle: 5 }, { matchedCycle: undefined }, null, "x", 5, [CYCLE]]) {
       expect((await PATCH(req(body), { params })).status, JSON.stringify(body)).toBe(400);
     }
     expect(updateMany).not.toHaveBeenCalled();

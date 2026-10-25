@@ -114,6 +114,7 @@ def parse_discount_xlsx(path: str) -> ParseResult:
     # No printed statement total exists on a current account; an intact chain
     # is the completeness guarantee, a break is surfaced via warnings above.
     res.source_totals[label] = None
+    res.bank_labels.add(label)
 
     if skipped_future:
         res.warnings.append(f"{path}: {skipped_future} future (תנועות עתידיות) row(s) excluded — not yet posted")

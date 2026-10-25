@@ -74,7 +74,9 @@ format, no schema change, and no agent-skill change.
   bank detector FIRST (both real bank exports also carry `ישראכרט` rows and
   slash dates, which the card detectors used to accept); completeness is the
   running-balance chain (no printed total ⇒ `statementTotalAgorot: null`; a break
-  is a warning). A bank **debit** to a card issuer (whole-token
+  is a warning). A bank source is marked **explicitly** (`sourceTotals[].bank:
+  true`, from the parser that produced it) — never inferred from a missing
+  total, which a MAX pending section lacks too. A bank **debit** to a card issuer (whole-token
   `SETTLEMENT_PAYEES`, observed strings only) is a **settlement**: never a
   transaction, stored in `ReportSettlement`, matched by the client to a card
   **charge cycle** (`sourceTotals[].chargeCycles`, id `<label>@<chargeDate>`,

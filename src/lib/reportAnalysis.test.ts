@@ -299,9 +299,9 @@ describe("suggestMatches / allowedMatchTargets (Decision 5)", () => {
     expect(other.size).toBe(0);
   });
 
-  it("the target includes a sibling -foreign total; cycles stay domestic-only", () => {
+  it("the target includes a sibling -foreign total on the REGULAR (latest) cycle only; cycles stay domestic-only", () => {
     const perSource = [
-      { label: "hapoalim-1812", statementTotalAgorot: null },
+      { label: "hapoalim-1812", statementTotalAgorot: null, bank: true },
       { label: "card-domestic", statementTotalAgorot: 73286, chargeCycles: [{ chargeDate: "2026-09-02", amountAgorot: 73286 }] },
       { label: "card-foreign", statementTotalAgorot: 4500 },
     ];
@@ -311,6 +311,23 @@ describe("suggestMatches / allowedMatchTargets (Decision 5)", () => {
     ]);
     expect(suggestMatches([s("a", 77786)], perSource).get("a")).toBe("card-domestic@2026-09-02");
     expect(suggestMatches([s("a", 73286)], perSource).size).toBe(0);
+    // an early-repayment block (earlier date) carries no foreign charges
+    const two = [
+      { label: "card-domestic", statementTotalAgorot: 400000, chargeCycles: [{ chargeDate: "2026-09-02", amountAgorot: 300000 }, { chargeDate: "2026-09-20", amountAgorot: 100000 }] },
+      { label: "card-foreign", statementTotalAgorot: 80000 },
+    ];
+    expect(matchTargets(two).map((x) => [x.chargeDate, x.targetAgorot])).toEqual([["2026-09-02", 300000], ["2026-09-20", 180000]]);
+  });
+
+  it("two cycles within ₪5 of one debit in the same month is ambiguous — no suggestion", () => {
+    const perSource = [
+      { label: "max-1-billed", statementTotalAgorot: 240000, chargeCycles: [{ chargeDate: "2026-09-10", amountAgorot: 240000 }] },
+      { label: "isracard-1-domestic", statementTotalAgorot: 239800, chargeCycles: [{ chargeDate: "2026-09-02", amountAgorot: 239800 }] },
+    ];
+    expect(suggestMatches([s("a", 239800, { payee: 'ישראכרט בע"מ' })], perSource).size).toBe(0);
+    // unambiguous when only one is within tolerance
+    perSource[0].chargeCycles[0].amountAgorot = 250000;
+    expect(suggestMatches([s("a", 239800, { payee: 'ישראכרט בע"מ' })], perSource).get("a")).toBe("isracard-1-domestic@2026-09-02");
   });
 
   it("two blocks in one month are two targets; equal cycles in different months take their own month", () => {

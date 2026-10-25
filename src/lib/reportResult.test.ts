@@ -5,6 +5,7 @@ import {
   decodeXlsx,
   rejectionHe,
   isMinorTotalGap,
+  noCyclesNote,
   MINOR_GAP_CAP_AGOROT,
   type AgentResult,
 } from "./reportResult";
@@ -375,7 +376,7 @@ function bankResult(transactions: AgentResult["transactions"], over: Partial<Age
   return {
     status: "ok",
     transactions,
-    sourceTotals: [{ label: BANK, statementTotalAgorot: null, computedTotalAgorot: 0 }],
+    sourceTotals: [{ label: BANK, statementTotalAgorot: null, computedTotalAgorot: 0, bank: true }],
     xlsxBase64: "",
     proposedMappings: [],
     ...over,
@@ -422,6 +423,42 @@ describe("income kind ⇔ הכנסות leaf (fatal both ways)", () => {
     expect(card.problems.join(" ")).toMatch(/שאינו חשבון בנק/);
   });
 
+  it("bank-ness is the explicit flag, not a missing total: a MAX -pending source is a card", () => {
+    const v = verifyAgentResult(
+      bankResult([income({ sourceLabel: "max-1-pending" })], {
+        sourceTotals: [{ label: "max-1-pending", statementTotalAgorot: null, computedTotalAgorot: -1900000 }],
+      }),
+      BASE_LEAVES,
+      TAX,
+    );
+    expect(v.fatal).toBe(true);
+    expect(v.problems.join(" ")).toMatch(/שאינו חשבון בנק/);
+    // and a "bank" that reports a printed total is a contradiction
+    const w = verifyAgentResult(
+      result({ sourceTotals: [{ label: "isracard-4962", statementTotalAgorot: 1579, computedTotalAgorot: 1579, bank: true }] }),
+      BASE_LEAVES,
+      TAX,
+    );
+    expect(w.problems.join(" ")).toMatch(/אינו מדפיס סכום כולל/);
+    expect(w.perSource[0].bank).toBe(true);
+  });
+
+  it("a categorized row that is still kind=credit → fatal (undecided means unplaced)", () => {
+    const v = verifyAgentResult(
+      bankResult([tx({ sourceLabel: BANK, dedupKey: "b-9", amountAgorot: -190000, category: FOOD, kind: "credit" })]),
+      BASE_LEAVES,
+      TAX,
+    );
+    expect(v.fatal).toBe(true);
+    expect(v.problems.join(" ")).toMatch(/ללא הכרעה/);
+    const ok = verifyAgentResult(
+      bankResult([tx({ sourceLabel: BANK, dedupKey: "b-9", amountAgorot: -190000, category: null, uncategorized: true, kind: "credit" })]),
+      BASE_LEAVES,
+      TAX,
+    );
+    expect(ok.fatal).toBe(false);
+  });
+
   it("an admin-added income leaf is income only through the MERGED taxonomy", () => {
     const merged = mergeTaxonomy(REPORT_TAXONOMY, [{ name: "מלגה", section: "הכנסות" }]);
     const leaves = mergedLeafSet([{ name: "מלגה", section: "הכנסות" }]);
@@ -460,7 +497,7 @@ const settlement = (over: Partial<NonNullable<AgentResult["settlements"]>[number
 
 describe("settlements and charge cycles", () => {
   const cardTotals = (cycles?: { chargeDate: string; amountAgorot: number }[]) => [
-    { label: BANK, statementTotalAgorot: null, computedTotalAgorot: 0 },
+    { label: BANK, statementTotalAgorot: null, computedTotalAgorot: 0, bank: true as const },
     { label: "isracard-4962", statementTotalAgorot: 1579, computedTotalAgorot: 1579, ...(cycles ? { chargeCycles: cycles } : {}) },
   ];
 
@@ -482,6 +519,8 @@ describe("settlements and charge cycles", () => {
     expect(v.notes).toEqual([
       "2 חיובי כרטיס אשראי בסך ₪15,400.00 נמצאו בחשבון הבנק ללא מחזור חיוב תואם להתאמה — אינם נספרים כהוצאה",
     ]);
+    expect(v.unmatchedSettlementsAgorot).toBe(1540000);
+    expect(v.notes[0]).toBe(noCyclesNote(2, 1540000));
   });
 
   it("settlement date outside its month / card-labelled source / non-positive amount → fatal", () => {
@@ -530,7 +569,7 @@ describe("settlements and charge cycles", () => {
       transactions: [{ ...tx(), kind: "credit", category: null, uncategorized: true }],
       sourceTotals: [
         { label: "isracard-4962", statementTotalAgorot: 1579, computedTotalAgorot: 1579, chargeCycles: [{ chargeDate: "2026-06-10", amountAgorot: 1579 }] },
-        { label: BANK, statementTotalAgorot: null, computedTotalAgorot: 0 },
+        { label: BANK, statementTotalAgorot: null, computedTotalAgorot: 0, bank: true },
       ],
       settlements: [settlement()],
       xlsxBase64: "UEsDBA==",
@@ -538,6 +577,8 @@ describe("settlements and charge cycles", () => {
     };
     const r = parseAgentResult(body, BASE_LEAVES);
     expect(r.transactions[0].kind).toBe("credit");
+    expect(r.sourceTotals[1].bank).toBe(true);
+    expect(r.sourceTotals[0].bank).toBeUndefined();
     expect(r.settlements).toHaveLength(1);
     expect(r.sourceTotals[0].chargeCycles).toEqual([{ chargeDate: "2026-06-10", amountAgorot: 1579 }]);
     expect(() => parseAgentResult({ ...body, transactions: [{ ...tx(), kind: "settlement" }] }, BASE_LEAVES)).toThrow(/bad kind/);

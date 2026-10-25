@@ -312,6 +312,7 @@ export interface PerSourceCycles {
   label: string;
   statementTotalAgorot: number | null;
   chargeCycles?: { chargeDate: string; amountAgorot: number }[];
+  bank?: boolean;
 }
 
 export interface MatchTarget {
@@ -335,7 +336,12 @@ export interface SettlementLike {
 /** Suggestion tolerance: ₪5 either way. */
 export const MATCH_TOLERANCE_AGOROT = 500;
 
-function perSourceOf(verification: unknown): PerSourceCycles[] {
+/**
+ * The stored verification's perSource list — the ONE reader of that shape for
+ * every consumer (/report, the admin edit route, the match allow-list). `[]`
+ * for a null or old-shape verification: fail closed.
+ */
+export function perSourceOf(verification: unknown): PerSourceCycles[] {
   if (typeof verification !== "object" || verification === null) return [];
   const per = (verification as { perSource?: unknown }).perSource;
   if (!Array.isArray(per)) return [];
@@ -345,11 +351,18 @@ function perSourceOf(verification: unknown): PerSourceCycles[] {
   );
 }
 
+/** Labels of the job's bank current-account sources (AgentSourceTotal.bank). */
+export function bankSources(verification: unknown): Set<string> {
+  return new Set(perSourceOf(verification).filter((s) => s.bank === true).map((s) => s.label));
+}
+
 /**
  * Every charge cycle of the job as a match target. The bank pays a card's
- * domestic and foreign sections in ONE debit, so the target adds the sibling
- * `<label>-foreign` source's total (the Leumi card parser emits cycles for the
- * domestic section only — their Σ must equal that section's total).
+ * domestic and foreign sections in ONE debit, so the sibling `<label>-foreign`
+ * source's total is added to the card's REGULAR cycle — the latest charge date
+ * of the source (an early-repayment subtotal is an earlier, separate block and
+ * carries no foreign charges). The Leumi card parser emits cycles for the
+ * domestic section only, so their Σ still equals that section's total.
  */
 export function matchTargets(perSource: PerSourceCycles[]): MatchTarget[] {
   const out: MatchTarget[] = [];
@@ -358,13 +371,14 @@ export function matchTargets(perSource: PerSourceCycles[]): MatchTarget[] {
     const base = s.label.endsWith("-domestic") ? s.label.slice(0, -"-domestic".length) : null;
     const foreign = base ? perSource.find((f) => f.label === `${base}-foreign`) : undefined;
     const foreignTotal = foreign?.statementTotalAgorot ?? 0;
+    const latest = [...s.chargeCycles].map((c) => c.chargeDate).sort().at(-1);
     for (const c of s.chargeCycles) {
       out.push({
         id: cycleId(s.label, c.chargeDate),
         label: s.label,
         chargeDate: c.chargeDate,
         amountAgorot: c.amountAgorot,
-        targetAgorot: c.amountAgorot + foreignTotal,
+        targetAgorot: c.amountAgorot + (c.chargeDate === latest ? foreignTotal : 0),
       });
     }
   }
@@ -403,13 +417,17 @@ export function suggestMatches(settlements: SettlementLike[], perSource: PerSour
   }
   for (const s of settlements) {
     const group = groupSum.get(`${s.month}|${issuerToken(s.payee)}`) ?? s.amountAgorot;
-    const hit = targets.find(
+    const hits = targets.filter(
       (t) =>
         t.chargeDate.slice(0, 7) === s.month &&
         (Math.abs(s.amountAgorot - t.targetAgorot) <= MATCH_TOLERANCE_AGOROT ||
           Math.abs(group - t.targetAgorot) <= MATCH_TOLERANCE_AGOROT),
     );
-    if (hit) out.set(s.id, hit.id);
+    // Two cycles within ₪5 of the same debit (two cards charged alike in one
+    // month) is ambiguous: a suggestion here is a wrong reconciliation one
+    // click away. The source label says nothing reliable about the issuer, so
+    // nothing is suggested and the client picks.
+    if (hits.length === 1) out.set(s.id, hits[0].id);
   }
   return out;
 }

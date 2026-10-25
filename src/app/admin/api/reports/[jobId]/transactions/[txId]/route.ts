@@ -36,6 +36,7 @@ import { db } from "@/lib/db";
 import { authorizeReportsRequest } from "@/lib/reportsAdminAuth";
 import { getMergedTaxonomy, getValidLeafSet } from "@/lib/reportCategories";
 import { isIncomeLeaf, type TxnKind } from "@/config/reportTaxonomy";
+import { bankSources } from "@/lib/reportAnalysis";
 
 export const dynamic = "force-dynamic";
 
@@ -54,23 +55,6 @@ export function normalizeDate(raw: unknown): string | null {
   const d = new Date(`${raw}T00:00:00Z`);
   if (Number.isNaN(d.getTime())) return null;
   return d.toISOString().slice(0, 10) === raw ? raw : null;
-}
-
-/**
- * A row's source is a bank account when the stored verification reports no
- * printed statement total for it — the same criterion verifyAgentResult uses.
- * Fails closed: no verification, or a label it does not list, is not a bank.
- */
-function isBankSource(sourceLabel: string, verification: unknown): boolean {
-  if (typeof verification !== "object" || verification === null) return false;
-  const per = (verification as { perSource?: unknown }).perSource;
-  if (!Array.isArray(per)) return false;
-  return per.some(
-    (s) =>
-      typeof s === "object" && s !== null &&
-      (s as { label?: unknown }).label === sourceLabel &&
-      (s as { statementTotalAgorot?: unknown }).statementTotalAgorot === null,
-  );
 }
 
 export async function PATCH(
@@ -123,7 +107,10 @@ export async function PATCH(
       if (row.amountAgorot >= 0) {
         return NextResponse.json({ error: "קטגוריית הכנסה אפשרית רק לזיכוי (סכום שלילי)" }, { status: 400 });
       }
-      if (!isBankSource(row.sourceLabel, row.job.verification)) {
+      // Bank-ness is the parser's explicit flag on the stored verification
+      // (perSource[].bank) — never "no printed total". Fails closed on a null
+      // or old-shape verification.
+      if (!bankSources(row.job.verification).has(row.sourceLabel)) {
         return NextResponse.json({ error: "קטגוריית הכנסה אפשרית רק לשורה מחשבון בנק" }, { status: 400 });
       }
     }

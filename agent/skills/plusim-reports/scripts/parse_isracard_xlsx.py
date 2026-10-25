@@ -49,6 +49,10 @@ class ParseResult:
     # charge block of a card source (plan B2). Isracard xlsx prints no charge
     # date, so this stays empty here; bank sources never have cycles.
     charge_cycles: dict[str, list[dict]] = field(default_factory=dict)
+    # Labels whose rows came from a bank current-account parser. Explicit, so a
+    # card source that merely lacks a printed total (MAX -pending) is never
+    # mistaken for a bank: income may only come from these (verify_report.py).
+    bank_labels: set[str] = field(default_factory=set)
 
 
 def _agorot(v) -> int:

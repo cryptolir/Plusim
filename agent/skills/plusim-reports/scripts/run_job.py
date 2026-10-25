@@ -454,6 +454,7 @@ def cmd_prepare(args) -> None:
     settlements: list[dict] = []
     source_totals: dict[str, int | None] = {}
     charge_cycles: dict[str, list[dict]] = {}
+    bank_labels: set[str] = set()
     warnings: list[str] = []
     max_seq = 0
     for file in manifest["files"]:
@@ -515,6 +516,7 @@ def cmd_prepare(args) -> None:
         for label, cycles in getattr(r, "charge_cycles", {}).items():
             if cycles:
                 charge_cycles[label] = cycles
+        bank_labels |= set(getattr(r, "bank_labels", ()))
         warnings.extend(r.warnings)
 
     leaves = {leaf for sec in manifest["taxonomy"] for leaf in sec["leaves"]}
@@ -535,6 +537,7 @@ def cmd_prepare(args) -> None:
         "settlements": settlements,
         "sourceTotals": source_totals,
         "chargeCycles": charge_cycles,
+        "bankLabels": sorted(bank_labels),
         "warnings": warnings,
     }
     with open(os.path.join(wd, "state.json"), "w", encoding="utf-8") as f:
@@ -615,8 +618,9 @@ def cmd_finalize(args) -> None:
             add_note(t, (j or {}).get("note") or "לא זוהה סיווג ודאי")
 
     settlements = state.get("settlements", [])
+    bank_labels = set(state.get("bankLabels", []))
     ok, problems, summary = verify(
-        state["txns"], state["sourceTotals"], manifest["taxonomy"], settlements=settlements
+        state["txns"], state["sourceTotals"], manifest["taxonomy"], settlements=settlements, bank_labels=bank_labels
     )
 
     # An installment left on its deal date may sit in the wrong MONTH, so say so
@@ -672,6 +676,9 @@ def cmd_finalize(args) -> None:
                     if state.get("chargeCycles", {}).get(label)
                     else {}
                 ),
+                # A bank current-account source — the only kind income may
+                # come from. Explicit, never inferred from a missing total.
+                **({"bank": True} if label in bank_labels else {}),
             }
             for label, total in state["sourceTotals"].items()
         ],

@@ -19,8 +19,7 @@ demote the job to needs_review with these diagnostics attached.
 from __future__ import annotations
 
 from bank_rows import is_settlement_payee
-
-INCOME_SECTION = "הכנסות"
+from build_report_xlsx import INCOME_SECTION
 
 
 def verify(
@@ -28,11 +27,17 @@ def verify(
     source_totals: dict[str, int | None],
     taxonomy: list[dict],
     settlements: list[dict] | None = None,
+    bank_labels: set[str] | None = None,
 ) -> tuple[bool, list[str], dict]:
+    """`bank_labels`: the sources parsed by a bank parser (ParseResult.bank_labels).
+    When None, a source with no printed total is taken as a bank — the older,
+    looser criterion, kept for callers that have no parser information."""
     problems: list[str] = []
     leaves = {leaf for sec in taxonomy for leaf in sec["leaves"]}
     income = {leaf for sec in taxonomy if sec["section"] == INCOME_SECTION for leaf in sec["leaves"]}
     settlements = settlements or []
+    if bank_labels is None:
+        bank_labels = {label for label, total in source_totals.items() if total is None}
 
     seen: set[str] = set()
     for t in txns:
@@ -40,7 +45,12 @@ def verify(
             problems.append(f"duplicate dedupKey: {t['dedupKey']}")
         seen.add(t["dedupKey"])
         kind = t.get("kind") or "expense"
-        bank_source = source_totals.get(t["sourceLabel"], 0) is None
+        bank_source = t["sourceLabel"] in bank_labels
+        if kind == "credit" and not t["uncategorized"]:
+            # finalize always resolves a credit to income or expense (refund);
+            # a categorized "credit" would be summed as spend yet hidden from
+            # both uncategorized lists.
+            problems.append(f"categorized row still kind=credit: {t['merchant']} {t['date']}")
         if not t["uncategorized"]:
             if not t.get("category"):
                 problems.append(f"categorized row without category: {t['merchant']}")
@@ -65,6 +75,8 @@ def verify(
     seen_settlements: set[str] = set()
     for s in settlements:
         k = s["dedupKey"]
+        if s["sourceLabel"] not in bank_labels:
+            problems.append(f"settlement from a non-bank source {s['sourceLabel']}: {s['payee']} {s['date']}")
         if k in seen:
             problems.append(f"settlement dedupKey collides with a transaction: {k}")
         if k in seen_settlements:

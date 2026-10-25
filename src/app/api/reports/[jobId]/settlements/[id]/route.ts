@@ -24,16 +24,21 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ jobId: st
   if (!userId) return NextResponse.json({ error: "נדרשת התחברות" }, { status: 401 });
 
   const { jobId, id } = await ctx.params;
-  let body: { matchedCycle?: unknown };
+  let body: unknown;
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "בקשה לא תקינה" }, { status: 400 });
   }
-  if (!("matchedCycle" in body) || (body.matchedCycle !== null && typeof body.matchedCycle !== "string")) {
+  // A JSON primitive (`null`, `"x"`, `5`) parses fine but is not a body.
+  if (typeof body !== "object" || body === null || Array.isArray(body) || !("matchedCycle" in body)) {
     return NextResponse.json({ error: "בקשה לא תקינה" }, { status: 400 });
   }
-  const matchedCycle = body.matchedCycle as string | null;
+  const raw = (body as { matchedCycle: unknown }).matchedCycle;
+  if (raw !== null && typeof raw !== "string") {
+    return NextResponse.json({ error: "בקשה לא תקינה" }, { status: 400 });
+  }
+  const matchedCycle = raw;
 
   const job = await db.reportJob.findFirst({
     where: { id: jobId, targetUserId: userId, status: "published" },

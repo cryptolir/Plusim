@@ -70,6 +70,13 @@ export interface AgentSourceTotal {
   computedTotalAgorot: number;
   /** Only on a source with a printed total; Σ amountAgorot === that total. */
   chargeCycles?: AgentChargeCycle[];
+  /**
+   * The source is a bank current account (set by the skill from the parser
+   * that produced it). Explicit on purpose: a missing printed total is NOT the
+   * criterion — a MAX pending section has none either and is a card. Only a
+   * bank source may carry income rows or settlements.
+   */
+  bank?: true;
 }
 
 /** A bank debit that paid a card statement — reconciled by the client, never summed. */
@@ -190,6 +197,7 @@ export function parseAgentResult(body: unknown, validLeaves: Set<string>): Agent
     const computed = intAgorot(raw.computedTotalAgorot);
     if (stmt === undefined || computed === null) throw new Error(`sourceTotals[${i}] bad totals`);
     const total: AgentSourceTotal = { label, statementTotalAgorot: stmt, computedTotalAgorot: computed };
+    if (raw.bank === true) total.bank = true;
     if (raw.chargeCycles !== undefined) {
       if (!Array.isArray(raw.chargeCycles)) throw new Error(`sourceTotals[${i}] bad chargeCycles`);
       if (raw.chargeCycles.length > MAX_CYCLES) throw new Error(`sourceTotals[${i}] too many chargeCycles`);
@@ -332,11 +340,19 @@ export interface VerificationOutcome {
     minorGap?: boolean;
     /** Carried verbatim from the agent; a cycle's id is `${label}@${chargeDate}`. */
     chargeCycles?: AgentChargeCycle[];
+    /** A bank current-account source (AgentSourceTotal.bank). */
+    bank?: true;
   }[];
   txCount: number;
   uncategorizedCount: number;
   /** Count of card-settlement debits kept out of the transactions. */
   settlementCount: number;
+  /**
+   * Σ of the settlements when no card source has charge cycles — nothing to
+   * match them against (bank-only job, Isracard xlsx). Absent otherwise. The
+   * client card and the admin panel read THIS, not the note's wording.
+   */
+  unmatchedSettlementsAgorot?: number;
   /** Expense totals per month — income rows are excluded. */
   monthTotalsAgorot: Record<string, number>;
 }
@@ -344,6 +360,11 @@ export interface VerificationOutcome {
 /** The id the client matches a settlement against: one per charge block of a card source. */
 export function cycleId(label: string, chargeDate: string): string {
   return `${label}@${chargeDate}`;
+}
+
+/** The one sentence shown wherever settlements exist with no cycle to match (plan B2). */
+export function noCyclesNote(count: number, sumAgorot: number): string {
+  return `${count} חיובי כרטיס אשראי בסך ${shekel(sumAgorot)} נמצאו בחשבון הבנק ללא מחזור חיוב תואם להתאמה — אינם נספרים כהוצאה`;
 }
 
 /**
@@ -358,9 +379,7 @@ export function verifyAgentResult(
 ): VerificationOutcome {
   const problems: string[] = [];
   const notes: string[] = [];
-  const nullTotalSources = new Set(
-    result.sourceTotals.filter((s) => s.statementTotalAgorot === null).map((s) => s.label),
-  );
+  const bankSources = new Set(result.sourceTotals.filter((s) => s.bank === true).map((s) => s.label));
 
   // Category validity (structural pass already ensured presence).
   for (const t of result.transactions) {
@@ -384,10 +403,16 @@ export function verifyAgentResult(
         if (t.amountAgorot >= 0) {
           problems.push(`הכנסה בסכום שאינו זיכוי ${shekel(t.amountAgorot)} (${t.merchant} ${t.date})`);
         }
-        if (!nullTotalSources.has(t.sourceLabel)) {
+        if (!bankSources.has(t.sourceLabel)) {
           problems.push(`הכנסה ממקור שאינו חשבון בנק "${t.sourceLabel}" (${t.merchant} ${t.date})`);
         }
       }
+    }
+    // An undecided credit is by definition unplaced: the skill resolves every
+    // categorized credit to income or expense (refund). A categorized "credit"
+    // would be summed as spend yet hidden from both uncategorized lists.
+    if (t.kind === "credit" && !t.uncategorized) {
+      problems.push(`זיכוי מסווג שנותר ללא הכרעה (הכנסה/החזר): ${t.merchant} ${t.date}`);
     }
   }
 
@@ -426,7 +451,7 @@ export function verifyAgentResult(
   for (const s of settlements) {
     if (s.amountAgorot <= 0) problems.push(`חיוב כרטיס בסכום שאינו חיובי ${shekel(s.amountAgorot)} (${s.payee} ${s.date})`);
     if (!s.date.startsWith(s.month)) problems.push(`תאריך חיוב הכרטיס ${s.date} אינו בחודש ${s.month} (${s.payee})`);
-    if (!nullTotalSources.has(s.sourceLabel)) {
+    if (!bankSources.has(s.sourceLabel)) {
       problems.push(`חיוב כרטיס ממקור שאינו חשבון בנק "${s.sourceLabel}" (${s.payee} ${s.date})`);
     }
     if (seen.has(s.dedupKey)) problems.push(`חיוב כרטיס זהה לעסקה (${s.dedupKey})`);
@@ -465,6 +490,9 @@ export function verifyAgentResult(
     }
     // Charge cycles (plan B2): only a source with a printed total has them,
     // they sum to that total exactly, and no two share a date.
+    if (s.bank && s.statementTotalAgorot !== null) {
+      problems.push(`מקור בנק "${s.label}" מדווח סכום דף חשבון — חשבון בנק אינו מדפיס סכום כולל`);
+    }
     if (s.chargeCycles) {
       if (s.statementTotalAgorot === null) {
         problems.push(`למקור "${s.label}" מחזורי חיוב אך אין סכום בדף החשבון`);
@@ -486,6 +514,7 @@ export function verifyAgentResult(
       match,
       minorGap,
       ...(s.chargeCycles ? { chargeCycles: s.chargeCycles } : {}),
+      ...(s.bank ? { bank: true as const } : {}),
     };
   });
   // A source present in transactions but missing from sourceTotals is suspicious.
@@ -499,11 +528,10 @@ export function verifyAgentResult(
   // source without charge dates (Isracard xlsx). The card spend they paid is
   // not in this report and must never go missing silently — a NOTE, so the
   // admin and the client's card both say so (plan B2).
+  let unmatchedSettlementsAgorot: number | undefined;
   if (settlements.length > 0 && !result.sourceTotals.some((s) => s.chargeCycles && s.chargeCycles.length > 0)) {
-    const sum = settlements.reduce((n, s) => n + s.amountAgorot, 0);
-    notes.push(
-      `${settlements.length} חיובי כרטיס אשראי בסך ${shekel(sum)} נמצאו בחשבון הבנק ללא מחזור חיוב תואם להתאמה — אינם נספרים כהוצאה`,
-    );
+    unmatchedSettlementsAgorot = settlements.reduce((n, s) => n + s.amountAgorot, 0);
+    notes.push(noCyclesNote(settlements.length, unmatchedSettlementsAgorot));
   }
 
   // Expense totals only: income rows are the other side of מצבנו.
@@ -525,6 +553,7 @@ export function verifyAgentResult(
     txCount: result.transactions.length,
     uncategorizedCount: result.transactions.filter((t) => t.uncategorized).length,
     settlementCount: settlements.length,
+    ...(unmatchedSettlementsAgorot !== undefined ? { unmatchedSettlementsAgorot } : {}),
     monthTotalsAgorot,
   };
 }

@@ -458,7 +458,8 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
               <MappingRow
                 key={m.id}
                 mapping={m}
-                leaves={categoryLeaves}
+                // the dictionary holds expense categories only (one direction per merchant)
+                leaves={categoryLeaves.filter((l) => !incomeLeaves.includes(l))}
                 busy={busy !== null}
                 onApprove={(category) =>
                   action("mapping", `/admin/api/report-mappings/${m.id}`, {
