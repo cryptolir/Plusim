@@ -12,7 +12,16 @@
  * deliberately NO default: a caller that forgets to pass the merged set is a
  * typecheck error, never a silent base-only fallback that would turn a legit
  * admin-added leaf into a false FATAL (plan Rev 3/4).
+ *
+ * Bank statements (docs/plans/bank-statements.md B2): a transaction may carry
+ * `kind` ("income" | "credit"; absent ⇒ expense), the result may carry
+ * `settlements` (card-statement debits kept out of the transactions), and a
+ * card source may carry `chargeCycles`. All optional — a skill predating them
+ * sends none and verifies exactly as before. The merged taxonomy is a REQUIRED
+ * argument of verifyAgentResult so the income invariant is checked against the
+ * same הכנסות section the manifest served.
  */
+import { INCOME_SECTION, isIncomeLeaf, type TaxonomySection } from "@/config/reportTaxonomy";
 
 export interface AgentTxn {
   month: string; // "2026-06"
@@ -34,18 +43,50 @@ export interface AgentTxn {
    * and its absence must verify exactly as before. Transient — never persisted.
    */
   undatedInstallment?: boolean;
+  /**
+   * "income": a bank credit categorized into the הכנסות section. "credit": a bank
+   * credit the agent could not place (income or refund — still undecided, so
+   * it is listed apart from uncategorized debits). Absent ⇒ expense, which is
+   * every card row, every bank debit, and a refund credit in an expense leaf.
+   * Strict string match like `undatedInstallment`.
+   */
+  kind?: "income" | "credit";
 }
+
+/**
+ * One charge block of a card statement: what the bank debits on that date.
+ * A type alias, not an interface: it is stored inside the `verification` Json
+ * column, and Prisma's InputJsonValue accepts aliases (implicit index
+ * signature) but not interfaces.
+ */
+export type AgentChargeCycle = {
+  chargeDate: string; // "YYYY-MM-DD"
+  amountAgorot: number;
+};
 
 export interface AgentSourceTotal {
   label: string;
   statementTotalAgorot: number | null; // null = statement carries no usable total
   computedTotalAgorot: number;
+  /** Only on a source with a printed total; Σ amountAgorot === that total. */
+  chargeCycles?: AgentChargeCycle[];
+}
+
+/** A bank debit that paid a card statement — reconciled by the client, never summed. */
+export interface AgentSettlement {
+  date: string;
+  month: string;
+  payee: string;
+  amountAgorot: number; // positive
+  sourceLabel: string; // a bank source (statementTotalAgorot === null)
+  dedupKey: string;
 }
 
 export interface AgentResult {
   status: "ok" | "needs_review";
   transactions: AgentTxn[];
   sourceTotals: AgentSourceTotal[];
+  settlements?: AgentSettlement[];
   xlsxBase64: string;
   xlsxFilename?: string;
   proposedMappings: { merchant: string; category: string; evidence?: string }[];
@@ -75,6 +116,8 @@ export function rejectionHe(msg: string): string {
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_TXNS = 5000;
+const MAX_SETTLEMENTS = 2000;
+const MAX_CYCLES = 24;
 const MAX_STR = 500;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -116,7 +159,7 @@ export function parseAgentResult(body: unknown, validLeaves: Set<string>): Agent
     if (!sourceLabel) throw new Error(`txn[${i}] bad sourceLabel`);
     if (!dedupKey) throw new Error(`txn[${i}] bad dedupKey`);
     if (!uncategorized && !category) throw new Error(`txn[${i}] categorized without category`);
-    return {
+    const txn: AgentTxn = {
       month,
       date,
       merchant,
@@ -128,7 +171,14 @@ export function parseAgentResult(body: unknown, validLeaves: Set<string>): Agent
       dedupKey,
       // Strict === true: anything else (absent, null, "false") is not a flag.
       undatedInstallment: raw.undatedInstallment === true ? true : undefined,
+      // Strict string match; "expense" is the absent default and is not stored
+      // on the wire. Any other value is a contract violation, not a guess.
+      kind: raw.kind === "income" || raw.kind === "credit" ? raw.kind : undefined,
     };
+    if (raw.kind !== undefined && raw.kind !== "income" && raw.kind !== "credit") {
+      throw new Error(`txn[${i}] bad kind`);
+    }
+    return txn;
   });
 
   if (!Array.isArray(body.sourceTotals)) throw new Error("sourceTotals missing");
@@ -139,8 +189,43 @@ export function parseAgentResult(body: unknown, validLeaves: Set<string>): Agent
     const stmt = raw.statementTotalAgorot === null ? null : intAgorot(raw.statementTotalAgorot);
     const computed = intAgorot(raw.computedTotalAgorot);
     if (stmt === undefined || computed === null) throw new Error(`sourceTotals[${i}] bad totals`);
-    return { label, statementTotalAgorot: stmt, computedTotalAgorot: computed };
+    const total: AgentSourceTotal = { label, statementTotalAgorot: stmt, computedTotalAgorot: computed };
+    if (raw.chargeCycles !== undefined) {
+      if (!Array.isArray(raw.chargeCycles)) throw new Error(`sourceTotals[${i}] bad chargeCycles`);
+      if (raw.chargeCycles.length > MAX_CYCLES) throw new Error(`sourceTotals[${i}] too many chargeCycles`);
+      total.chargeCycles = raw.chargeCycles.map((c, k) => {
+        if (!isRecord(c)) throw new Error(`sourceTotals[${i}].chargeCycles[${k}] not an object`);
+        const chargeDate = str(c.chargeDate, 10);
+        const amountAgorot = intAgorot(c.amountAgorot);
+        if (!chargeDate || !DATE_RE.test(chargeDate)) throw new Error(`sourceTotals[${i}].chargeCycles[${k}] bad chargeDate`);
+        if (amountAgorot === null) throw new Error(`sourceTotals[${i}].chargeCycles[${k}] bad amount`);
+        return { chargeDate, amountAgorot };
+      });
+    }
+    return total;
   });
+
+  let settlements: AgentSettlement[] | undefined;
+  if (body.settlements !== undefined) {
+    if (!Array.isArray(body.settlements)) throw new Error("settlements not an array");
+    if (body.settlements.length > MAX_SETTLEMENTS) throw new Error("too many settlements");
+    settlements = body.settlements.map((raw, i) => {
+      if (!isRecord(raw)) throw new Error(`settlement[${i}] not an object`);
+      const month = str(raw.month, 7);
+      const date = str(raw.date, 10);
+      const payee = str(raw.payee);
+      const amountAgorot = intAgorot(raw.amountAgorot);
+      const sourceLabel = str(raw.sourceLabel, 100);
+      const dedupKey = str(raw.dedupKey, 200);
+      if (!month || !MONTH_RE.test(month)) throw new Error(`settlement[${i}] bad month`);
+      if (!date || !DATE_RE.test(date)) throw new Error(`settlement[${i}] bad date`);
+      if (!payee) throw new Error(`settlement[${i}] bad payee`);
+      if (amountAgorot === null) throw new Error(`settlement[${i}] bad amount`);
+      if (!sourceLabel) throw new Error(`settlement[${i}] bad sourceLabel`);
+      if (!dedupKey) throw new Error(`settlement[${i}] bad dedupKey`);
+      return { month, date, payee, amountAgorot, sourceLabel, dedupKey };
+    });
+  }
 
   const xlsxBase64 = typeof body.xlsxBase64 === "string" ? body.xlsxBase64 : "";
   if (!xlsxBase64 || xlsxBase64.length > 20_000_000) throw new Error("xlsxBase64 missing or too large");
@@ -159,6 +244,7 @@ export function parseAgentResult(body: unknown, validLeaves: Set<string>): Agent
     status,
     transactions,
     sourceTotals,
+    settlements,
     xlsxBase64,
     xlsxFilename: typeof body.xlsxFilename === "string" ? body.xlsxFilename.slice(0, 200) : undefined,
     proposedMappings,
@@ -244,16 +330,37 @@ export interface VerificationOutcome {
     match: boolean;
     /** Mismatched, but within isMinorTotalGap — shown as a note, not a blocker. */
     minorGap?: boolean;
+    /** Carried verbatim from the agent; a cycle's id is `${label}@${chargeDate}`. */
+    chargeCycles?: AgentChargeCycle[];
   }[];
   txCount: number;
   uncategorizedCount: number;
+  /** Count of card-settlement debits kept out of the transactions. */
+  settlementCount: number;
+  /** Expense totals per month — income rows are excluded. */
   monthTotalsAgorot: Record<string, number>;
 }
 
-/** Independently verify the parsed result. Never trusts the agent's own sums. */
-export function verifyAgentResult(result: AgentResult, validLeaves: Set<string>): VerificationOutcome {
+/** The id the client matches a settlement against: one per charge block of a card source. */
+export function cycleId(label: string, chargeDate: string): string {
+  return `${label}@${chargeDate}`;
+}
+
+/**
+ * Independently verify the parsed result. Never trusts the agent's own sums.
+ * `taxonomy` is the merged base ∪ DB taxonomy (the one the manifest served) —
+ * required, so the income invariant can never fall back to the base section.
+ */
+export function verifyAgentResult(
+  result: AgentResult,
+  validLeaves: Set<string>,
+  taxonomy: TaxonomySection[],
+): VerificationOutcome {
   const problems: string[] = [];
   const notes: string[] = [];
+  const nullTotalSources = new Set(
+    result.sourceTotals.filter((s) => s.statementTotalAgorot === null).map((s) => s.label),
+  );
 
   // Category validity (structural pass already ensured presence).
   for (const t of result.transactions) {
@@ -262,6 +369,25 @@ export function verifyAgentResult(result: AgentResult, validLeaves: Set<string>)
     }
     if (!t.date.startsWith(t.month)) {
       problems.push(`תאריך העסקה ${t.date} אינו בחודש ${t.month} (${t.merchant})`);
+    }
+    // Income invariant (plan B2): kind === "income" ⇔ leaf ∈ הכנסות, and an
+    // income row is a negative amount from a bank source. Held by the persisted
+    // kind, never by sign — a refund credit in an expense leaf is also negative.
+    if (!t.uncategorized && t.category && validLeaves.has(t.category)) {
+      const income = isIncomeLeaf(t.category, taxonomy);
+      if (t.kind === "income" && !income) {
+        problems.push(`שורת הכנסה בקטגוריית הוצאה "${t.category}" (${t.merchant} ${t.date})`);
+      } else if (income && t.kind !== "income") {
+        problems.push(`קטגוריית ${INCOME_SECTION} "${t.category}" על שורה שאינה הכנסה (${t.merchant} ${t.date})`);
+      }
+      if (income) {
+        if (t.amountAgorot >= 0) {
+          problems.push(`הכנסה בסכום שאינו זיכוי ${shekel(t.amountAgorot)} (${t.merchant} ${t.date})`);
+        }
+        if (!nullTotalSources.has(t.sourceLabel)) {
+          problems.push(`הכנסה ממקור שאינו חשבון בנק "${t.sourceLabel}" (${t.merchant} ${t.date})`);
+        }
+      }
     }
   }
 
@@ -290,6 +416,22 @@ export function verifyAgentResult(result: AgentResult, validLeaves: Set<string>)
     const n = (seen.get(t.dedupKey) ?? 0) + 1;
     seen.set(t.dedupKey, n);
     if (n === 2) problems.push(`עסקה כפולה (${t.dedupKey})`);
+  }
+
+  // Settlements (plan B2): never summed anywhere, but they must be real bank
+  // debits of this result — a card-labelled settlement is a parser bug, and a
+  // key shared with a transaction means a row was counted AND set aside.
+  const settlements = result.settlements ?? [];
+  const seenSettlement = new Set<string>();
+  for (const s of settlements) {
+    if (s.amountAgorot <= 0) problems.push(`חיוב כרטיס בסכום שאינו חיובי ${shekel(s.amountAgorot)} (${s.payee} ${s.date})`);
+    if (!s.date.startsWith(s.month)) problems.push(`תאריך חיוב הכרטיס ${s.date} אינו בחודש ${s.month} (${s.payee})`);
+    if (!nullTotalSources.has(s.sourceLabel)) {
+      problems.push(`חיוב כרטיס ממקור שאינו חשבון בנק "${s.sourceLabel}" (${s.payee} ${s.date})`);
+    }
+    if (seen.has(s.dedupKey)) problems.push(`חיוב כרטיס זהה לעסקה (${s.dedupKey})`);
+    if (seenSettlement.has(s.dedupKey)) problems.push(`חיוב כרטיס כפול (${s.dedupKey})`);
+    seenSettlement.add(s.dedupKey);
   }
 
   // Recompute per-source totals from the transactions themselves.
@@ -321,12 +463,29 @@ export function verifyAgentResult(result: AgentResult, validLeaves: Set<string>)
         problems.push(line);
       }
     }
+    // Charge cycles (plan B2): only a source with a printed total has them,
+    // they sum to that total exactly, and no two share a date.
+    if (s.chargeCycles) {
+      if (s.statementTotalAgorot === null) {
+        problems.push(`למקור "${s.label}" מחזורי חיוב אך אין סכום בדף החשבון`);
+      } else {
+        const sum = s.chargeCycles.reduce((n, c) => n + c.amountAgorot, 0);
+        if (sum !== s.statementTotalAgorot) {
+          problems.push(
+            `מקור "${s.label}": סכום מחזורי החיוב ${shekel(sum)} ≠ הסכום בדף החשבון ${shekel(s.statementTotalAgorot)}`,
+          );
+        }
+      }
+      const dates = new Set(s.chargeCycles.map((c) => c.chargeDate));
+      if (dates.size !== s.chargeCycles.length) problems.push(`מקור "${s.label}": תאריך חיוב חוזר במחזורי החיוב`);
+    }
     return {
       label: s.label,
       statementTotalAgorot: s.statementTotalAgorot,
       recomputedTotalAgorot: recomputed,
       match,
       minorGap,
+      ...(s.chargeCycles ? { chargeCycles: s.chargeCycles } : {}),
     };
   });
   // A source present in transactions but missing from sourceTotals is suspicious.
@@ -336,9 +495,21 @@ export function verifyAgentResult(result: AgentResult, validLeaves: Set<string>)
     }
   }
 
+  // Settlements with nothing to match against: a bank-only job, or a card
+  // source without charge dates (Isracard xlsx). The card spend they paid is
+  // not in this report and must never go missing silently — a NOTE, so the
+  // admin and the client's card both say so (plan B2).
+  if (settlements.length > 0 && !result.sourceTotals.some((s) => s.chargeCycles && s.chargeCycles.length > 0)) {
+    const sum = settlements.reduce((n, s) => n + s.amountAgorot, 0);
+    notes.push(
+      `${settlements.length} חיובי כרטיס אשראי בסך ${shekel(sum)} נמצאו בחשבון הבנק ללא מחזור חיוב תואם להתאמה — אינם נספרים כהוצאה`,
+    );
+  }
+
+  // Expense totals only: income rows are the other side of מצבנו.
   const monthTotalsAgorot: Record<string, number> = {};
   for (const t of result.transactions) {
-    if (!t.uncategorized) {
+    if (!t.uncategorized && t.kind !== "income") {
       monthTotalsAgorot[t.month] = (monthTotalsAgorot[t.month] ?? 0) + t.amountAgorot;
     }
   }
@@ -353,6 +524,7 @@ export function verifyAgentResult(result: AgentResult, validLeaves: Set<string>)
     perSource,
     txCount: result.transactions.length,
     uncategorizedCount: result.transactions.filter((t) => t.uncategorized).length,
+    settlementCount: settlements.length,
     monthTotalsAgorot,
   };
 }

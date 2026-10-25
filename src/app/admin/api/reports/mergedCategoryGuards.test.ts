@@ -62,7 +62,7 @@ describe("assign route uses the merged set", () => {
     );
     expect(res.status).toBe(200);
     expect(txUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { category: DB_LEAF, uncategorized: false } }),
+      expect.objectContaining({ data: { category: DB_LEAF, uncategorized: false, kind: "expense" } }),
     );
   });
 

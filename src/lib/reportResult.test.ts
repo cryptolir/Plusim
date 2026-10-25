@@ -8,7 +8,7 @@ import {
   MINOR_GAP_CAP_AGOROT,
   type AgentResult,
 } from "./reportResult";
-import { mergedLeafSet } from "@/config/reportTaxonomy";
+import { mergeTaxonomy, mergedLeafSet, REPORT_TAXONOMY } from "@/config/reportTaxonomy";
 
 const FOOD = "מזון ומכולת";
 const FUEL = "דלק";
@@ -17,6 +17,9 @@ const FUEL = "דלק";
 const BASE_LEAVES = mergedLeafSet([]);
 const DB_LEAF = "קטגוריה חדשה";
 const MERGED_LEAVES = mergedLeafSet([{ name: DB_LEAF, section: "שונות" }]);
+// The merged taxonomy is a REQUIRED third argument (income invariant).
+const TAX = REPORT_TAXONOMY;
+const MERGED_TAX = mergeTaxonomy(REPORT_TAXONOMY, [{ name: DB_LEAF, section: "שונות" }]);
 
 // A single clean transaction + matching source total (agora-exact).
 function tx(over: Partial<AgentResult["transactions"][number]> = {}) {
@@ -52,7 +55,7 @@ function result(over: Partial<AgentResult> = {}): AgentResult {
 
 describe("verifyAgentResult — fatal classification (fail closed)", () => {
   it("clean result is not fatal", () => {
-    const v = verifyAgentResult(result(), BASE_LEAVES);
+    const v = verifyAgentResult(result(), BASE_LEAVES, TAX);
     expect(v.fatal).toBe(false);
     expect(v.ok).toBe(true);
     expect(v.problems).toHaveLength(0);
@@ -64,6 +67,7 @@ describe("verifyAgentResult — fatal classification (fail closed)", () => {
         transactions: [tx({ category: null, uncategorized: true, merchant: "קניון עזריאלי" })],
       }),
       BASE_LEAVES,
+      TAX,
     );
     expect(v.fatal).toBe(false);
     expect(v.uncategorizedCount).toBe(1);
@@ -72,7 +76,7 @@ describe("verifyAgentResult — fatal classification (fail closed)", () => {
   it("a MATERIAL per-source total mismatch → fatal", () => {
     const r = result();
     r.sourceTotals[0].statementTotalAgorot = 21_579; // recomputed 1579 ⇒ gap ₪200, over the floor
-    const v = verifyAgentResult(r, BASE_LEAVES);
+    const v = verifyAgentResult(r, BASE_LEAVES, TAX);
     expect(v.fatal).toBe(true);
     expect(v.problems.join(" ")).toMatch(/הסכום המחושב .* ≠ הסכום בדף החשבון/);
     expect(v.notes).toEqual([]);
@@ -80,19 +84,19 @@ describe("verifyAgentResult — fatal classification (fail closed)", () => {
   });
 
   it("unknown category → fatal", () => {
-    const v = verifyAgentResult(result({ transactions: [tx({ category: "not-a-real-leaf" })] }), BASE_LEAVES);
+    const v = verifyAgentResult(result({ transactions: [tx({ category: "not-a-real-leaf" })] }), BASE_LEAVES, TAX);
     expect(v.fatal).toBe(true);
     expect(v.problems.join(" ")).toMatch(/קטגוריה לא מוכרת/);
   });
 
   it("DB category in the passed valid set → NOT fatal (test_verify_accepts_db_category_when_in_valid_set)", () => {
-    const v = verifyAgentResult(result({ transactions: [tx({ category: DB_LEAF })] }), MERGED_LEAVES);
+    const v = verifyAgentResult(result({ transactions: [tx({ category: DB_LEAF })] }), MERGED_LEAVES, MERGED_TAX);
     expect(v.fatal).toBe(false);
     expect(v.problems).toHaveLength(0);
   });
 
   it("leaf in neither base nor the passed set → fatal (test_verify_unknown_category_still_fatal)", () => {
-    const v = verifyAgentResult(result({ transactions: [tx({ category: "לא-קיימת" })] }), MERGED_LEAVES);
+    const v = verifyAgentResult(result({ transactions: [tx({ category: "לא-קיימת" })] }), MERGED_LEAVES, MERGED_TAX);
     expect(v.fatal).toBe(true);
     expect(v.problems.join(" ")).toMatch(/קטגוריה לא מוכרת/);
   });
@@ -100,17 +104,19 @@ describe("verifyAgentResult — fatal classification (fail closed)", () => {
   it("the valid set is a required arg — inclusion decides, no hidden fallback (test_verify_requires_explicit_valid_set)", () => {
     // Same DB-leaf result: FATAL under base-only, clean under the merged set.
     const dbLeafResult = () => result({ transactions: [tx({ category: DB_LEAF })] });
-    expect(verifyAgentResult(dbLeafResult(), BASE_LEAVES).fatal).toBe(true);
-    expect(verifyAgentResult(dbLeafResult(), MERGED_LEAVES).fatal).toBe(false);
+    expect(verifyAgentResult(dbLeafResult(), BASE_LEAVES, TAX).fatal).toBe(true);
+    expect(verifyAgentResult(dbLeafResult(), MERGED_LEAVES, MERGED_TAX).fatal).toBe(false);
     // And omitting it entirely is a compile error, pinned at the type level:
     // @ts-expect-error validLeaves is required — no base-only default exists
     void (() => verifyAgentResult(dbLeafResult()));
+    // @ts-expect-error the merged taxonomy is required too — the income invariant never falls back to base
+    void (() => verifyAgentResult(dbLeafResult(), MERGED_LEAVES));
     // @ts-expect-error validLeaves is required — no base-only default exists
     void (() => parseAgentResult({}));
   });
 
   it("date outside its month → fatal", () => {
-    const v = verifyAgentResult(result({ transactions: [tx({ date: "2026-07-02" })] }), BASE_LEAVES);
+    const v = verifyAgentResult(result({ transactions: [tx({ date: "2026-07-02" })] }), BASE_LEAVES, TAX);
     expect(v.fatal).toBe(true);
     expect(v.problems.join(" ")).toMatch(/אינו בחודש/);
   });
@@ -124,6 +130,7 @@ describe("verifyAgentResult — fatal classification (fail closed)", () => {
         ],
       }),
       BASE_LEAVES,
+      TAX,
     );
     expect(v.fatal).toBe(true);
     expect(v.problems.join(" ")).toMatch(/עסקה כפולה/);
@@ -134,7 +141,7 @@ describe("verifyAgentResult — fatal classification (fail closed)", () => {
       transactions: [tx(), tx({ sourceLabel: "max", merchant: "פז", category: FUEL, dedupKey: "v-2" })],
     });
     // sourceTotals only covers isracard-4962; "max" is orphaned.
-    const v = verifyAgentResult(r, BASE_LEAVES);
+    const v = verifyAgentResult(r, BASE_LEAVES, TAX);
     expect(v.fatal).toBe(true);
     expect(v.problems.join(" ")).toMatch(/אין סכום מדווח בדף החשבון/);
   });
@@ -217,7 +224,7 @@ describe("a small total gap is a note, not a publish blocker", () => {
   const withTotals = (recomputedAgorot: number, statementAgorot: number) => {
     const r = result({ transactions: [tx({ amountAgorot: recomputedAgorot })] });
     r.sourceTotals[0].statementTotalAgorot = statementAgorot;
-    return verifyAgentResult(r, BASE_LEAVES);
+    return verifyAgentResult(r, BASE_LEAVES, TAX);
   };
   // s1 as it actually came back: ₪7,278.11 recomputed vs ₪7,365.91 stated.
   const S1_RECOMPUTED = 727_811;
@@ -281,7 +288,7 @@ describe("a small total gap is a note, not a publish blocker", () => {
   it("a note never masks a real integrity problem in the same result", () => {
     const r = result({ transactions: [tx({ category: "not-a-real-leaf" })] });
     r.sourceTotals[0].statementTotalAgorot = 1579 + 20; // ₪0.20 short of ₪15.99 = 1.25%, a minor gap
-    const v = verifyAgentResult(r, BASE_LEAVES);
+    const v = verifyAgentResult(r, BASE_LEAVES, TAX);
     expect(v.fatal).toBe(true); // the unknown category still blocks
     expect(v.notes).toHaveLength(1);
   });
@@ -300,7 +307,7 @@ describe("an undated installment is a note, never a publish blocker", () => {
         tx({ note: INSTALLMENT_NOTE, date: "2025-09-28", month: "2025-09", undatedInstallment: true }),
       ],
     });
-    const v = verifyAgentResult(r, BASE_LEAVES);
+    const v = verifyAgentResult(r, BASE_LEAVES, TAX);
     expect(v.fatal).toBe(false);
     expect(v.problems).toHaveLength(0);
     expect(v.notes).toHaveLength(1);
@@ -312,7 +319,7 @@ describe("an undated installment is a note, never a publish blocker", () => {
     const r = result({
       transactions: [tx({ date: "2025-09-28", month: "2025-09", undatedInstallment: true })],
     });
-    const v = verifyAgentResult(r, BASE_LEAVES);
+    const v = verifyAgentResult(r, BASE_LEAVES, TAX);
     // Prove the date-outside-month rule does NOT fire here.
     expect(v.problems.some((p) => p.includes("אינו בחודש"))).toBe(false);
     expect(v.notes).toHaveLength(1);
@@ -322,7 +329,7 @@ describe("an undated installment is a note, never a publish blocker", () => {
   // exactly as before (the app deploys ahead of the skill).
   it("a payload without the flag verifies exactly as today", () => {
     const r = result({ transactions: [tx({ note: INSTALLMENT_NOTE })] });
-    const v = verifyAgentResult(r, BASE_LEAVES);
+    const v = verifyAgentResult(r, BASE_LEAVES, TAX);
     expect(v.fatal).toBe(false);
     expect(v.problems).toHaveLength(0);
     expect(v.notes).toHaveLength(0);
@@ -339,7 +346,7 @@ describe("an undated installment is a note, never a publish blocker", () => {
     });
     expect(parseAgentResult(raw({ undatedInstallment: true }), BASE_LEAVES).transactions[0].undatedInstallment).toBe(true);
     for (const bogus of [false, "true", 1, null, undefined]) {
-      const parsed = parseAgentResult(raw({ undatedInstallment: bogus }), BASE_LEAVES);
+      const parsed = parseAgentResult(raw({ undatedInstallment: bogus }), BASE_LEAVES, TAX);
       expect(parsed.transactions[0].undatedInstallment).toBeUndefined();
     }
   });
@@ -351,10 +358,196 @@ describe("an undated installment is a note, never a publish blocker", () => {
         tx({ dedupKey: "v-2", merchant: "בית", note: "תשלום 2 מתוך 2" }),
       ],
     });
-    const v = verifyAgentResult(r, BASE_LEAVES);
+    const v = verifyAgentResult(r, BASE_LEAVES, TAX);
     expect(v.notes).toHaveLength(1);
     expect(v.notes[0]).toContain("אלף");
     expect(v.notes[0]).not.toContain("בית");
     expect(v.fatal).toBe(false);
+  });
+});
+
+// ── Bank statements (docs/plans/bank-statements.md B2) ────────────────────────
+
+const SALARY = "משכורת 1";
+const BANK = "hapoalim-1812";
+
+function bankResult(transactions: AgentResult["transactions"], over: Partial<AgentResult> = {}): AgentResult {
+  return {
+    status: "ok",
+    transactions,
+    sourceTotals: [{ label: BANK, statementTotalAgorot: null, computedTotalAgorot: 0 }],
+    xlsxBase64: "",
+    proposedMappings: [],
+    ...over,
+  };
+}
+
+const income = (over: Partial<AgentResult["transactions"][number]> = {}) =>
+  tx({ merchant: "מעסיק", amountAgorot: -1900000, category: SALARY, sourceLabel: BANK, dedupKey: "b-1", kind: "income", ...over });
+
+describe("income kind ⇔ הכנסות leaf (fatal both ways)", () => {
+  it("a clean income row verifies", () => {
+    const v = verifyAgentResult(bankResult([income()]), BASE_LEAVES, TAX);
+    expect(v.fatal).toBe(false);
+    expect(v.problems).toEqual([]);
+  });
+
+  it("kind absent ⇒ identical outcome to today for expense rows", () => {
+    const v = verifyAgentResult(result(), BASE_LEAVES, TAX);
+    expect(v.fatal).toBe(false);
+    expect(v.settlementCount).toBe(0);
+  });
+
+  it("kind income in an expense leaf → fatal; הכנסות leaf without kind income → fatal", () => {
+    const a = verifyAgentResult(bankResult([income({ category: FOOD })]), BASE_LEAVES, TAX);
+    expect(a.fatal).toBe(true);
+    expect(a.problems.join(" ")).toMatch(/שורת הכנסה בקטגוריית הוצאה/);
+    const b = verifyAgentResult(bankResult([income({ kind: undefined })]), BASE_LEAVES, TAX);
+    expect(b.fatal).toBe(true);
+    expect(b.problems.join(" ")).toMatch(/על שורה שאינה הכנסה/);
+  });
+
+  it("an הכנסות row with a non-negative amount, or from a card source, → fatal", () => {
+    const pos = verifyAgentResult(bankResult([income({ amountAgorot: 1900000 })]), BASE_LEAVES, TAX);
+    expect(pos.fatal).toBe(true);
+    expect(pos.problems.join(" ")).toMatch(/שאינו זיכוי/);
+    const card = verifyAgentResult(
+      bankResult([income({ sourceLabel: "isracard-4962" })], {
+        sourceTotals: [{ label: "isracard-4962", statementTotalAgorot: -1900000, computedTotalAgorot: -1900000 }],
+      }),
+      BASE_LEAVES,
+      TAX,
+    );
+    expect(card.fatal).toBe(true);
+    expect(card.problems.join(" ")).toMatch(/שאינו חשבון בנק/);
+  });
+
+  it("an admin-added income leaf is income only through the MERGED taxonomy", () => {
+    const merged = mergeTaxonomy(REPORT_TAXONOMY, [{ name: "מלגה", section: "הכנסות" }]);
+    const leaves = mergedLeafSet([{ name: "מלגה", section: "הכנסות" }]);
+    expect(verifyAgentResult(bankResult([income({ category: "מלגה" })]), leaves, merged).fatal).toBe(false);
+  });
+
+  it("monthTotalsAgorot excludes income", () => {
+    const v = verifyAgentResult(
+      bankResult([income(), tx({ sourceLabel: BANK, dedupKey: "b-2", amountAgorot: 500 })]),
+      BASE_LEAVES,
+      TAX,
+    );
+    expect(v.monthTotalsAgorot).toEqual({ "2026-06": 500 });
+  });
+
+  it("a refund credit in an expense leaf (kind absent) is just a negative expense", () => {
+    const v = verifyAgentResult(
+      bankResult([tx({ sourceLabel: BANK, dedupKey: "b-3", amountAgorot: -2860, category: "בריאות משלים" })]),
+      BASE_LEAVES,
+      TAX,
+    );
+    expect(v.fatal).toBe(false);
+    expect(v.monthTotalsAgorot["2026-06"]).toBe(-2860);
+  });
+});
+
+const settlement = (over: Partial<NonNullable<AgentResult["settlements"]>[number]> = {}) => ({
+  date: "2026-06-10",
+  month: "2026-06",
+  payee: "מקס איט פיננ-י",
+  amountAgorot: 1539514,
+  sourceLabel: BANK,
+  dedupKey: "s-1",
+  ...over,
+});
+
+describe("settlements and charge cycles", () => {
+  const cardTotals = (cycles?: { chargeDate: string; amountAgorot: number }[]) => [
+    { label: BANK, statementTotalAgorot: null, computedTotalAgorot: 0 },
+    { label: "isracard-4962", statementTotalAgorot: 1579, computedTotalAgorot: 1579, ...(cycles ? { chargeCycles: cycles } : {}) },
+  ];
+
+  it("settlements are optional; with cycles present nothing is noted", () => {
+    const v = verifyAgentResult(
+      result({ settlements: [settlement()], sourceTotals: cardTotals([{ chargeDate: "2026-06-10", amountAgorot: 1579 }]) }),
+      BASE_LEAVES,
+      TAX,
+    );
+    expect(v.fatal).toBe(false);
+    expect(v.notes).toEqual([]);
+    expect(v.settlementCount).toBe(1);
+    expect(v.perSource[1].chargeCycles).toEqual([{ chargeDate: "2026-06-10", amountAgorot: 1579 }]);
+  });
+
+  it("settlements with no cycles anywhere ⇒ the note, not a problem", () => {
+    const v = verifyAgentResult(result({ settlements: [settlement(), settlement({ dedupKey: "s-2", amountAgorot: 486 })], sourceTotals: cardTotals() }), BASE_LEAVES, TAX);
+    expect(v.fatal).toBe(false);
+    expect(v.notes).toEqual([
+      "2 חיובי כרטיס אשראי בסך ₪15,400.00 נמצאו בחשבון הבנק ללא מחזור חיוב תואם להתאמה — אינם נספרים כהוצאה",
+    ]);
+  });
+
+  it("settlement date outside its month / card-labelled source / non-positive amount → fatal", () => {
+    for (const bad of [
+      settlement({ date: "2026-07-10" }),
+      settlement({ sourceLabel: "isracard-4962" }),
+      settlement({ amountAgorot: -5 }),
+    ]) {
+      const v = verifyAgentResult(result({ settlements: [bad], sourceTotals: cardTotals() }), BASE_LEAVES, TAX);
+      expect(v.fatal, JSON.stringify(bad)).toBe(true);
+    }
+  });
+
+  it("duplicate settlement key, or one colliding with a transaction → fatal", () => {
+    const dup = verifyAgentResult(result({ settlements: [settlement(), settlement()], sourceTotals: cardTotals() }), BASE_LEAVES, TAX);
+    expect(dup.problems.join(" ")).toMatch(/חיוב כרטיס כפול/);
+    const col = verifyAgentResult(result({ settlements: [settlement({ dedupKey: "v-1" })], sourceTotals: cardTotals() }), BASE_LEAVES, TAX);
+    expect(col.problems.join(" ")).toMatch(/זהה לעסקה/);
+  });
+
+  it("chargeCycles on a null-total source, not summing to the total, or with a repeated date → fatal", () => {
+    const nullSrc = verifyAgentResult(
+      result({
+        sourceTotals: [
+          { label: BANK, statementTotalAgorot: null, computedTotalAgorot: 0, chargeCycles: [{ chargeDate: "2026-06-10", amountAgorot: 1 }] },
+          { label: "isracard-4962", statementTotalAgorot: 1579, computedTotalAgorot: 1579 },
+        ],
+      }),
+      BASE_LEAVES,
+      TAX,
+    );
+    expect(nullSrc.fatal).toBe(true);
+    const badSum = verifyAgentResult(result({ sourceTotals: cardTotals([{ chargeDate: "2026-06-10", amountAgorot: 1578 }]) }), BASE_LEAVES, TAX);
+    expect(badSum.problems.join(" ")).toMatch(/סכום מחזורי החיוב/);
+    const dupDate = verifyAgentResult(
+      result({ sourceTotals: cardTotals([{ chargeDate: "2026-06-10", amountAgorot: 1000 }, { chargeDate: "2026-06-10", amountAgorot: 579 }]) }),
+      BASE_LEAVES,
+      TAX,
+    );
+    expect(dupDate.problems.join(" ")).toMatch(/תאריך חיוב חוזר/);
+  });
+
+  it("parseAgentResult accepts kind/settlements/chargeCycles and rejects bad shapes", () => {
+    const body = {
+      status: "ok",
+      transactions: [{ ...tx(), kind: "credit", category: null, uncategorized: true }],
+      sourceTotals: [
+        { label: "isracard-4962", statementTotalAgorot: 1579, computedTotalAgorot: 1579, chargeCycles: [{ chargeDate: "2026-06-10", amountAgorot: 1579 }] },
+        { label: BANK, statementTotalAgorot: null, computedTotalAgorot: 0 },
+      ],
+      settlements: [settlement()],
+      xlsxBase64: "UEsDBA==",
+      proposedMappings: [],
+    };
+    const r = parseAgentResult(body, BASE_LEAVES);
+    expect(r.transactions[0].kind).toBe("credit");
+    expect(r.settlements).toHaveLength(1);
+    expect(r.sourceTotals[0].chargeCycles).toEqual([{ chargeDate: "2026-06-10", amountAgorot: 1579 }]);
+    expect(() => parseAgentResult({ ...body, transactions: [{ ...tx(), kind: "settlement" }] }, BASE_LEAVES)).toThrow(/bad kind/);
+    expect(() => parseAgentResult({ ...body, settlements: [{ ...settlement(), date: "10/06/2026" }] }, BASE_LEAVES)).toThrow(/settlement\[0\] bad date/);
+    expect(() =>
+      parseAgentResult({ ...body, sourceTotals: [{ ...body.sourceTotals[0], chargeCycles: [{ chargeDate: "x", amountAgorot: 1 }] }] }, BASE_LEAVES),
+    ).toThrow(/bad chargeDate/);
+    // absent ⇒ undefined, exactly as before
+    const plain = parseAgentResult({ ...body, transactions: [tx()], settlements: undefined }, BASE_LEAVES);
+    expect(plain.transactions[0].kind).toBeUndefined();
+    expect(plain.settlements).toBeUndefined();
   });
 });

@@ -20,11 +20,12 @@ vi.mock("@/lib/db", () => ({
     merchantMapping: { upsert: vi.fn() },
   },
 }));
-vi.mock("@/lib/reportCategories", () => ({ getValidLeafSet: vi.fn() }));
+vi.mock("@/lib/reportCategories", () => ({ getValidLeafSet: vi.fn(), getMergedTaxonomy: vi.fn() }));
 
 import { db } from "@/lib/db";
 import { authorizeReportsRequest } from "@/lib/reportsAdminAuth";
-import { getValidLeafSet } from "@/lib/reportCategories";
+import { getMergedTaxonomy, getValidLeafSet } from "@/lib/reportCategories";
+import { REPORT_TAXONOMY } from "@/config/reportTaxonomy";
 import { PATCH, normalizeDate } from "./[jobId]/transactions/[txId]/route";
 
 const auth = authorizeReportsRequest as unknown as ReturnType<typeof vi.fn>;
@@ -32,8 +33,11 @@ const updateMany = db.reportTransaction.updateMany as unknown as ReturnType<type
 const findFirst = db.reportTransaction.findFirst as unknown as ReturnType<typeof vi.fn>;
 const upsert = db.merchantMapping.upsert as unknown as ReturnType<typeof vi.fn>;
 const leafSet = getValidLeafSet as unknown as ReturnType<typeof vi.fn>;
+const mergedTax = getMergedTaxonomy as unknown as ReturnType<typeof vi.fn>;
 
 const FOOD = "מזון ומכולת";
+const SALARY = "משכורת 1";
+const BANK_VERIFICATION = { perSource: [{ label: "hapoalim-1812", statementTotalAgorot: null }, { label: "isracard-4962", statementTotalAgorot: 1579 }] };
 const params = Promise.resolve({ jobId: "jobA", txId: "txA" });
 const req = (body: unknown) =>
   new NextRequest("http://localhost/admin/api/reports/jobA/transactions/txA", {
@@ -45,9 +49,10 @@ const req = (body: unknown) =>
 beforeEach(() => {
   vi.clearAllMocks();
   auth.mockResolvedValue({ actor: "admin@plusim.xyz" });
-  leafSet.mockResolvedValue(new Set([FOOD]));
+  leafSet.mockResolvedValue(new Set([FOOD, SALARY]));
+  mergedTax.mockResolvedValue(REPORT_TAXONOMY);
   updateMany.mockResolvedValue({ count: 1 });
-  findFirst.mockResolvedValue({ merchant: "יוחננוף", job: { status: "completed" } });
+  findFirst.mockResolvedValue({ merchant: "יוחננוף", amountAgorot: 1579, job: { status: "completed" } });
   upsert.mockResolvedValue({});
 });
 
@@ -89,7 +94,7 @@ describe("PATCH a transaction", () => {
     const res = await PATCH(req({ category: FOOD, rememberMerchant: true }), { params });
     expect(res.status).toBe(200);
     const data = updateMany.mock.calls[0][0].data;
-    expect(data).toEqual({ category: FOOD, uncategorized: false });
+    expect(data).toEqual({ category: FOOD, uncategorized: false, kind: "expense" });
     expect(data).not.toHaveProperty("date");
     expect(upsert).toHaveBeenCalledOnce();
   });
@@ -100,6 +105,7 @@ describe("PATCH a transaction", () => {
     expect(updateMany.mock.calls[0][0].data).toEqual({
       category: FOOD,
       uncategorized: false,
+      kind: "expense",
       date: "2026-05-15",
       month: "2026-05",
     });
@@ -191,5 +197,65 @@ describe("PATCH a transaction", () => {
     const res = await PATCH(req({ date: "2026-05-15" }), { params });
     expect(res.status).toBe(403);
     expect(updateMany).not.toHaveBeenCalled();
+  });
+});
+
+// ── Income invariant on writes (docs/plans/bank-statements.md B5) ─────────────
+describe("PATCH — income leaves and bank credits", () => {
+  const bankCredit = (over: Record<string, unknown> = {}) => ({
+    merchant: "מעסיק",
+    amountAgorot: -1900000,
+    sourceLabel: "hapoalim-1812",
+    job: { status: "completed", verification: BANK_VERIFICATION },
+    ...over,
+  });
+
+  it("הכנסות leaf on a positive row ⇒ 400, nothing written", async () => {
+    findFirst.mockResolvedValue(bankCredit({ amountAgorot: 1900000 }));
+    const res = await PATCH(req({ category: SALARY }), { params });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/זיכוי/);
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it("הכנסות leaf on a card-source row ⇒ 400", async () => {
+    findFirst.mockResolvedValue(bankCredit({ sourceLabel: "isracard-4962" }));
+    const res = await PATCH(req({ category: SALARY }), { params });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/חשבון בנק/);
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it("הכנסות leaf without a stored verification fails closed (not a bank)", async () => {
+    findFirst.mockResolvedValue(bankCredit({ job: { status: "completed", verification: null } }));
+    expect((await PATCH(req({ category: SALARY }), { params })).status).toBe(400);
+  });
+
+  it("הכנסות leaf on a bank credit ⇒ 200 with kind income, and never remembered", async () => {
+    findFirst.mockResolvedValue(bankCredit());
+    const res = await PATCH(req({ category: SALARY, rememberMerchant: true }), { params });
+    expect(res.status).toBe(200);
+    expect(updateMany.mock.calls[0][0].data).toEqual({ category: SALARY, uncategorized: false, kind: "income" });
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it("expense leaf on a kind=credit row ⇒ 200 with kind expense (a refund), not remembered", async () => {
+    findFirst.mockResolvedValue(bankCredit({ kind: "credit" }));
+    const res = await PATCH(req({ category: FOOD, rememberMerchant: true }), { params });
+    expect(res.status).toBe(200);
+    expect(updateMany.mock.calls[0][0].data).toEqual({ category: FOOD, uncategorized: false, kind: "expense" });
+    // the row is negative: its merchant's dictionary entry would describe the debit direction
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it("the write stays ONE conditional updateMany for a category edit", async () => {
+    findFirst.mockResolvedValue(bankCredit());
+    await PATCH(req({ category: SALARY }), { params });
+    expect(updateMany).toHaveBeenCalledOnce();
+    expect(updateMany.mock.calls[0][0].where).toEqual({
+      id: "txA",
+      jobId: "jobA",
+      job: { status: { notIn: ["dispatched", "processing"] } },
+    });
   });
 });

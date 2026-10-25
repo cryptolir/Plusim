@@ -85,7 +85,8 @@ describe("no consumer left on the base-only check (test_no_consumer_left_on_base
     const result = src("app/api/agent/jobs/[jobId]/result/route.ts");
     expect(result).toMatch(/getValidLeafSet/);
     expect(result).toMatch(/parseAgentResult\(body, validLeaves\)/);
-    expect(result).toMatch(/verifyAgentResult\(result, validLeaves\)/);
+    expect(result).toMatch(/verifyAgentResult\(result, validLeaves, taxonomy\)/);
+    expect(result).toMatch(/getMergedTaxonomy/);
   });
 
   it("UI/report consumers render categories from the merged source, not the base constants", () => {
@@ -97,6 +98,29 @@ describe("no consumer left on the base-only check (test_no_consumer_left_on_base
     const report = src("app/report/page.tsx");
     expect(report).not.toMatch(/REPORT_TAXONOMY|TAXONOMY_LEAVES/);
     expect(report).toMatch(/getMergedTaxonomy/);
+  });
+
+  it("income section is last, and disjoint from expenses and the distribution exclusions", async () => {
+    const { REPORT_TAXONOMY, INCOME_SECTION, isIncomeLeaf, leafAllowedForKind } = await import("@/config/reportTaxonomy");
+    const { DISTRIBUTION_EXCLUDED_LEAVES } = await import("@/lib/reportAnalysis");
+    expect(REPORT_TAXONOMY[REPORT_TAXONOMY.length - 1].section).toBe(INCOME_SECTION);
+    const income = REPORT_TAXONOMY.find((s) => s.section === INCOME_SECTION)!.leaves;
+    const expenses = REPORT_TAXONOMY.filter((s) => s.section !== INCOME_SECTION).flatMap((s) => s.leaves);
+    for (const leaf of income) {
+      expect(expenses).not.toContain(leaf);
+      expect(DISTRIBUTION_EXCLUDED_LEAVES).not.toContain(leaf);
+      expect(isIncomeLeaf(leaf, REPORT_TAXONOMY)).toBe(true);
+      expect(leafAllowedForKind("income", leaf, REPORT_TAXONOMY)).toBe(true);
+      expect(leafAllowedForKind("expense", leaf, REPORT_TAXONOMY)).toBe(false);
+      expect(leafAllowedForKind("credit", leaf, REPORT_TAXONOMY)).toBe(true);
+    }
+    expect(leafAllowedForKind("income", "חשמל", REPORT_TAXONOMY)).toBe(false);
+    expect(leafAllowedForKind("expense", "חשמל", REPORT_TAXONOMY)).toBe(true);
+    // an admin-added income leaf is income too — only via the MERGED taxonomy
+    const { mergeTaxonomy } = await import("@/config/reportTaxonomy");
+    const merged = mergeTaxonomy(REPORT_TAXONOMY, [{ name: "מלגה", section: INCOME_SECTION }]);
+    expect(isIncomeLeaf("מלגה", merged)).toBe(true);
+    expect(isIncomeLeaf("מלגה", REPORT_TAXONOMY)).toBe(false);
   });
 
   it("the ONLY runtime isTaxonomyLeaf call is the create route's base-leaf-collision guard", () => {

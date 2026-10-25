@@ -91,6 +91,7 @@ model ReportJob {
   files         StatementFile[]
   artifacts     ReportArtifact[]
   transactions  ReportTransaction[]
+  settlements   ReportSettlement[]
 
   @@index([targetUserId, publishedAt(sort: Desc)])
 }
@@ -138,8 +139,32 @@ model ReportTransaction {
   sourceLabel   String // which statement/card this came from
   note          String?
   dedupKey      String // parser-computed identity (voucher id or date|merchant|amount)
+  // "expense" (card rows, bank debits, refund credits) | "income" (a bank credit in
+  // an הכנסות leaf) | "credit" (a bank credit not yet placed). Consumers route
+  // income by THIS, never by sign — income and refunds are both negative.
+  kind          String    @default("expense")
   createdAt     DateTime  @default(now())
   job           ReportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, month])
+}
+
+// A bank debit that paid a credit-card statement (docs/plans/bank-statements.md,
+// Decision 3). Never a transaction — its shekels are itemized on the card
+// statement — kept so the client can match it against the card's charge cycle.
+// Rows are replaced with the transactions on every result callback, so a match
+// does not survive a re-run (B3 limitation).
+model ReportSettlement {
+  id           String    @id @default(cuid())
+  jobId        String
+  month        String
+  date         String
+  payee        String
+  amountAgorot Int // positive
+  sourceLabel  String // the bank source
+  dedupKey     String
+  matchedCycle String? // "<card sourceLabel>@<YYYY-MM-DD>" — the charge cycle it paid
+  job          ReportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
 
   @@index([jobId, month])
 }

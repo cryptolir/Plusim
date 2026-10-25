@@ -11,7 +11,8 @@
  * formatter is called, and every derived total is recomputed here rather than
  * trusted from the agent — same rule as src/lib/reportResult.ts.
  */
-import type { TaxonomySection } from "@/config/reportTaxonomy";
+import { INCOME_SECTION, type TaxonomySection } from "@/config/reportTaxonomy";
+import { cycleId } from "@/lib/reportResult";
 
 export interface AnalysisTxn {
   id: string;
@@ -23,6 +24,12 @@ export interface AnalysisTxn {
   uncategorized: boolean;
   sourceLabel: string;
   note: string | null;
+  /**
+   * "expense" | "income" | "credit" (docs/plans/bank-statements.md). Income is
+   * recognized by THIS, never by sign: a refund credit in an expense leaf is
+   * also negative. Absent ⇒ expense (rows stored before the column existed).
+   */
+  kind?: string | null;
 }
 
 /**
@@ -62,9 +69,18 @@ export interface DistributionSlice {
   share: number;
 }
 
+export interface IncomeBlock {
+  /** Income leaves that carry rows, in taxonomy order; amounts are POSITIVE (sign flipped for display). */
+  leaves: LeafRow[];
+  byMonth: number[];
+  total: number;
+  avg: number;
+}
+
 export interface Analysis {
   /** "2026-01" … ascending. Only months that actually have transactions. */
   months: string[];
+  /** Expense sections only — income rows never enter these. */
   sections: SectionRow[];
   monthTotals: number[];
   grandTotal: number;
@@ -73,8 +89,17 @@ export interface Analysis {
   distribution: DistributionSlice[];
   /** Monthly average of what the distribution left out — shown as a footnote. */
   distributionExcludedAvg: number;
+  /** kind === "income" rows (bank credits in the הכנסות section), positive. */
+  income: IncomeBlock;
+  /** מצבנו: income − expenses, per month and on average. */
+  netByMonth: number[];
+  netAvg: number;
+  /** Uncategorized debits (and card refunds) — the rows the agent could not place. */
   uncategorized: AnalysisTxn[];
   uncategorizedTotal: number;
+  /** Uncategorized bank credits (kind === "credit"): income or refund, undecided. Listed apart so a −₪19k salary never nets against unplaced expenses. */
+  uncategorizedCredits: AnalysisTxn[];
+  uncategorizedCreditsTotal: number;
   txCount: number;
 }
 
@@ -148,14 +173,27 @@ export function buildAnalysis(transactions: AnalysisTxn[], taxonomy: TaxonomySec
   // leaf → per-month sums, for every categorized row.
   const byLeaf = new Map<string, number[]>();
   const countLeaf = new Map<string, number[]>();
+  const incomeByLeaf = new Map<string, number[]>();
+  const incomeCount = new Map<string, number[]>();
   const uncategorized: AnalysisTxn[] = [];
+  const uncategorizedCredits: AnalysisTxn[] = [];
   for (const t of transactions) {
     if (t.uncategorized || !t.category) {
-      uncategorized.push(t);
+      (t.kind === "credit" ? uncategorizedCredits : uncategorized).push(t);
       continue;
     }
     const i = monthIndex.get(t.month);
     if (i === undefined) continue;
+    if (t.kind === "income") {
+      // Income leaves the expense matrix entirely; shown positive.
+      const row = incomeByLeaf.get(t.category) ?? zeros();
+      row[i] += -t.amountAgorot;
+      incomeByLeaf.set(t.category, row);
+      const cnt = incomeCount.get(t.category) ?? zeros();
+      cnt[i] += 1;
+      incomeCount.set(t.category, cnt);
+      continue;
+    }
     const row = byLeaf.get(t.category) ?? zeros();
     row[i] += t.amountAgorot;
     byLeaf.set(t.category, row);
@@ -164,10 +202,11 @@ export function buildAnalysis(transactions: AnalysisTxn[], taxonomy: TaxonomySec
     countLeaf.set(t.category, cnt);
   }
 
-  const known = new Set(taxonomy.flatMap((s) => s.leaves));
+  const expenseTaxonomy = taxonomy.filter((s) => s.section !== INCOME_SECTION);
+  const known = new Set(expenseTaxonomy.flatMap((s) => s.leaves));
   const orphans = [...byLeaf.keys()].filter((leaf) => !known.has(leaf)).sort();
   const withOrphans: TaxonomySection[] =
-    orphans.length > 0 ? [...taxonomy, { section: "מחוץ לטבלה", leaves: orphans }] : taxonomy;
+    orphans.length > 0 ? [...expenseTaxonomy, { section: "מחוץ לטבלה", leaves: orphans }] : expenseTaxonomy;
 
   const sections: SectionRow[] = withOrphans.map((s) => {
     const leaves: LeafRow[] = s.leaves
@@ -225,6 +264,24 @@ export function buildAnalysis(transactions: AnalysisTxn[], taxonomy: TaxonomySec
     .map((s) => ({ ...s, share: shareBase > 0 ? Math.max(0, s.amount) / shareBase : 0 }))
     .sort((a, b) => b.amount - a.amount);
 
+  // Income block: the הכנסות leaves in taxonomy order, then any income leaf
+  // the taxonomy no longer lists (never swallowed), as on the expense side.
+  const incomeOrder = taxonomy.filter((s) => s.section === INCOME_SECTION).flatMap((s) => s.leaves);
+  const incomeLeafNames = [
+    ...incomeOrder.filter((l) => incomeByLeaf.has(l)),
+    ...[...incomeByLeaf.keys()].filter((l) => !incomeOrder.includes(l)).sort(),
+  ];
+  const incomeLeaves: LeafRow[] = incomeLeafNames.map((leaf) => {
+    const byMonth = incomeByLeaf.get(leaf) ?? zeros();
+    const countByMonth = incomeCount.get(leaf) ?? zeros();
+    const total = byMonth.reduce((a, b) => a + b, 0);
+    return { leaf, byMonth, countByMonth, total, avg: months.length ? total / months.length : 0 };
+  });
+  const incomeByMonth = zeros();
+  for (const l of incomeLeaves) for (let i = 0; i < months.length; i++) incomeByMonth[i] += l.byMonth[i];
+  const incomeTotal = incomeByMonth.reduce((a, b) => a + b, 0);
+  const netByMonth = months.map((_, i) => incomeByMonth[i] - monthTotals[i]);
+
   return {
     months,
     sections,
@@ -233,8 +290,126 @@ export function buildAnalysis(transactions: AnalysisTxn[], taxonomy: TaxonomySec
     avgPerMonth: months.length ? grandTotal / months.length : 0,
     distribution,
     distributionExcludedAvg: months.length ? excludedTotal / months.length : 0,
+    income: {
+      leaves: incomeLeaves,
+      byMonth: incomeByMonth,
+      total: incomeTotal,
+      avg: months.length ? incomeTotal / months.length : 0,
+    },
+    netByMonth,
+    netAvg: months.length ? (incomeTotal - grandTotal) / months.length : 0,
     uncategorized,
     uncategorizedTotal: uncategorized.reduce((a, t) => a + t.amountAgorot, 0),
+    uncategorizedCredits,
+    uncategorizedCreditsTotal: uncategorizedCredits.reduce((a, t) => a + t.amountAgorot, 0),
     txCount: transactions.length,
   };
+}
+
+// ── Settlement reconciliation (docs/plans/bank-statements.md C1, Decision 5) ──
+
+export interface PerSourceCycles {
+  label: string;
+  statementTotalAgorot: number | null;
+  chargeCycles?: { chargeDate: string; amountAgorot: number }[];
+}
+
+export interface MatchTarget {
+  /** `${label}@${chargeDate}` */
+  id: string;
+  label: string;
+  chargeDate: string;
+  /** The card's own cycle amount (domestic for a Leumi card statement). */
+  amountAgorot: number;
+  /** cycle + the sibling `<label>-foreign` total when one exists — what the bank actually debits. */
+  targetAgorot: number;
+}
+
+export interface SettlementLike {
+  id: string;
+  month: string;
+  payee: string;
+  amountAgorot: number;
+}
+
+/** Suggestion tolerance: ₪5 either way. */
+export const MATCH_TOLERANCE_AGOROT = 500;
+
+function perSourceOf(verification: unknown): PerSourceCycles[] {
+  if (typeof verification !== "object" || verification === null) return [];
+  const per = (verification as { perSource?: unknown }).perSource;
+  if (!Array.isArray(per)) return [];
+  return per.filter(
+    (s): s is PerSourceCycles =>
+      typeof s === "object" && s !== null && typeof (s as { label?: unknown }).label === "string",
+  );
+}
+
+/**
+ * Every charge cycle of the job as a match target. The bank pays a card's
+ * domestic and foreign sections in ONE debit, so the target adds the sibling
+ * `<label>-foreign` source's total (the Leumi card parser emits cycles for the
+ * domestic section only — their Σ must equal that section's total).
+ */
+export function matchTargets(perSource: PerSourceCycles[]): MatchTarget[] {
+  const out: MatchTarget[] = [];
+  for (const s of perSource) {
+    if (!s.chargeCycles || s.chargeCycles.length === 0) continue;
+    const base = s.label.endsWith("-domestic") ? s.label.slice(0, -"-domestic".length) : null;
+    const foreign = base ? perSource.find((f) => f.label === `${base}-foreign`) : undefined;
+    const foreignTotal = foreign?.statementTotalAgorot ?? 0;
+    for (const c of s.chargeCycles) {
+      out.push({
+        id: cycleId(s.label, c.chargeDate),
+        label: s.label,
+        chargeDate: c.chargeDate,
+        amountAgorot: c.amountAgorot,
+        targetAgorot: c.amountAgorot + foreignTotal,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * The cycle ids a settlement of this job may be matched to — the allow-list
+ * the client write route checks. `[]` for a null or old-shape verification:
+ * fail closed, nothing to match.
+ */
+export function allowedMatchTargets(verification: unknown): string[] {
+  return matchTargets(perSourceOf(verification)).map((t) => t.id);
+}
+
+/** The first token of a payee — the issuer, shared by every debit to it ("מקס איט פיננ-י" → "מקס"). */
+function issuerToken(payee: string): string {
+  return payee.split(/[\s\-\.,'"]+/).filter(Boolean)[0] ?? payee;
+}
+
+/**
+ * Pre-selection only — the client confirms (Decision 5). A settlement suggests
+ * a cycle when the cycle's charge month equals the settlement's month and
+ * either the settlement alone, or the sum of the same-month settlements to the
+ * same issuer, is within ₪5 of the cycle's target. Many-to-one by design:
+ * Leumi pays MAX in two debits. A source without cycles is never suggested.
+ */
+export function suggestMatches(settlements: SettlementLike[], perSource: PerSourceCycles[]): Map<string, string> {
+  const targets = matchTargets(perSource);
+  const out = new Map<string, string>();
+  if (targets.length === 0) return out;
+  const groupSum = new Map<string, number>();
+  for (const s of settlements) {
+    const k = `${s.month}|${issuerToken(s.payee)}`;
+    groupSum.set(k, (groupSum.get(k) ?? 0) + s.amountAgorot);
+  }
+  for (const s of settlements) {
+    const group = groupSum.get(`${s.month}|${issuerToken(s.payee)}`) ?? s.amountAgorot;
+    const hit = targets.find(
+      (t) =>
+        t.chargeDate.slice(0, 7) === s.month &&
+        (Math.abs(s.amountAgorot - t.targetAgorot) <= MATCH_TOLERANCE_AGOROT ||
+          Math.abs(group - t.targetAgorot) <= MATCH_TOLERANCE_AGOROT),
+    );
+    if (hit) out.set(s.id, hit.id);
+  }
+  return out;
 }

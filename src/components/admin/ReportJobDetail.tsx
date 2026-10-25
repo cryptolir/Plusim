@@ -83,6 +83,8 @@ interface Txn {
   uncategorized: boolean;
   sourceLabel: string;
   note: string | null;
+  /** "expense" | "income" | "credit" — a credit is a bank credit not yet placed. */
+  kind?: string;
 }
 
 interface JobDetail {
@@ -127,6 +129,7 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
   // Merged (base ∪ admin-added) category leaves from the job-detail GET — the
   // single source for the assign picker; never the static base constant.
   const [categoryLeaves, setCategoryLeaves] = useState<string[]>([]);
+  const [incomeLeaves, setIncomeLeaves] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -150,6 +153,7 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
       setJob(data.job);
       setMappings(data.pendingMappings ?? []);
       setCategoryLeaves(data.categoryLeaves ?? []);
+      setIncomeLeaves(data.incomeLeaves ?? []);
     }
     void tick();
     const t = setInterval(() => void tick(), 10_000);
@@ -427,7 +431,12 @@ export function ReportJobDetail({ jobId, saveToken }: { jobId: string; saveToken
                   <UncatRow
                     key={t.id}
                     txn={t}
-                    leaves={categoryLeaves}
+                    leaves={
+                      // An expense row never takes an income leaf; a bank credit may
+                      // take either (income, or an expense leaf as a refund).
+                      t.kind === "credit" ? categoryLeaves : categoryLeaves.filter((l) => !incomeLeaves.includes(l))
+                    }
+                    incomeLeaves={incomeLeaves}
                     running={running}
                     onAssign={assignCategory}
                   />
@@ -635,17 +644,23 @@ function MappingRow({
 function UncatRow({
   txn,
   leaves,
+  incomeLeaves,
   running,
   onAssign,
 }: {
   txn: Txn;
   leaves: string[];
+  incomeLeaves?: string[];
   /** Agent owns the rows — the route refuses the write, so don't offer it. */
   running: boolean;
   onAssign: (txId: string, category: string, remember: boolean) => Promise<void>;
 }) {
   const [category, setCategory] = useState("");
   const [remember, setRemember] = useState(true);
+  // The dictionary is one direction per merchant: only an expense row's
+  // decision is remembered (a bank credit's — income or refund — never is).
+  const canRemember = (txn.kind ?? "expense") === "expense";
+  const isIncome = !!incomeLeaves?.includes(category);
   return (
     <tr className="border-t">
       <td className="py-1 pr-3 whitespace-nowrap">{txn.date}</td>
@@ -671,12 +686,23 @@ function UncatRow({
               </option>
             ))}
           </select>
-          <label className="flex items-center gap-1 text-xs text-muted-foreground">
-            <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+          <label
+            className="flex items-center gap-1 text-xs text-muted-foreground"
+            title={canRemember ? undefined : "זיכוי מחשבון בנק — ההחלטה אינה נשמרת במילון בתי העסק"}
+          >
+            <input
+              type="checkbox"
+              checked={canRemember && remember}
+              disabled={!canRemember}
+              onChange={(e) => setRemember(e.target.checked)}
+            />
             לזכור
           </label>
+          {txn.kind === "credit" && category && !isIncome && (
+            <span className="text-xs text-muted-foreground">יסווג כהחזר</span>
+          )}
           <button
-            onClick={() => void onAssign(txn.id, category, remember)}
+            onClick={() => void onAssign(txn.id, category, canRemember && remember)}
             disabled={!category || running}
             className="rounded border px-2 py-0.5 text-xs disabled:opacity-50"
             title={running ? "לא ניתן לסווג בזמן שהסוכן עובד" : undefined}
