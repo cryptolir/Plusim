@@ -3,7 +3,8 @@
 
 Sheets, in order: Main (taxonomy list) · one RTL sheet per month in the example
 layout (section headers with subtotal formulas, leaf rows with amounts spread
-across columns + a SUM formula, grand-total row, manual-fill income block) ·
+across columns + a SUM formula, grand-total row, income block fed by
+kind == "income" rows and otherwise hand-fillable) ·
 ניתוח תוצאות (cross-month analysis) · התפלגות ההוצאות (section averages + pie
 chart) · טופס עזר למיפוי (static advisor intake form) · חישוב יעדים (savings
 goal calculator) · un_categorized · פירוט תנועות (full audit ledger).
@@ -35,8 +36,37 @@ HEB_MONTHS = [
     "יולי", "אוגוסט", "ספטמבר", "אוקטובר", "נובמבר", "דצמבר",
 ]
 
-# Manual-fill income rows appended to every month sheet (plan A2).
-INCOME_LABELS = ["משכורת 1", "הכנסות נוספות", "משכורת 2"]
+# The income section of the taxonomy (docs/plans/bank-statements.md A4). Its
+# leaves, in taxonomy order, are the month sheets' income rows; rows with
+# kind == "income" fill those cells (abs value — the block expects positives) and
+# are never written as expense rows. INCOME_LABELS is the fallback for a
+# manifest that predates the section (same four rows, so the layout is stable).
+INCOME_SECTION = "הכנסות"
+INCOME_LABELS = ["משכורת 1", "משכורת 2", "הכנסות נוספות", "קצבת ילדים"]
+
+
+def income_labels(taxonomy: list[dict], txns: list[dict] | None = None) -> list[str]:
+    """Income rows of the workbook: the הכנסות leaves (taxonomy order), else the
+    default four; plus any income category seen in the rows but missing from
+    both, so no income shekel is ever dropped."""
+    labels: list[str] = []
+    for sec in taxonomy:
+        if sec["section"] == INCOME_SECTION:
+            labels.extend(sec["leaves"])
+    if not labels:
+        labels = list(INCOME_LABELS)
+    for t in txns or []:
+        if t.get("kind") == "income" and t.get("category") and t["category"] not in labels:
+            labels.append(t["category"])
+    return labels
+
+
+def expense_sections(taxonomy: list[dict]) -> list[dict]:
+    return [sec for sec in taxonomy if sec["section"] != INCOME_SECTION]
+
+
+def _is_income(t: dict) -> bool:
+    return t.get("kind") == "income"
 
 # Business/tax leaves excluded from שונות in the distribution pie (Decision 3).
 BUSINESS_EXCLUDE_LEAVES = ("עסק", "מעמ", "מס הכנסה", "ביטוח לאומי")
@@ -122,7 +152,9 @@ def build_workbook(taxonomy: list[dict], txns: list[dict], out_path: str) -> Non
     ws["A1"] = "Main - רשימת קטגוריות"
     ws["A1"].font = TITLE_FONT
     r = 3
-    for sec in taxonomy:
+    expenses = expense_sections(taxonomy)
+    labels = income_labels(taxonomy, txns)
+    for sec in expenses:
         c = ws.cell(r, 1, sec["section"])
         c.font = WHITE_BOLD
         c.fill = HDR_FILL
@@ -135,11 +167,11 @@ def build_workbook(taxonomy: list[dict], txns: list[dict], out_path: str) -> Non
     months = sorted({t["month"] for t in txns})
     geoms = []
     for month in months:
-        geoms.append(_month_sheet(wb, taxonomy, [t for t in txns if t["month"] == month], month))
+        geoms.append(_month_sheet(wb, expenses, [t for t in txns if t["month"] == month], month, labels))
 
     if geoms:
-        analysis = _analysis_sheet(wb, taxonomy, geoms)
-        _distribution_sheet(wb, taxonomy, analysis)
+        analysis = _analysis_sheet(wb, expenses, geoms, labels)
+        _distribution_sheet(wb, expenses, analysis)
     _mapping_form_sheet(wb)
     _goals_sheet(wb)
 
@@ -148,18 +180,27 @@ def build_workbook(taxonomy: list[dict], txns: list[dict], out_path: str) -> Non
     wb.save(out_path)
 
 
-def _month_sheet(wb, taxonomy, txns, month: str) -> dict:
-    """Build one month sheet; return its geometry map (plan A1)."""
+def _month_sheet(wb, taxonomy, txns, month: str, labels: list[str] | None = None) -> dict:
+    """Build one month sheet; return its geometry map (plan A1). `taxonomy` here
+    is the EXPENSE sections only; `labels` the income rows."""
+    labels = labels if labels is not None else list(INCOME_LABELS)
     ws = wb.create_sheet(month_title(month))
     ws.sheet_view.rightToLeft = True
     ws.cell(1, 1, "חודש " + month_title(month)).font = TITLE_FONT
 
     amounts: dict[str, list[int]] = {}
+    income_amounts: dict[str, list[int]] = {}
     for t in txns:
-        if not t["uncategorized"] and t.get("category"):
+        if t["uncategorized"] or not t.get("category"):
+            continue
+        if _is_income(t):
+            # Income cells are positive by the template's design (זכות/חובה and
+            # מצבנו subtract the expense total from them) — credits arrive negative.
+            income_amounts.setdefault(t["category"], []).append(abs(t["amountAgorot"]))
+        else:
             amounts.setdefault(t["category"], []).append(t["amountAgorot"])
 
-    maxk = max([len(v) for v in amounts.values()] + [9])
+    maxk = max([len(v) for v in list(amounts.values()) + list(income_amounts.values())] + [9])
     tcol = maxk + 2
     tl = get_column_letter(tcol)
 
@@ -208,14 +249,19 @@ def _month_sheet(wb, taxonomy, txns, month: str) -> dict:
     gc.font = Font(bold=True, size=12)
     gc.fill = GRAND_FILL
 
-    # Manual-fill income block (plan A2; template rows 64-71 normalized: income
-    # totals live in the sheet's single total column, plain SUMs only).
+    # Income block (plan A2; template rows 64-71 normalized: income totals live
+    # in the sheet's single total column, plain SUMs only). Rows follow the
+    # taxonomy's income leaves; categorized bank income fills the cells, the
+    # rest stays hand-fillable.
     inc_hdr = grand + 2
     ws.cell(inc_hdr, 1, "הכנסות :").font = BOLD
     income_rows: dict[str, int] = {}
     r = inc_hdr + 1
-    for label in INCOME_LABELS:
+    for label in labels:
         ws.cell(r, 1, label)
+        for i, agorot in enumerate(income_amounts.get(label, [])):
+            c = ws.cell(r, 2 + i, _shekels(agorot))
+            c.number_format = CURR
         c = ws.cell(r, tcol, f"=SUM(B{r}:{get_column_letter(tcol - 1)}{r})")
         c.number_format = CURR
         income_rows[label] = r
@@ -252,9 +298,11 @@ def _month_sheet(wb, taxonomy, txns, month: str) -> dict:
     }
 
 
-def _analysis_sheet(wb, taxonomy, geoms: list[dict]) -> dict:
+def _analysis_sheet(wb, taxonomy, geoms: list[dict], labels: list[str] | None = None) -> dict:
     """ניתוח תוצאות — cross-month comparison, built purely from the month
-    geometry maps; returns its own geometry (plan B1)."""
+    geometry maps; returns its own geometry (plan B1). `taxonomy` is the
+    expense sections; `labels` the income rows (same list the month sheets used)."""
+    labels = labels if labels is not None else list(INCOME_LABELS)
     ws = wb.create_sheet(ANALYSIS_SHEET)
     ws.sheet_view.rightToLeft = True
     ws["A1"] = ANALYSIS_SHEET
@@ -322,7 +370,7 @@ def _analysis_sheet(wb, taxonomy, geoms: list[dict]) -> dict:
         ws.cell(inc_hdr, 2 + i, g["sheet"]).font = BOLD
     ws.cell(inc_hdr, avg_col, f"ממוצע {n} חודשים").font = BOLD
     r = inc_hdr + 1
-    for label in INCOME_LABELS:
+    for label in labels:
         ws.cell(r, 1, label)
         for i, g in enumerate(geoms):
             c = ws.cell(r, 2 + i, ref(g, g["income_rows"][label]))
@@ -443,25 +491,49 @@ def _goals_sheet(wb) -> None:
         ws.column_dimensions[get_column_letter(ci)].width = w
 
 
+UNCAT_DEBITS_TITLE = "עסקאות ללא סיווג"
+UNCAT_CREDITS_TITLE = "זיכויים ללא סיווג (הכנסה או החזר — טרם הוכרע)"
+
+
 def _uncat_sheet(wb, txns) -> None:
+    """Two groups with separate sums (plan A4): uncategorized debits first (from
+    row 4, as before), then uncategorized bank credits — a −₪19k salary the
+    model could not place must never net against unplaced expenses."""
     ws = wb.create_sheet("un_categorized")
     ws.sheet_view.rightToLeft = True
-    ws["A1"] = "עסקאות ללא סיווג"
+    ws["A1"] = UNCAT_DEBITS_TITLE
     ws["A1"].font = TITLE_FONT
-    for j, h in enumerate(["חודש", "תאריך", "שם בית עסק", "סכום", "מקור", "הערה"], 1):
-        c = ws.cell(3, j, h)
-        c.font = WHITE_BOLD
-        c.fill = HDR_FILL
-    r = 4
-    for t in txns:
-        ws.cell(r, 1, month_title(t["month"]))
-        ws.cell(r, 2, t["date"])
-        ws.cell(r, 3, t["merchant"])
-        a = ws.cell(r, 4, _shekels(t["amountAgorot"]))
-        a.number_format = CURR
-        ws.cell(r, 5, t["sourceLabel"])
-        ws.cell(r, 6, t.get("note") or "")
+    debits = [t for t in txns if t.get("kind") != "credit"]
+    credits = [t for t in txns if t.get("kind") == "credit"]
+
+    def group(start: int, title: str | None, rows: list[dict]) -> int:
+        r = start
+        if title is not None:
+            ws.cell(r, 1, title).font = TITLE_FONT
+            r += 2
+        for j, h in enumerate(["חודש", "תאריך", "שם בית עסק", "סכום", "מקור", "הערה"], 1):
+            c = ws.cell(r, j, h)
+            c.font = WHITE_BOLD
+            c.fill = HDR_FILL
         r += 1
+        first = r
+        for t in rows:
+            ws.cell(r, 1, month_title(t["month"]))
+            ws.cell(r, 2, t["date"])
+            ws.cell(r, 3, t["merchant"])
+            a = ws.cell(r, 4, _shekels(t["amountAgorot"]))
+            a.number_format = CURR
+            ws.cell(r, 5, t["sourceLabel"])
+            ws.cell(r, 6, t.get("note") or "")
+            r += 1
+        ws.cell(r, 3, 'סה"כ').font = BOLD
+        c = ws.cell(r, 4, f"=SUM(D{first}:D{max(first, r - 1)})" if rows else 0)
+        c.number_format = CURR
+        c.font = BOLD
+        return r + 1
+
+    nxt = group(3, None, debits)
+    group(nxt + 1, UNCAT_CREDITS_TITLE, credits)
     for j, w in enumerate([12, 11, 28, 12, 20, 30], 1):
         ws.column_dimensions[get_column_letter(j)].width = w
 

@@ -19,12 +19,18 @@ both. Named tests: `../scripts/test_build_report_xlsx.py`.
      total in the final column (min 9 amount slots, widens as needed).
    - Grand-total row two rows after the last section: `סה"כ החודש` +
      `=<section header cells summed>` (bold, highlighted).
-   - **Income block** (manual-fill, appended after the grand total): `הכנסות :`
-     header; rows `משכורת 1` / `הכנסות נוספות` / `משכורת 2` with blank amount
-     cells and a live `=SUM` total in the total column; a `סה"כ` row summing the
-     three; then `הכנסות` / `הוצאות` (= −grand total) / `זכות /חובה` rows in
-     column B. The advisor types income by hand — the formulas populate
-     everything downstream.
+   - **Income block** (appended after the grand total): `הכנסות :` header; one
+     row per leaf of the taxonomy's `הכנסות` section, in taxonomy order
+     (`משכורת 1` / `משכורת 2` / `הכנסות נוספות` / `קצבת ילדים` by default, plus
+     any admin-added income leaf); rows with `kind == income` fill the amount
+     cells of their leaf as **positive** shekels (|amount| — the block's
+     formulas subtract expenses from it), the rest stays blank for the advisor
+     to type; a live `=SUM` total in the total column; a `סה"כ` row summing the
+     rows; then `הכנסות` / `הוצאות` (= −grand total) / `זכות /חובה` rows in
+     column B. Income rows are never written as expense rows, and the `הכנסות`
+     section never appears in the expense skeleton, on Main, in the analysis
+     expense rows or in the distribution. A manifest without an `הכנסות`
+     section gets the default four rows.
    - All totals are live formulas so the sheet stays hand-editable.
 3. **ניתוח תוצאות** — cross-month analysis, built purely from per-month
    geometry maps (the total column is dynamic — never hardcode addresses):
@@ -56,7 +62,12 @@ both. Named tests: `../scripts/test_build_report_xlsx.py`.
    `=SUM(J3:J8)`.
 7. **un_categorized** — columns: חודש · תאריך · שם בית עסק · סכום · מקור ·
    הערה. Every transaction the pipeline could not confidently place, with its
-   reason. Net-zero reversed groups appear here in full.
+   reason, in **two groups with separate `סה"כ` sums**: uncategorized debits
+   (from row 4, title `עסקאות ללא סיווג`), then uncategorized bank credits
+   (`kind == credit`, title `זיכויים ללא סיווג (הכנסה או החזר — טרם הוכרע)`),
+   so an unplaced salary never nets against unplaced expenses. Net-zero
+   reversed groups appear here in full. Settlements are not transactions and
+   appear on no sheet.
 8. **פירוט תנועות** — the complete audit ledger: חודש · תאריך · שם בית עסק ·
    סכום · קטגוריה (or `ללא סיווג`) · מקור · הערה, sorted by month then date.
 

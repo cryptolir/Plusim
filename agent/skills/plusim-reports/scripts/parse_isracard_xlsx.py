@@ -33,6 +33,10 @@ class Txn:
     dedup_key: str
     note: str = ""
     max_category: str = ""  # unused for isracard; kept for a uniform shape
+    # Bank rows only (bank_rows.classify_bank_row). Card parsers leave the
+    # defaults: every card row is a debit-side expense (credits are refunds).
+    direction: str = "debit"  # "debit" | "credit"
+    kind: str = "expense"  # "expense" | "credit" | "settlement"
 
 
 @dataclass
@@ -41,6 +45,10 @@ class ParseResult:
     # label -> statement total in agorot (None = no total to reconcile)
     source_totals: dict[str, int | None] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    # label -> [{"chargeDate": "YYYY-MM-DD", "amountAgorot": int}] — one per
+    # charge block of a card source (plan B2). Isracard xlsx prints no charge
+    # date, so this stays empty here; bank sources never have cycles.
+    charge_cycles: dict[str, list[dict]] = field(default_factory=dict)
 
 
 def _agorot(v) -> int:

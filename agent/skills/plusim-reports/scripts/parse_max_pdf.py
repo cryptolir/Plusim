@@ -34,6 +34,13 @@ TOTAL_LABEL = "סה״כ"
 # amount — doubling the section sum. "חיוב ב" glued to ₪ is unique to this line
 # (the legal boilerplate says "החיוב בפועל"/"חיוב בריבית", never followed by ₪).
 CHARGE_SUMMARY_RE = re.compile(r"חיוב ב\s*₪")
+# The same line, with the charge date that precedes it: ":10.07.2026חיוב ב₪…".
+# That date is the statement's single charge cycle (plan B2).
+CHARGE_DATE_RE = re.compile(r"(\d{2})\.(\d{2})\.(\d{4})\s*" + CHARGE_SUMMARY_RE.pattern)
+# A bank current-account export has these; a card statement never does. The
+# Diners fallback (dd/mm/yy + ₪ on one line) would otherwise accept a Hapoalim
+# export and read its running balances as charges (plan Rev 4 P1).
+BANK_MARKERS = ("תנועות בחשבון", 'יתרה בש"ח')
 
 SECTIONS = {
     "עסקאות שאושרו וטרם נקלטו": "pending",
@@ -80,6 +87,9 @@ class ParseResult:
     transactions: list[Txn] = field(default_factory=list)
     source_totals: dict[str, int | None] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    # label -> [{"chargeDate": "YYYY-MM-DD", "amountAgorot": int}], one per
+    # charge block; Σ amountAgorot == source_totals[label] (plan B2).
+    charge_cycles: dict[str, list[dict]] = field(default_factory=dict)
 
 
 def _agorot(tok: tuple[str, str]) -> int:
@@ -114,6 +124,8 @@ def detect_max_pdf(path: str) -> bool:
         return True
     # Diners: the parser's fallback needs a dd/mm/yy date and an amount on the
     # same line. Require one such line, so a stray date cannot pass a non-statement.
+    if any(m in text for m in BANK_MARKERS):
+        return False
     if not DATE_RE.search(text):
         for line in text.splitlines():
             dm = SLASH_DATE_RE.search(line)
@@ -149,6 +161,7 @@ def parse_max_pdf(path: str, label: str) -> ParseResult:
         # "dd/mm/yy<merchant>₪<charge>"; the statement total line has the
         # amount BEFORE the charge date ("₪10,887.66 :02/03/26...").
         stmt_total: int | None = None
+        charge_date: str | None = None
         seq: dict[str, int] = {}
         for line in text.splitlines():
             dm = SLASH_DATE_RE.search(line)
@@ -160,6 +173,8 @@ def parse_max_pdf(path: str, label: str) -> ParseResult:
             if amounts[-1].start() < dm.start():
                 if stmt_total is None:
                     stmt_total = _agorot(amounts[-1].groups())
+                    dd, mm, yy = dm.groups()
+                    charge_date = f"20{yy}-{mm}-{dd}"
                 continue
 
             agorot = _agorot(amounts[-1].groups())
@@ -201,6 +216,8 @@ def parse_max_pdf(path: str, label: str) -> ParseResult:
         res.source_totals[billed_label] = stmt_total
         if stmt_total is None:
             res.warnings.append(f"{path}: no statement total found")
+        elif charge_date:
+            res.charge_cycles[billed_label] = [{"chargeDate": charge_date, "amountAgorot": stmt_total}]
         return res
 
     def section_at(pos: int) -> str:
@@ -301,6 +318,13 @@ def parse_max_pdf(path: str, label: str) -> ParseResult:
         )
 
     res.source_totals[billed_label] = stmt_total if found_total else None
+    if found_total:
+        cd = CHARGE_DATE_RE.search(text)
+        if cd:
+            dd, mm, yyyy = cd.groups()
+            res.charge_cycles[billed_label] = [
+                {"chargeDate": f"{yyyy}-{mm}-{dd}", "amountAgorot": stmt_total}
+            ]
     if any(t.source_label == pending_label for t in res.transactions):
         res.source_totals[pending_label] = None
     if not found_total:

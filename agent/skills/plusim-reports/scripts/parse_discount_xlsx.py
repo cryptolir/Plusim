@@ -21,6 +21,9 @@ Rules implemented here (see reference/categorization-rules.md):
     running-balance chain is verified instead (each row's balance must equal
     the newer row's balance minus the newer row's amount, to the agora);
     a break means rows are missing/duplicated and is reported as a warning
+  - direction/kind (bank_rows.classify_bank_row, shared with the Hapoalim and
+    Leumi PDF parsers): an issuer debit is a card settlement, a credit is an
+    undecided income-or-refund row, anything else an expense
 """
 from __future__ import annotations
 
@@ -29,6 +32,7 @@ from datetime import datetime
 
 import openpyxl
 
+from bank_rows import check_balance_chain, classify_bank_row
 from parse_isracard_xlsx import ParseResult, Txn, _agorot
 
 
@@ -87,6 +91,7 @@ def parse_discount_xlsx(path: str) -> ParseResult:
         balance = row[4] if len(row) > 4 else None
 
         key = f"{label}|{voucher}" if voucher else f"{label}|{date}|{merchant}|{agorot}"
+        direction, kind = classify_bank_row(merchant, agorot)
         res.transactions.append(
             Txn(
                 date=date,
@@ -95,6 +100,8 @@ def parse_discount_xlsx(path: str) -> ParseResult:
                 source_label=label,
                 dedup_key=key,
                 note=channel,
+                direction=direction,
+                kind=kind,
             )
         )
         if isinstance(balance, (int, float)):
@@ -102,19 +109,11 @@ def parse_discount_xlsx(path: str) -> ParseResult:
 
     # Running-balance chain check (rows are newest→oldest; amounts are stored
     # sign-flipped, so balance_older = balance_newer + amount_newer, agora-exact).
-    breaks = 0
-    for (amt_new, bal_new, desc_new), (_, bal_old, _) in zip(chain, chain[1:]):
-        if bal_new + amt_new != bal_old:
-            breaks += 1
-            res.warnings.append(
-                f"{path}: balance-chain break after {desc_new} "
-                f"(bal {bal_new} + amt {amt_new} = {bal_new + amt_new} ≠ next bal {bal_old})"
-            )
+    # Shared with the Hapoalim/Leumi PDF parsers (bank_rows.py).
+    res.warnings.extend(check_balance_chain(chain, path))
     # No printed statement total exists on a current account; an intact chain
     # is the completeness guarantee, a break is surfaced via warnings above.
     res.source_totals[label] = None
-    if not chain:
-        res.warnings.append(f"{path}: no balance column found — completeness unverifiable")
 
     if skipped_future:
         res.warnings.append(f"{path}: {skipped_future} future (תנועות עתידיות) row(s) excluded — not yet posted")

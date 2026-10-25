@@ -60,23 +60,42 @@ class ParseResult:
     transactions: list[Txn] = field(default_factory=list)
     source_totals: dict[str, int | None] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    # label -> [{"chargeDate": "YYYY-MM-DD", "amountAgorot": int}], one per
+    # charge block; Σ amountAgorot == source_totals[label] (plan B2).
+    charge_cycles: dict[str, list[dict]] = field(default_factory=dict)
 
 
 def _to_agorot(s: str) -> int:
     return round(float(s.replace(",", "")) * 100)
 
 
+def _is_foreign_header(s: str) -> bool:
+    return 'בחו"ל' in s and "רכישות" in s
+
+
+def _is_domestic_header(s: str) -> bool:
+    return "בארץ" in s and ("זוכו" in s or "שחויבו" in s or "עסקות" in s)
+
+
 def detect_leumi_pdf(path: str) -> bool:
-    """Check if a PDF is a Leumi/Isracard statement (vs MAX)."""
+    """Check if a PDF is a Leumi/Isracard CARD statement.
+
+    Needs the issuer name, a dd/mm/yy date, AND one of the two section headers
+    the parser itself branches on (foreign purchases / domestic charges), over
+    the FULL text (a cover page may precede the headers). A bank current-account
+    export also prints "ישראכרט" (settlement rows) and slash dates, so the first
+    two alone used to accept it and yield zero rows (plan Rev 4 P1).
+    """
     try:
         reader = PdfReader(path)
-        text = (reader.pages[0].extract_text() or "")[:2000]
-        if "אשראי לאומי" in text or "ישראכרט" in text:
-            if re.search(r"\d{2}/\d{2}/\d{2}", text):
-                return True
-        return False
+        text = "\n".join((p.extract_text() or "") for p in reader.pages)
     except Exception:
         return False
+    if "אשראי לאומי" not in text and "ישראכרט" not in text:
+        return False
+    if not re.search(r"\d{2}/\d{2}/\d{2}", text):
+        return False
+    return any(_is_foreign_header(ln) or _is_domestic_header(ln) for ln in text.split("\n"))
 
 
 def parse_leumi_pdf(path: str, label: str) -> ParseResult:
@@ -98,9 +117,9 @@ def parse_leumi_pdf(path: str, label: str) -> ParseResult:
 
     for i, line in enumerate(all_lines):
         s = line.strip()
-        if 'בחו"ל' in s and 'רכישות' in s:
+        if _is_foreign_header(s):
             foreign_start = i
-        if ("בארץ" in s and ("זוכו" in s or "שחויבו" in s or "עסקות" in s)) and domestic_start is None:
+        if _is_domestic_header(s) and domestic_start is None:
             domestic_start = i
         if "האשראי תנאי" in s:
             credit_terms_start = i
@@ -118,9 +137,10 @@ def parse_leumi_pdf(path: str, label: str) -> ParseResult:
     # The statement's header date backs up any total block that prints none.
     stmt_date = _statement_date(all_lines)
     domestic_total: int | None = None
+    cycles: list[dict] = []
     if domestic_start is not None:
         d_txns, d_total = _parse_domestic_section(
-            all_lines, domestic_start, credit_terms_start, domestic_label, stmt_date
+            all_lines, domestic_start, credit_terms_start, domestic_label, stmt_date, cycles
         )
         res.transactions.extend(d_txns)
         domestic_total = d_total
@@ -140,6 +160,20 @@ def parse_leumi_pdf(path: str, label: str) -> ParseResult:
             res.source_totals[foreign_label] = foreign_total
         if has_domestic:
             res.source_totals[domestic_label] = domestic_total
+            # Charge cycles (plan B2): one per dated total block, Σ == the
+            # domestic total. Emitted only when EVERY block had a date and a
+            # total — a partial list could not satisfy the Σ rule. Same-date
+            # blocks merge (chargeDate is unique within a source). The foreign
+            # section has a total but no date: no cycle; its total is added at
+            # suggestion time app-side.
+            if domestic_total is not None and cycles and all(c["chargeDate"] for c in cycles):
+                merged: dict[str, int] = {}
+                for c in cycles:
+                    merged[c["chargeDate"]] = merged.get(c["chargeDate"], 0) + c["amountAgorot"]
+                if sum(merged.values()) == domestic_total:
+                    res.charge_cycles[domestic_label] = [
+                        {"chargeDate": d, "amountAgorot": a} for d, a in sorted(merged.items())
+                    ]
         if has_foreign and foreign_total is None:
             res.warnings.append(f"{path}: no foreign section total found")
         if has_domestic and domestic_total is None:
@@ -260,13 +294,22 @@ def _read_foreign_row(
 # ────────────────────────────────────────────────────────────────────
 
 def _parse_domestic_section(
-    lines: list[str], start: int, end: int, label: str, stmt_date: str | None = None
+    lines: list[str],
+    start: int,
+    end: int,
+    label: str,
+    stmt_date: str | None = None,
+    cycles: list[dict] | None = None,
 ) -> tuple[list[Txn], int | None]:
     """Parse domestic ("בארץ") transactions.
 
     Each row block starts with a date line followed by:
       blank → card-type → merchant → branch-category → tx-amount → charge-amount
       → optional discount/installment info
+
+    `cycles`, when given, receives one {"chargeDate", "amountAgorot"} per total
+    block (chargeDate None when the block prints none) — the charge cycles the
+    reconciliation card matches bank settlements against (plan B2).
     """
     txns: list[Txn] = []
     section_total: int | None = None
@@ -308,9 +351,10 @@ def _parse_domestic_section(
             # supplies their charge date — never a statement-wide date. Rows on
             # either side of an early-repayment subtotal belong to different
             # charge cycles (plan Rev 2, Codex P1-a).
-            _apply_charge_date(
-                txns[block_start:], _block_charge_date(lines, i, min(i + 12, end)), fallback
-            )
+            block_date = _block_charge_date(lines, i, min(i + 12, end))
+            if cycles is not None and total is not None:
+                cycles.append({"chargeDate": block_date or fallback, "amountAgorot": total})
+            _apply_charge_date(txns[block_start:], block_date, fallback)
             block_start = len(txns)
             i += 1
             continue

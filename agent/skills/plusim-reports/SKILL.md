@@ -1,6 +1,6 @@
 ---
 name: plusim-reports
-description: Process Plusim statement-categorization jobs. Triggered by chat messages starting with PLUSIM_REPORT_JOB. Fetches the job manifest from the Plusim app, parses Israeli card statements (Isracard/Leumi xlsx, MAX pdf) and Bank Discount current-account (עובר ושב) xlsx exports, categorizes transactions into the household budget taxonomy, builds the month-sheet xlsx, verifies totals to the agora, and POSTs the result back to the app.
+description: Process Plusim statement-categorization jobs. Triggered by chat messages starting with PLUSIM_REPORT_JOB. Fetches the job manifest from the Plusim app, parses Israeli card statements (Isracard/Leumi xlsx, MAX pdf) and bank current-account (עובר ושב) exports (Hapoalim and Leumi pdf, Discount xlsx), categorizes expenses and bank income into the household budget taxonomy, sets credit-card settlement debits aside for reconciliation, builds the month-sheet xlsx, verifies totals to the agora, and POSTs the result back to the app.
 homepage: https://plusim.xyz
 metadata: {"openclaw":{"emoji":"📊","requires":{"env":["PLUSIM_RUNTIME_URL","PLUSIM_RUNTIME_TOKEN"]}}}
 ---
@@ -56,6 +56,15 @@ python3 -m pip install --target /home/node/.openclaw/workspace/skills/plusim-rep
    `PLUSIM_RUNTIME_TOKEN`), parses every statement, dedups, applies the
    merchant dictionary + deterministic rules, and prints a JSON summary.
 
+   Bank current-account statements (Hapoalim / Leumi PDF, Discount xlsx) are
+   split by the scripts into three kinds of row: a **debit paying a credit
+   card** (ישראכרט, מקס, לאומי קארד…) is a *settlement* — already itemized on
+   the card statement, so it is kept out of the transactions and reported
+   separately for the client's reconciliation card; a **credit** (salary, child
+   allowance, a reimbursement) is categorized by income rules or left for your
+   judgment; every other debit is an ordinary expense. Nothing for you to do
+   here either — never move a settlement back by hand.
+
    Installment rows (`תשלום N מתוך M`, incl. the `קרדיט` wording) are re-dated
    here: statements print the ORIGINAL DEAL date on them, so each is moved to
    the charge date of the total block that closes it — falling back to the
@@ -65,9 +74,13 @@ python3 -m pip install --target /home/node/.openclaw/workspace/skills/plusim-rep
    such dates by hand in judgments.json.
 
 2. **Read the shortlist.** `$WD/needs_judgment.json` is an object with two keys:
-   - `merchants` — the merchants the deterministic pass (merchant dictionary →
-     built-in rules → MAX category) could NOT place, with sample
-     dates/amounts/notes and MAX's own category hint when present.
+   - `merchants` — the entries the deterministic pass (merchant dictionary →
+     built-in rules → MAX category; income rules for bank credits) could NOT
+     place, with sample dates/amounts/notes and MAX's own category hint when
+     present. Each entry has a `key` and a `kind`: `"expense"` (a charge or a
+     bank debit; key = the merchant) or `"credit"` (a bank credit — money IN;
+     key = `<merchant>␟credit`, with the ␟ separator). The same counterparty
+     may appear twice, once per direction — judge each on its own.
    - `reportRules` — admin-authored guidance for THIS job (a string; may be
      empty). It steers your judgment of `merchants` only; it does **not** change
      categories the deterministic pass already assigned (exact per-merchant
@@ -82,15 +95,26 @@ python3 -m pip install --target /home/node/.openclaw/workspace/skills/plusim-rep
    ```json
    {
      "<merchant>": {"category": "<taxonomy leaf>", "note": "why", "propose": true},
-     "<unclear merchant>": {"uncategorized": true, "note": "reason"}
+     "<unclear merchant>": {"uncategorized": true, "note": "reason"},
+     "<payer>␟credit": {"category": "<leaf of the הכנסות section>", "note": "salary"},
+     "<refunder>␟credit": {"category": "<expense leaf>", "refund": true, "note": "reimbursement"}
    }
    ```
 
+   - Use each entry's `key` verbatim as the JSON key (copy the ␟ for credits).
    - Category names must be EXACT leaf names from the manifest's taxonomy.
+   - A **credit** entry takes either a leaf of the `הכנסות` section (salary,
+     allowance, treasury refund, an incoming transfer that is income) **or** an
+     expense leaf with `"refund": true` (a reimbursement of a known expense —
+     e.g. a health-fund refund into `בריאות משלים`, an issuer credit). Any
+     other shape is rejected and the row stays uncategorized. When you cannot
+     tell income from refund, mark it `uncategorized` with the reason.
+   - Settlements never appear in the shortlist and are never judged.
    - **Never guess.** Mall-name-only descriptors, prepaid top-ups, and
      unidentifiable merchants get `"uncategorized": true` with a reason.
    - Set `"propose": true` only for merchants likely to recur, so the admin
-     can approve them into the permanent dictionary.
+     can approve them into the permanent dictionary. It is ignored on credit
+     entries — the dictionary holds one direction per merchant.
 
 4. **Finalize.**
 
