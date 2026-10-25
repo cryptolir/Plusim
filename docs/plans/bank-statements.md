@@ -182,13 +182,21 @@ and both statements in this plan are text-layer PDFs that need none of it.
   refusal; the refusal message drops *"supported as xlsx only"*. In `cmd_prepare`, rows with
   `kind == "settlement"` are **not** appended to `all_txns`; they go to `state["settlements"]`
   (`{date, month, payee, amountAgorot, sourceLabel, dedupKey}`) and are counted in the prepare
-  summary (`settlements: n`). Income rows go through `categorize()` exactly like expenses; the
-  shortlist entry carries `"kind": "income"` so the model knows it is placing a payer, not a
-  merchant. New `RULES` entries (deterministic, no judgment): `לאומי למשכנתאו → שכ"ד/משכנתא`,
-  `פרעון הלוואה → הלוואות`, `פריסה לתשלומים → הלוואות`, `ביטוח לאומי → ביטוח לאומי`,
-  `שירותי בריאות → בריאות משלים` (exists), `ע.מפעולות → עמלות+ריביות`, `עמל.ערוץ → עמלות+ריביות`,
-  `ריבית חובה → עמלות+ריביות`, `שיק → צ'קים ללא מעקב`, `העב' לאחר → העברות בנקאיות`,
-  `הפועלים-ביט → ביט`, `קצבת ילדים → קצבת ילדים`. Salary payers are judgment (Decision 1).
+  summary (`settlements: n`). Income rows go through `categorize()` with **kind-aware eligibility**
+  (Codex round-1 P1): a `kind == "income"` row consults only dictionary entries and rules whose
+  leaf is in the `הכנסות` section (a new `INCOME_RULES` table), and a `kind == "expense"` row
+  never takes an `הכנסות` leaf from the dictionary — so a counterparty that both pays and is
+  paid (`ביטוח לאומי`: a payout credit and a premium debit, same string) routes by direction,
+  not by string. Shortlist entries carry `"kind": "income"` so the model knows it is placing a
+  payer, and the judgment step is told (A5) that an income row may only receive an `הכנסות`
+  leaf. New expense `RULES` (deterministic): `לאומי למשכנתאו → שכ"ד/משכנתא`, `פרעון הלוואה →
+  הלוואות`, `פריסה לתשלומים → הלוואות`, `ביטוח לאומי → ביטוח לאומי`, `ע.מפעולות → עמלות+ריביות`,
+  `עמל.ערוץ → עמלות+ריביות`, `ריבית חובה → עמלות+ריביות`, `שיק → צ'קים ללא מעקב`, `העב' לאחר →
+  העברות בנקאיות`, `הפועלים-ביט → ביט` (`שירותי בריאות → בריאות משלים` exists). New
+  `INCOME_RULES`: `קצבת ילדים → קצבת ילדים`, `ביטוח לאומי → הכנסות נוספות`, `זיכוי מאוצה"ח →
+  הכנסות נוספות`, `החזר מס / מס-הכנסה החז → הכנסות נוספות`. Salary payers are judgment
+  (Decision 1). The admin merchant dictionary stays one table; the kind filter is applied at
+  lookup, and the admin UI's category picker for an income row offers `הכנסות` leaves only.
 - **A3. `cmd_finalize`**: payload gains `settlements: state["settlements"]`. `verify()` gains one
   check: no settlement `dedupKey` collides with a transaction `dedupKey`, and no transaction's
   merchant matches `SETTLEMENT_PAYEES` while being a positive bank-source amount (a settlement
@@ -332,9 +340,10 @@ and both statements in this plan are text-layer PDFs that need none of it.
   card payment an expense. Mitigation: A3/B2 fatal check on issuer-named positive bank rows, plus
   the `/report` footer Δ makes a missing settlement visible to the client.
 - **Income mis-signed into an expense leaf** (a model judgment puts a salary under `העברות
-  בנקאיות`): the row's negative amount shrinks that leaf. Mitigation: shortlist entries carry
-  `kind: "income"`; `verify()` flags a `kind == income` row categorized outside `הכנסות` as a
-  problem (`test_income_row_outside_income_section_is_flagged`).
+  בנקאיות`): the row's negative amount shrinks that leaf. Mitigation: the deterministic pass is kind-aware
+  (A2), shortlist entries carry `kind: "income"`, and `verify()` flags a `kind == income` row
+  categorized outside `הכנסות` — or an expense row inside it — as a problem
+  (`test_income_row_outside_income_section_is_flagged`).
 - **Leumi glued reference/amount.** The regex split is heuristic; the balance delta is the truth
   for every row but the oldest. Mitigation: delta is authoritative, text is a cross-check with a
   named warning; the oldest row is flagged.
