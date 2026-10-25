@@ -1,6 +1,6 @@
 # Plusim — Bank current-account statements: income, credit-card settlements, and the reconciliation card
 
-> **Status:** Draft — **Rev 2**, Codex round-1 findings folded in; awaiting re-review. Nothing
+> **Status:** Draft — **Rev 3**, Codex round-2 findings folded in; awaiting re-review. Nothing
 > implemented yet.
 >
 > **Process** (self-contained): plan PR → adversarial Codex review → each round becomes a new
@@ -23,6 +23,16 @@
 >   enforce Decision 5's same-month rule — B2/B5 add `billingMonth` on each card source total,
 >   carried into `perSource`; no billing month ⇒ no suggestion (manual pick), with an
 >   equal-amounts-different-months test.
+> - Rev 3 — Codex review round 2 (PR #52): **P2** the shortlist and `judgments.json` are keyed by
+>   merchant alone, so a counterparty unresolved in *both* directions could get only one
+>   category — A2/A3 now key the shortlist, the judgment file, and finalization by
+>   `(merchant, kind)`, with a bidirectional-counterparty test. **P2** a Leumi card statement with
+>   several charge blocks is one `-domestic` source with one total, so one `billingMonth` cannot
+>   describe it — B2 replaces `billingMonth` with per-source `chargeCycles[]` (one entry per
+>   charge block, `{month, amountAgorot}`), the match target becomes a **cycle** (`label@YYYY-MM`)
+>   rather than a source, and the tests cover a two-block statement. Also: the "PDF scanning"
+>   note is corrected — that work lives in `openclaw-dashboard` (document processing), a platform
+>   capability outside this repo, not a Plusim divergence.
 
 ## Context
 
@@ -110,10 +120,12 @@ settlement against the card statement it paid on a new `/report` card.
    from an issuer (a card refund landing in the account) stay as transactions for judgment —
    they are rare and the model should see them.
 5. **Matching is the client's explicit choice, with an auto-suggestion.** The `/report` card lists
-   settlements per bank source and offers the job's card sources (the `perSource` labels with a
-   statement total). It pre-selects a card source when `|settlement − statement total| ≤ ₪5`
-   and the month matches the card's billing month; the client confirms or picks another. The
-   choice is stored on the settlement row. Nothing is auto-matched silently.
+   settlements per bank source and offers the job's **card charge cycles** (one per charge
+   block of each card source — a MAX or Isracard statement has one, a Leumi card statement may
+   have several). It pre-selects a cycle when `|settlement − cycle amount| ≤ ₪5` and the
+   settlement's month equals the cycle's charge month; the client confirms or picks another.
+   The choice (`label@YYYY-MM`) is stored on the settlement row. Nothing is auto-matched
+   silently.
 6. **Bank PDFs verify by balance chain, like Discount.** No printed total ⇒
    `statementTotalAgorot: null`; a chain break is a parser warning (`agentNotes`) and the row set
    is still delivered. The Leumi oldest row — the one with no older balance — takes its amount
@@ -123,10 +135,11 @@ settlement against the card statement it paid on a new `/report` card.
 ## Hard boundary
 
 Per AGENTS.md rule 0, only Plusim files change. Skill files reach the onlyclaw workspace via the
-`AGENT_SETUP.md` §7 re-install after merge. Whatever "PDF scanning" was added to the agent
-workspace in another session is **not in this repo** (no OCR dependency, module, or doc exists on
-`main`); rule 1 says that divergence is a bug to commit, not to build on — it is out of scope here
-and both statements in this plan are text-layer PDFs that need none of it.
+`AGENT_SETUP.md` §7 re-install after merge. The "PDF scanning" / document-processing work the
+owner mentioned is being planned in **`cryptolir/openclaw-dashboard`** (PR #811) — a platform
+capability of the agent runtime, outside this repo and outside rule 0's boundary. Nothing here
+depends on it: both statements in this plan are text-layer PDFs, and a scanned statement remains
+unsupported by this skill until that platform work lands and a later plan consumes it.
 
 ## What already exists — reuse, do not rebuild
 
@@ -187,9 +200,15 @@ and both statements in this plan are text-layer PDFs that need none of it.
   leaf is in the `הכנסות` section (a new `INCOME_RULES` table), and a `kind == "expense"` row
   never takes an `הכנסות` leaf from the dictionary — so a counterparty that both pays and is
   paid (`ביטוח לאומי`: a payout credit and a premium debit, same string) routes by direction,
-  not by string. Shortlist entries carry `"kind": "income"` so the model knows it is placing a
-  payer, and the judgment step is told (A5) that an income row may only receive an `הכנסות`
-  leaf. New expense `RULES` (deterministic): `לאומי למשכנתאו → שכ"ד/משכנתא`, `פרעון הלוואה →
+  not by string. **The shortlist and `judgments.json` are keyed by `(merchant, kind)`**, not by
+  merchant (Codex round-2 P2): today `categorize()` groups unresolved rows by normalized merchant
+  and `cmd_finalize()` applies one decision to every row with that merchant, so a counterparty
+  unresolved in both directions could only ever get one category. The shortlist entry key becomes
+  `"<merchant>"` for expense rows and `"<merchant>␟income"` for income rows (U+241F, a separator
+  that cannot appear in a normalized merchant); each entry carries `"kind"` explicitly; the model
+  writes one decision per key; finalization looks a row up by its own `(merchant, kind)` and
+  applies only that decision, so an income row may only receive an `הכנסות` leaf and an expense
+  row never one (A5 tells the model the same). New expense `RULES` (deterministic): `לאומי למשכנתאו → שכ"ד/משכנתא`, `פרעון הלוואה →
   הלוואות`, `פריסה לתשלומים → הלוואות`, `ביטוח לאומי → ביטוח לאומי`, `ע.מפעולות → עמלות+ריביות`,
   `עמל.ערוץ → עמלות+ריביות`, `ריבית חובה → עמלות+ריביות`, `שיק → צ'קים ללא מעקב`, `העב' לאחר →
   העברות בנקאיות`, `הפועלים-ביט → ביט` (`שירותי בריאות → בריאות משלים` exists). New
@@ -197,10 +216,14 @@ and both statements in this plan are text-layer PDFs that need none of it.
   הכנסות נוספות`, `החזר מס / מס-הכנסה החז → הכנסות נוספות`. Salary payers are judgment
   (Decision 1). The admin merchant dictionary stays one table; the kind filter is applied at
   lookup, and the admin UI's category picker for an income row offers `הכנסות` leaves only.
-- **A3. `cmd_finalize`**: payload gains `settlements: state["settlements"]`. `verify()` gains one
-  check: no settlement `dedupKey` collides with a transaction `dedupKey`, and no transaction's
-  merchant matches `SETTLEMENT_PAYEES` while being a positive bank-source amount (a settlement
-  that leaked into expenses is a problem, not a note).
+- **A3. `cmd_finalize`**: judgments are applied by `(merchant, kind)` (A2); a decision whose leaf
+  is outside the row's kind's section is ignored and the row left uncategorized with a reason
+  (never silently accepted). Payload gains `settlements: state["settlements"]` and, per card
+  source, `sourceTotals[].chargeCycles` (B2). `verify()` gains: no settlement `dedupKey`
+  collides with a transaction `dedupKey`; no transaction's merchant matches `SETTLEMENT_PAYEES`
+  while being a positive bank-source amount (a settlement that leaked into expenses is a
+  problem, not a note); a `kind == income` row outside `הכנסות` or an expense row inside it is a
+  problem.
 - **A4. `build_report_xlsx.py`**: rows whose category is in the `הכנסות` section are **not**
   written as expense rows; per month their `abs(amount)` values are spread across the existing
   income block cells (`משכורת 1` / `משכורת 2` / `הכנסות נוספות` rows, `קצבת ילדים` under
@@ -229,12 +252,18 @@ and both statements in this plan are text-layer PDFs that need none of it.
   (`{date, month, payee, amountAgorot (> 0), sourceLabel, dedupKey}`), **optional** — a skill
   predating this sends none and verifies exactly as before (the `undatedInstallment` precedent).
   `parseAgentResult` validates each field with the same `str`/`intAgorot`/regex guards, caps the
-  list at 2 000, rejects `amountAgorot <= 0`. `AgentSourceTotal.billingMonth?: string`
-  (`"YYYY-MM"`, optional, `MONTH_RE`-validated) — the card parsers already locate the charge
-  date (MAX: the `חיוב ב dd.mm.yyyy` summary line; Leumi card: the block charge date; Isracard
-  xlsx: the header date) and now report its month per source; bank sources send none. It is
-  carried verbatim onto `perSource[].billingMonth` so the client can enforce Decision 5
-  (Codex round-1 P2). `verifyAgentResult` adds: duplicate settlement
+  list at 2 000, rejects `amountAgorot <= 0`. `AgentSourceTotal.chargeCycles?: { month:
+  "YYYY-MM"; amountAgorot: number }[]` (optional, each `MONTH_RE`-validated, ≤ 24 entries) — one
+  entry per **charge block** of a card source, because a Leumi card statement with several
+  blocks is one `-domestic` source whose total is the sum of blocks with different charge dates
+  (`parse_leumi_pdf._parse_domestic_section` sums them), so a single month cannot describe it
+  (Codex round-2 P2, superseding round-1's `billingMonth`). The card parsers already locate each
+  block's charge date (MAX: the `חיוב ב dd.mm.yyyy` line ⇒ one cycle; Isracard xlsx: the header
+  date ⇒ one cycle; Leumi card: one cycle per block, the same dates the installment re-dating
+  already extracts) and now report them; bank sources send none. `verifyAgentResult` checks
+  `Σ chargeCycles.amountAgorot === statementTotalAgorot` for the source (fatal otherwise — a
+  cycle list that does not add up is a parser bug) and carries the list verbatim onto
+  `perSource[].chargeCycles`. A **cycle id** is `"<label>@<month>"`. `verifyAgentResult` adds: duplicate settlement
   `dedupKey` ⇒ fatal; a settlement `dedupKey` also present in `transactions` ⇒ fatal;
   `monthTotalsAgorot` and `uncategorizedCount` exclude nothing new (settlements are not in
   `transactions`), but a new `incomeTotalsAgorot` per month is computed from `הכנסות` rows and
@@ -250,7 +279,7 @@ and both statements in this plan are text-layer PDFs that need none of it.
     amountAgorot  Int      // positive
     sourceLabel   String   // the bank source
     dedupKey      String
-    matchedSource String?  // card sourceLabel the client matched it to
+    matchedCycle  String?  // "<card sourceLabel>@<YYYY-MM>" — the charge cycle it paid
     matchedAt     DateTime?
     job           ReportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
     @@index([jobId, month])
@@ -260,9 +289,10 @@ and both statements in this plan are text-layer PDFs that need none of it.
   re-run replaces settlements like it replaces transactions. **Matches do not survive a re-run**
   (the rows are new); the card re-suggests. Stated as a limitation, not hidden.
 - **B4. Client write route** `PATCH /api/reports/[jobId]/settlements/[id]` — body
-  `{ matchedSource: string | null }`. Auth exactly as the download route: Clerk `userId`,
-  `job.targetUserId === userId`, `job.status === "published"`; additionally `matchedSource` must
-  be one of the job's **card** `perSource` labels (from `verification`) or null. The update is
+  `{ matchedCycle: string | null }`. Auth exactly as the download route: Clerk `userId`,
+  `job.targetUserId === userId`, `job.status === "published"`; additionally `matchedCycle` must
+  be one of the job's **card charge-cycle ids** (`label@month` over `perSource[].chargeCycles`
+  from `verification`) or null. The update is
   **one conditional `updateMany` whose predicate is `{ id: settlementId, jobId }`** — the
   authorized job, never the id alone — and `count === 0` ⇒ 404 (Codex round-1 P1: ownership of
   the job and validity of the label say nothing about which job the settlement row belongs to;
@@ -280,18 +310,19 @@ and both statements in this plan are text-layer PDFs that need none of it.
   total; avg }` built from `הכנסות` rows (sign flipped for display), and **removes them from
   `sections`/`monthTotals`/`grandTotal`/`distribution`**. New `netByMonth = income.byMonth −
   monthTotals` and `netAvg` (the workbook's `מצבנו`). New pure
-  `suggestMatches(settlements, perSource)` implementing Decision 5: a card source is suggested
-  for a settlement only when it has a `billingMonth`, that month equals the settlement's
-  `month`, and `|settlement − statementTotal| ≤ 500` agorot; a source without a billing month
-  is never suggested (manual pick only), and two card sources with equal totals in different
-  months each attract only their own month's settlement.
+  `suggestMatches(settlements, perSource)` implementing Decision 5 over **charge cycles**: a cycle
+  is suggested for a settlement only when `cycle.month === settlement.month` and
+  `|settlement − cycle.amountAgorot| ≤ 500` agorot; a card source without `chargeCycles` is never
+  suggested (manual pick only); a two-block Leumi statement (January ₪600, February ₪400) offers
+  two targets, and each month's settlement is suggested only its own block — never the ₪1,000
+  source total.
 - **C2. `/report` page**: an **income table** per month above the expense table when the job has
   income rows (`הכנסות` header, leaf rows, `סה"כ הכנסות`), and a **`מצבנו`** row under the expense
   total: הכנסות · הוצאות · יתרה. A new card **`התאמת חיובי אשראי לחשבון הבנק`** per job that has
   settlements: one row per settlement (תאריך · בנק · משלם · סכום), a select of the job's card
-  sources (label + statement total), the suggestion pre-selected, a ✓/Δ cell showing
-  `settlement − card total`, and a per-card-source footer "`<label>`: statement ₪X, settled ₪Y,
-  Δ". The select posts to B4; the page is a server component today, so the card is a small client
+  **charge cycles** (`<label> · <חודש חיוב> · ₪amount`), the suggestion pre-selected, a ✓/Δ cell
+  showing `settlement − cycle amount`, and a per-cycle footer "`<label> <month>`: charged ₪X,
+  settled ₪Y, Δ". The select posts to B4; the page is a server component today, so the card is a small client
   component (`SettlementMatchCard`) receiving plain data.
 - **C3. Guides** (rule 4): `CLIENT_GUIDE.he.md` — new subsection under *עמוד הדוח*: income rows,
   `מצבנו`, and the matching card with its real labels; bump the date. `ADMIN_GUIDE.he.md` — *קבצים
@@ -312,7 +343,8 @@ and both statements in this plan are text-layer PDFs that need none of it.
 
 ## Non-goals
 
-- OCR / scanned PDFs (nothing in git; both inputs have a text layer).
+- OCR / scanned PDFs — a platform capability being planned in `openclaw-dashboard#811`; both
+  inputs here have a text layer.
 - Automatic, silent matching of settlements to cards (Decision 5: suggest, client confirms).
 - Reconciling settlement amounts against the card statement **inside verification** — the two
   statements can legitimately disagree (billing-cycle cut, partial payments); the card shows Δ.
@@ -324,7 +356,7 @@ and both statements in this plan are text-layer PDFs that need none of it.
 
 - **yagni:** a `kind` column on `ReportTransaction` — Decision 3 keeps settlements out of the
   transaction stream entirely; one table, zero `filter` traps.
-- **yagni:** per-settlement notes/comments, bulk-match, un-match history — a `matchedSource`
+- **yagni:** per-settlement notes/comments, bulk-match, un-match history — a `matchedCycle`
   column is the whole feature.
 - **yagni:** a "statement period / opening balance" model to verify the Leumi oldest row — flag
   it instead (Decision 6); the amount is almost always unambiguous.
@@ -373,8 +405,13 @@ Skill (`python3 -m unittest`, synthetic text, no PII):
   payout (credit) lands in `הכנסות נוספות`, a `ביטוח לאומי` premium (debit) from the same string
   lands in the expense leaf `ביטוח לאומי`; a dictionary entry pointing an expense merchant at an
   `הכנסות` leaf is ignored for a debit (Codex round-1 P1).
-- `test_card_parsers_report_billing_month` — MAX, Leumi card, Isracard each emit `billingMonth`
-  for their billed source; bank parsers emit none.
+- `test_card_parsers_report_charge_cycles` — MAX and Isracard emit one cycle equal to the
+  source total; a two-block Leumi card statement emits two cycles whose amounts sum to the
+  `-domestic` total (Codex round-2 P2); bank parsers emit none.
+- `test_bidirectional_unresolved_counterparty_gets_two_judgments` — a payer/payee not covered
+  by any rule appears twice in the shortlist (`X` and `X␟income`), each decision applies only to
+  its own direction, and a decision pointing an income row outside `הכנסות` is rejected with a
+  reason instead of applied (Codex round-2 P2).
 - `test_leumi_oldest_row_is_flagged_unverifiable`
 - `test_balance_chain_break_is_a_warning_not_a_drop`
 - `test_settlement_rows_leave_transactions` — issuer debits land in `settlements`, never in
@@ -391,18 +428,20 @@ App (`pnpm test`):
 
 - `reportResult.test.ts`: settlements optional ⇒ identical outcome when absent; invalid settlement
   rejected; duplicate / colliding dedupKey fatal; `incomeTotalsAgorot` computed and excluded from
-  `monthTotalsAgorot`.
+  `monthTotalsAgorot`; `chargeCycles` optional, and a list that does not sum to the source total
+  is fatal.
 - `taxonomyInvariants.test.ts`: income section is last, disjoint from expenses and from
   `DISTRIBUTION_EXCLUDED_LEAVES`.
 - `reportAnalysis.test.ts`: income rows leave `sections`/`grandTotal`; `netByMonth`;
-  `suggestMatches` picks within ₪5 **and** the same billing month only — two card sources with
-  equal statement totals in different months each get only their own month's settlement, and a
-  source without `billingMonth` is never suggested (Codex round-1 P2); `allowedMatchTargets`
-  returns card labels only.
-- `settlementsRoute.test.ts`: 404 not-owner, 404 unpublished, 400 label not in job, **404 when the
-  settlement id belongs to another job the caller does not own and also when it belongs to
+  `suggestMatches` picks a charge cycle within ₪5 **and** the same month only — a two-block card
+  statement yields two targets and each month's settlement gets its own block, never the source
+  total (Codex round-2 P2); equal cycle amounts in different months each attract only their own
+  month's settlement; a source without `chargeCycles` is never suggested (Codex round-1 P2);
+  `allowedMatchTargets` returns card cycle ids only.
+- `settlementsRoute.test.ts`: 404 not-owner, 404 unpublished, 400 cycle id not in job, **404 when
+  the settlement id belongs to another job the caller does not own and also when it belongs to
   another job the caller does own** (predicate is `{id, jobId}`, Codex round-1 P1), 200 sets and
-  clears `matchedSource`.
+  clears `matchedCycle`.
 - `reportPage.test.ts`: the card renders only when settlements exist; income table only when
   income rows exist.
 - `hebrewErrors.test.ts` still passes (every new client/admin message Hebrew).
