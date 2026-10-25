@@ -1,7 +1,7 @@
 # Plusim — Bank current-account statements: income, credit-card settlements, and the reconciliation card
 
-> **Status:** Draft — **Rev 4**, internal adversarial round folded in (owner directive 2026-10-25:
-> after Codex round 3, internal review only for this PR). Nothing implemented yet.
+> **Status:** **Rev 5 — approved by internal review** (owner directive 2026-10-25: after Codex
+> round 3, internal review only for this PR). Ready to implement.
 >
 > **Process** (self-contained): plan PR → adversarial review → each round becomes a new Rev on
 > this branch with resolution notes → every caught hole becomes a named test the implementation
@@ -41,6 +41,14 @@
 >   honestly (Isracard xlsx has no header date); `INCOME_RULES` gains `בטוח לאומי`; counts in
 >   Context corrected; dictionary is one-direction per merchant so income rows propose nothing.
 >   **Cuts:** `matchedAt`, `incomeTotalsAgorot`, the `סילוקי אשראי` sheet.
+> - Rev 5 — internal consistency pass on Rev 4 (10/12 folds clean). Fixed: folding Leumi
+>   `-foreign` into a domestic cycle contradicted B2's Σ-equals-source-total rule — cycles stay
+>   domestic-only and `suggestMatches` adds the `-foreign` total when comparing; Isracard xlsx
+>   has no charge date so its settlements are listed with the note (no "manual pick" exists under
+>   cycle-only targets) and the note's wording no longer claims a card statement is absent;
+>   `detect_leumi_pdf` tightening names the parser's real section checks (not the docstring's
+>   `פירוט החיובים`) and runs on the full text; the result route's `kind` copy and C1's
+>   `kind === "credit"` split are stated; row count 134 (133 non-oldest).
 
 ## Context
 
@@ -68,8 +76,8 @@
      debit/credit marker. The sign and exact amount of every row except the oldest follow from the
      balance chain (verified: 133/133 non-oldest rows pass the glued-suffix cross-check). The
      `אסמכתא` is a **counterparty / loan / standing-order id**, not a per-posting voucher: `34685`
-     (מקס איט) appears 19×, `4969004` 12×, `74677` (the salary payer) 7× — 102 of 133 rows share
-     a reference with another row.
+     (מקס איט) appears 19×, `4969004` 12×, `74677` (the salary payer) 7× — 102 of the 134 rows
+     share a reference with another row.
 2. **Bank rows are three different things**, and today's pipeline has a name for only one.
    Classification is by **direction** (debit/credit) plus payee, so the lists below are
    illustrative, not exhaustive:
@@ -233,9 +241,12 @@ that platform work lands and a later plan consumes it.
 - **A2. `run_job.py` — dispatch and categorization.**
   - `parse_pdf_auto` tries **`detect_bank_pdf` first**, then Leumi card, then MAX, then refuses;
     the refusal message drops *"supported as xlsx only"*. Both card detectors are tightened so a
-    bank statement can never pass them: `detect_leumi_pdf` additionally requires a card-statement
-    marker (`פירוט החיובים` or the `בארץ`/`בחו"ל` section header); `detect_max_pdf`'s Diners
-    branch rejects text containing `תנועות בחשבון` or `יתרה בש"ח`.
+    bank statement can never pass them: `detect_leumi_pdf` additionally requires one of the two
+    section checks the parser itself branches on (`parse_leumi_pdf.py:101,103` — a line with
+    `בחו"ל` and `רכישות`, or a line with `בארץ` and one of `זוכו`/`שחויבו`/`עסקות`), evaluated on
+    the **full** text rather than the current 2 000-char window of page 0 (the headers may sit
+    after a cover page); `detect_max_pdf`'s Diners branch rejects text containing `תנועות בחשבון`
+    or `יתרה בש"ח`.
   - Rows with `kind == "settlement"` are **not** appended to `all_txns`; they go to
     `state["settlements"]` (`{date, month, payee, amountAgorot, sourceLabel, dedupKey}`) and are
     counted in the prepare summary (`settlements: n`).
@@ -312,9 +323,10 @@ that platform work lands and a later plan consumes it.
     ∉ `הכנסות`, or leaf ∈ `הכנסות` without `kind === "income"`; an `הכנסות` row with
     `amountAgorot >= 0` or from a source whose `statementTotalAgorot !== null`. New **note**:
     settlements present but no card source has `chargeCycles` — *"N חיובי כרטיס אשראי בסך ₪X
-    נמצאו בחשבון הבנק ללא דף חשבון אשראי תואם בעבודה — אינם נספרים כהוצאה"* (the bank-only job
-    must never lose its card spend silently). `monthTotalsAgorot` excludes `kind === "income"`
-    rows (it is the expense total).
+    נמצאו בחשבון הבנק ללא מחזור חיוב תואם להתאמה — אינם נספרים כהוצאה"* (true both for a
+    bank-only job and for an Isracard-xlsx job, whose card source has no charge date; the card
+    spend must never go missing silently). `monthTotalsAgorot` excludes `kind === "income"` rows
+    (it is the expense total).
 - **B3. Schema** — one migration `report_settlement_income`:
   ```
   model ReportTransaction { … kind String @default("expense") … }   // "expense" | "income" | "credit"
@@ -332,7 +344,8 @@ that platform work lands and a later plan consumes it.
     @@index([jobId, month])
   }
   ```
-  The result route's `deleteMany` + `createMany` inside the existing `$transaction` covers
+  The result route copies each transaction's `kind` onto `ReportTransaction.kind` (absent ⇒
+  `"expense"`), and its `deleteMany` + `createMany` inside the existing `$transaction` covers
   `reportSettlement` too — a re-run replaces settlements with transactions, atomically. **Matches
   do not survive a re-run** (the rows are new); the card re-suggests. Stated as a limitation.
 - **B4. Client write route** `PATCH /api/reports/[jobId]/settlements/[id]`, body
@@ -358,14 +371,18 @@ that platform work lands and a later plan consumes it.
 - **C1. `reportAnalysis.ts`.** `buildAnalysis` gains `income: { leaves: LeafRow[]; byMonth; total;
   avg }` from `kind === "income"` rows (sign flipped for display) and **removes them from
   `sections`/`monthTotals`/`grandTotal`/`distribution`**; `netByMonth = income.byMonth −
-  monthTotals`, `netAvg` (`מצבנו`). `uncategorized` is split into debits (`uncategorizedTotal`,
-  positive) and credits (`uncategorizedCreditsTotal`) so a −₪19k uncategorized salary no longer
-  nets against uncategorized expenses (`ReportView.tsx:418` and the `/report` list show both).
-  New pure `allowedMatchTargets(verification)` and `suggestMatches(settlements, perSource)`
-  implementing Decision 5: for each settlement, a cycle whose `chargeDate.slice(0,7) ===
-  settlement.month` and either `|settlement − cycle| ≤ 500` or `|Σ same-month settlements with
-  the same issuer token − cycle| ≤ 500`; a source without `chargeCycles` is never suggested; two
-  blocks in one month are two distinct targets.
+  monthTotals`, `netAvg` (`מצבנו`). `uncategorized` is split by `kind === "credit"` into debits
+  (`uncategorizedTotal`, positive) and credits (`uncategorizedCreditsTotal`) so a −₪19k
+  uncategorized salary no longer nets against uncategorized expenses (`ReportView.tsx:418` and
+  the `/report` list show both). New pure `allowedMatchTargets(verification)` and
+  `suggestMatches(settlements, perSource)` implementing Decision 5: for each settlement, a cycle
+  whose `chargeDate.slice(0,7) === settlement.month` and either `|settlement − target| ≤ 500` or
+  `|Σ same-month settlements with the same issuer token − target| ≤ 500`, where **`target =
+  cycle.amountAgorot + foreignTotal`** and `foreignTotal` is the `statementTotalAgorot` of the
+  sibling `<label>-foreign` source when one exists in `perSource` (the bank pays domestic and
+  foreign in one debit; the cycles themselves stay domestic-only so B2's Σ rule holds). The
+  footer Δ uses the same target. A source without `chargeCycles` is never suggested; two blocks
+  in one month are two distinct targets.
 - **C2. `/report` page.** An **income table** per month above the expense table when the job has
   income rows (`הכנסות` header, leaf rows, `סה"כ הכנסות`); a **`מצבנו`** row under the expense
   total (הכנסות · הוצאות · יתרה). A new card **`התאמת חיובי אשראי לחשבון הבנק`** per job that has
@@ -438,10 +455,11 @@ that platform work lands and a later plan consumes it.
 - **Leumi glued reference/amount.** Delta is authoritative for 133/133 non-oldest rows on the real
   file; the oldest row is sibling-derived or dropped with a warning, never guessed.
 - **Cycle dates need parser work** (Context 10): MAX gains a capture of the `dd.mm.yyyy` before
-  `חיוב ב₪`; Leumi card emits one cycle per domestic block from `_block_charge_date` and **adds
-  the `-foreign` total to the last block's cycle amount** (the bank pays both in one debit); Isracard
-  xlsx has no header date ⇒ no cycles ⇒ manual pick, documented in the client guide. A source
-  with no cycles never blocks anything.
+  `חיוב ב₪`; Leumi card emits one cycle per domestic block from `_block_charge_date` (domestic
+  only — Σ equals the `-domestic` total; the `-foreign` total is added at **suggestion** time,
+  C1); Isracard xlsx has no header date ⇒ no cycles ⇒ its settlements are listed under the B2
+  note with no match target, documented in the client guide. A source with no cycles never blocks
+  anything.
 - **Detection order regression.** `test_card_detectors_reject_bank_statements` runs the real
   dumps' *shape* (synthetic fixtures with the same markers) through both card detectors.
 - **Taxonomy growth is a manifest change** (add-only). Old skill + new app: fine. New skill + old
@@ -474,8 +492,8 @@ Skill (`python3 -m unittest`, synthetic text with the real statements' markers, 
   `"refund": true` is rejected with a reason), `test_refund_credit_is_kind_expense`.
 - `test_credit_rows_propose_no_mappings`.
 - `test_card_parsers_report_charge_cycles` — MAX (date captured before `חיוב ב₪`) one cycle equal
-  to the total; a two-block Leumi card statement two cycles summing to `-domestic` + `-foreign`;
-  Isracard xlsx none; bank parsers none.
+  to the total; a two-block Leumi card statement two cycles summing to the `-domestic` total
+  (none on `-foreign`); Isracard xlsx none; bank parsers none.
 - `test_verify_income_kind_section_mismatch_is_flagged`, `test_verify_flags_settlement_dedup_
   collision`, `test_verify_flags_leaked_settlement_token`.
 - `test_workbook_income_block_follows_taxonomy_leaves`, `test_income_rows_never_render_as_expense_
@@ -495,9 +513,10 @@ App (`pnpm test`):
   `DISTRIBUTION_EXCLUDED_LEAVES`; the signature assertion updated to the three-argument call.
 - `reportAnalysis.test.ts`: income rows leave `sections`/`grandTotal`; `netByMonth`;
   uncategorized debits and credits summed separately; `suggestMatches` — same month and ≤ ₪5
-  on one settlement **or** on the same-issuer same-month sum (two MAX debits → one cycle); two
-  blocks in one month are two targets; equal cycles in different months each take their own
-  month; no cycles ⇒ no suggestion; `allowedMatchTargets` returns cycle ids, `[]` on null.
+  on one settlement **or** on the same-issuer same-month sum (two MAX debits → one cycle); the
+  target includes a sibling `-foreign` total when present; two blocks in one month are two
+  targets; equal cycles in different months each take their own month; no cycles ⇒ no
+  suggestion; `allowedMatchTargets` returns cycle ids, `[]` on null.
 - `settlementsRoute.test.ts`: 404 not-owner, 404 unpublished, 404 settlement of another job (owned
   or not), 400 cycle id not in the job, 200 sets and clears `matchedCycle`, and the write is a
   single `updateMany` with the full predicate.
