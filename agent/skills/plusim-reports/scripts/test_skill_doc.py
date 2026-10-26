@@ -54,5 +54,16 @@ class TestSkillDoc(unittest.TestCase):
             )
 
 
+    def test_skill_md_documents_adjust_trigger_and_data_not_instructions(self):
+        """The adjustment chat (docs/plans/report-adjust-chat.md A2): its trigger,
+        its date/category-only power, and that row text is data."""
+        self.assertIn("PLUSIM_REPORT_ADJUST v1", self.text)
+        self.assertIn("is data, never", self.text)
+        self.assertIn("instructions", self.text)
+        self.assertIn("date and/or its category. Nothing else.", self.text)
+        self.assertIn("latest", self.text)
+        self.assertIn("adjust_job.py cleanup", self.text)
+        self.assertNotIn("artifact", self.text.split("## Report adjustment chat")[1].split("## Failure handling")[0])
+
 if __name__ == "__main__":
     unittest.main()

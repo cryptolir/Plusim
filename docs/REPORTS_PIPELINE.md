@@ -57,6 +57,30 @@ several):
         so the client's bookmarked link stays valid and current
 ```
 
+**Adjusting a published report by chat** (docs/plans/report-adjust-chat.md) — the
+"שיחה עם הסוכן" tab of `/admin/reports/<id>/view`:
+
+```
+POST /admin/api/reports/:id/chat {message}       (admin; job completed | needs_review | published)
+   → ONE CAS mints a per-TURN adjust token (150 s TTL), bound to the job's current
+     dispatchedAt (adjustGeneration); a second message while one is live ⇒ 409
+   → callAgent(session app:plusim:report-adjust:<id>:<dispatchedAt>, no appUserId,
+       "PLUSIM_REPORT_ADJUST v1 / rows: …?t= / adjust: …?t= / <<<admin>>>…")
+   → onlyclaw (adjust_job.py):
+        GET  /api/agent/jobs/:id/rows      (ids, dates, categories, merged taxonomy)
+        POST /api/agent/jobs/:id/adjust    {edits:[{id, date?, category?}]} — strict body;
+             one transaction: claim (status, token, generation) + rowsRevision++ →
+             this job's rows → resolveEdit (shared with the admin edit route) → write
+             date/month/category/kind + a "תוקן ע"י המנהל" note; all or nothing
+        → the APP rebuilds the workbook from its rows (python3 build_report_xlsx.py,
+          reportWorkbook.ts); stored only if its revision is current and newer
+   → finally: the token is cleared; the reply is filed under the turn's generation
+   → publish / client download call ensureFreshWorkbook first (rebuild, or 409 / 503)
+```
+
+The agent never sends workbook bytes, amounts or rows; a re-run (new dispatchedAt)
+voids any token and starts a new thread, and its result replaces the chat's edits.
+
 The merge is free: the result callback already full-replaces a job's rows and
 artifact, and the manifest already lists every `StatementFile` of the job — so
 "add data to a ready report" is append rows + re-dispatch, with no new report
@@ -167,13 +191,20 @@ prisma/…/20260719120000_report_pipeline   ReportJob, StatementFile, ReportArti
                                           ReportTransaction, MerchantMapping
 prisma/…/20260722130000_report_category   ReportCategory (admin-added taxonomy leaves, add-only)
 prisma/…/20261025120000_report_settlement_income   ReportTransaction.kind, ReportSettlement
+prisma/…/20261026180000_report_adjust_chat   ReportJob adjust token / generation / revisions,
+                                          ReportChatMessage
 src/config/reportTaxonomy.ts              BASE taxonomy + pure merge (mergeTaxonomy/mergedLeafSet)
 src/lib/reportCategories.ts               DB-backed merged-taxonomy accessors (the only
                                           ReportCategory reader)
 src/lib/agentRuntimeAuth.ts               bearer + per-job token auth, appBaseUrl()
 src/lib/reportResult.ts                   result parsing + independent verification
 src/lib/reportsAdminAuth.ts               dual-auth for admin reports APIs (scope "reports")
-src/app/api/agent/jobs/[jobId]/…          manifest | files/[fileId] | result
+src/app/api/agent/jobs/[jobId]/…          manifest | files/[fileId] | result | rows | adjust
+src/app/admin/api/reports/[jobId]/chat    the adjustment chat (POST turn, GET thread)
+src/lib/reportEdits.ts                    date/category edit rules shared by both writers
+src/lib/reportWorkbook.ts, workbookBuilder.ts   app-side workbook rebuild (python3 child process)
+nixpacks.toml                             python3 + openpyxl in the app image (DEPLOY.md)
+src/components/admin/ReportChatTab.tsx    the "שיחה עם הסוכן" tab
 src/app/admin/api/reports/…               create+list | [jobId] detail | run | publish |
                                           [jobId]/files append | transactions/[txId] review
 src/lib/reportStatementUpload.ts          shared statement validation + contained upload
@@ -208,6 +239,11 @@ src/lib/reportResult.test.ts              verifyAgentResult fatal-vs-reviewable 
                                           parseAgentResult fail-closed; decodeXlsx non-zip
 src/lib/agentRuntimeAuth.test.ts          both auth layers (bearer + per-job token) — 401/404 matrix
 src/app/api/agent/agentRoutes.test.ts     each public route invokes the guard; files/ folder-confinement
+src/app/api/agent/adjustFlow.test.ts      adjust auth (both token kinds, generation), old turn after a
+                                          re-run, strict body, all-or-nothing, income invariant, no
+                                          workbook bytes, revisioned rebuild order, real builder
+src/app/admin/api/reports/adjustChatRoute.test.ts   one live token, finally-clear, generation-filed thread
+src/lib/reportEdits.test.ts               the shared edit-rules table
 src/app/api/agent/resultRace.test.ts      conditional write: 0 rows ⇒ 409, nothing persisted
 src/app/admin/api/reports/publishGuard.test.ts    every fatal class ⇒ publish 409; non-fatal ⇒ publishes;
                                           result freshness + file coverage + both race pins;

@@ -2,6 +2,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { clerkClient } from "@clerk/nextjs/server";
 import { requireAdmin } from "@/lib/adminClerk";
+import { mintSaveToken } from "@/lib/adminSaveToken";
+import { REPORTS_TOKEN_SCOPE } from "@/lib/reportsAdminAuth";
 import { db } from "@/lib/db";
 import { getMergedTaxonomy } from "@/lib/reportCategories";
 import { buildAnalysis } from "@/lib/reportAnalysis";
@@ -28,7 +30,7 @@ async function userLabel(userId: string): Promise<string> {
 }
 
 export default async function AdminReportViewPage({ params }: { params: Promise<{ jobId: string }> }) {
-  await requireAdmin();
+  const admin = await requireAdmin();
   const { jobId } = await params;
 
   const job = await db.reportJob.findUnique({
@@ -92,6 +94,7 @@ export default async function AdminReportViewPage({ params }: { params: Promise<
       analysis={analysis}
       transactions={job.transactions}
       taxonomy={taxonomy}
+      saveToken={mintSaveToken(admin.email, REPORTS_TOKEN_SCOPE)}
     />
   );
 }

@@ -1,0 +1,7 @@
+# Python + openpyxl for the app-side workbook rebuild after a chat adjustment
+# (docs/plans/report-adjust-chat.md B8): the app runs the skill's own
+# agent/skills/plusim-reports/scripts/build_report_xlsx.py. "..." keeps the
+# Nixpacks Node defaults (NIXPACKS_NODE_VERSION=22, DEPLOY.md).
+# Rollback: delete this file — rebuilds then report "failed" and edits still apply.
+[phases.setup]
+nixPkgs = ["...", "(python3.withPackages (ps: [ ps.openpyxl ]))"]

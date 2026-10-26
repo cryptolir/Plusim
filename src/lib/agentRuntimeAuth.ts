@@ -14,6 +14,7 @@
 import crypto from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { ADJUSTABLE } from "@/lib/reportEdits";
 
 const JOB_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24h — admin re-dispatch re-mints
 
@@ -90,6 +91,71 @@ export async function authorizeAgentJobRequest(
     job: { id: job.id, targetUserId: job.targetUserId, status: job.status },
     tokenHash: job.agentTokenHash,
   };
+}
+
+/** Lifetime of an adjustment-turn token — a fallback; the chat route clears it when the turn ends. */
+export const ADJUST_TOKEN_TTL_MS = 150_000;
+
+/** Mint a per-turn adjust token (docs/plans/report-adjust-chat.md Decision 2). */
+export function mintAdjustToken(): { token: string; tokenHash: string; expiresAt: Date } {
+  const token = crypto.randomBytes(32).toString("base64url");
+  return { token, tokenHash: sha256Hex(token), expiresAt: new Date(Date.now() + ADJUST_TOKEN_TTL_MS) };
+}
+
+export interface AdjustAuth {
+  job: { id: string; status: string };
+  /** sha256 of the presented adjust token (== stored adjustTokenHash). */
+  tokenHash: string;
+  /** The dispatch generation the token was minted for (== the job's dispatchedAt). */
+  generation: Date;
+}
+
+/**
+ * Authorize an adjustment-chat request (rows / adjust). Same two layers as
+ * authorizeAgentJobRequest, but the per-turn token is checked against
+ * adjustTokenHash — a run token never authorizes an adjustment and vice versa —
+ * and it is valid only for the dispatch generation it was minted for, so a
+ * re-run voids it even after that run completes (plan B3, Codex P1).
+ */
+export async function authorizeAdjustRequest(
+  req: NextRequest,
+  jobId: string,
+): Promise<AdjustAuth | NextResponse> {
+  const expected = staticToken();
+  const header = req.headers.get("authorization") ?? "";
+  const bearer = header.startsWith("Bearer ") ? header.slice(7) : "";
+  if (!expected || !bearer || !timingSafeEqualStr(bearer, expected)) {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
+
+  const t = new URL(req.url).searchParams.get("t") ?? "";
+  if (!t || !jobId) return NextResponse.json({ error: "not found" }, { status: 404 });
+
+  const job = await db.reportJob.findUnique({
+    where: { id: jobId },
+    select: {
+      id: true,
+      status: true,
+      dispatchedAt: true,
+      adjustTokenHash: true,
+      adjustTokenExpiresAt: true,
+      adjustGeneration: true,
+    },
+  });
+  if (
+    !job ||
+    !ADJUSTABLE.includes(job.status) ||
+    !job.adjustTokenHash ||
+    !job.adjustTokenExpiresAt ||
+    job.adjustTokenExpiresAt.getTime() < Date.now() ||
+    !job.adjustGeneration ||
+    !job.dispatchedAt ||
+    job.adjustGeneration.getTime() !== job.dispatchedAt.getTime() ||
+    !timingSafeEqualStr(sha256Hex(t), job.adjustTokenHash)
+  ) {
+    return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
+  return { job: { id: job.id, status: job.status }, tokenHash: job.adjustTokenHash, generation: job.adjustGeneration };
 }
 
 /** Absolute base URL for links handed to the agent (manifest, files, callback). */

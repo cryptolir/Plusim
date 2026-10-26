@@ -92,3 +92,15 @@ it("a non-published job still runs with no body (unchanged behaviour)", async ()
   const cas = jobUpdateMany.mock.calls[0][0];
   expect(cas.where.status).toBe("completed");
 });
+
+it("dispatch revokes any adjustment-chat token and restarts the revisions (report-adjust-chat B6)", async () => {
+  const res = await runPOST(runReq({ confirmUpdate: true }), params);
+  expect(res.status).toBe(202);
+  expect(jobUpdateMany.mock.calls[0][0].data).toMatchObject({
+    adjustTokenHash: null,
+    adjustTokenExpiresAt: null,
+    adjustGeneration: null,
+    rowsRevision: 0,
+    artifactRevision: 0,
+  });
+});

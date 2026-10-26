@@ -17,6 +17,17 @@ column is dynamic (docs/plans/report-workbook-subreports.md).
 """
 from __future__ import annotations
 
+import argparse
+import json
+import os
+import sys
+
+# The skill vendors openpyxl next to scripts/ (SKILL.md); the app image has it
+# installed (docs/plans/report-adjust-chat.md B8). Harmless where absent.
+_VENDOR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vendor")
+if os.path.isdir(_VENDOR) and _VENDOR not in sys.path:
+    sys.path.insert(0, _VENDOR)
+
 import openpyxl
 from openpyxl.chart import PieChart, Reference
 from openpyxl.chart.label import DataLabelList
@@ -560,3 +571,18 @@ def _ledger_sheet(wb, txns) -> None:
         r += 1
     for j, w in enumerate([12, 11, 28, 12, 22, 20, 30], 1):
         ws.column_dimensions[get_column_letter(j)].width = w
+
+
+def main(argv: list[str] | None = None) -> None:
+    """`python3 build_report_xlsx.py --out PATH` with {"taxonomy", "txns"} on
+    stdin. Used by the app to rebuild a report's workbook from its own rows
+    (docs/plans/report-adjust-chat.md B7) — exactly build_workbook, nothing else."""
+    p = argparse.ArgumentParser(description="Build the Plusim report workbook from JSON on stdin")
+    p.add_argument("--out", required=True)
+    args = p.parse_args(argv)
+    data = json.load(sys.stdin)
+    build_workbook(data["taxonomy"], data["txns"], args.out)
+
+
+if __name__ == "__main__":
+    main()

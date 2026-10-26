@@ -31,6 +31,9 @@ vi.mock("@/lib/db", () => ({
     userDriveFolder: { findUnique: vi.fn() },
   },
 }));
+// The workbook rebuild runs a Python child process; its own behaviour is
+// covered in api/agent/adjustFlow.test.ts. Here: only that publish consults it.
+vi.mock("@/lib/reportWorkbook", () => ({ ensureFreshWorkbook: vi.fn(async () => true) }));
 vi.mock("@/lib/googleDrive", async () => ({
   isDriveConnected: vi.fn(),
   assertEntryUnderRoot: vi.fn(),
@@ -48,6 +51,7 @@ import { db } from "@/lib/db";
 import { authorizeReportsRequest } from "@/lib/reportsAdminAuth";
 import * as drive from "@/lib/googleDrive";
 import { POST as publishPOST } from "./[jobId]/publish/route";
+import { ensureFreshWorkbook } from "@/lib/reportWorkbook";
 
 const auth = authorizeReportsRequest as unknown as ReturnType<typeof vi.fn>;
 const jobFind = db.reportJob.findUnique as unknown as ReturnType<typeof vi.fn>;
@@ -80,6 +84,8 @@ function job(over: Record<string, unknown> = {}) {
     verification: { fatal: false, problems: [] },
     dispatchedAt: DISPATCHED,
     completedAt: COMPLETED,
+    rowsRevision: 0,
+    artifactRevision: 0,
     ...over,
   };
 }
@@ -462,5 +468,37 @@ describe("sheet export on re-publish", () => {
     expect(updateSheet).not.toHaveBeenCalled();
     expect(createSheet).toHaveBeenCalled();
     expect(trash).not.toHaveBeenCalled();
+  });
+});
+
+describe("test_failed_rebuild_then_publish_rebuilds_or_refuses (report-adjust-chat B7a)", () => {
+  const ensureFresh = ensureFreshWorkbook as unknown as ReturnType<typeof vi.fn>;
+
+  it("publish asks for a fresh workbook BEFORE reading its snapshot", async () => {
+    jobFind.mockResolvedValue(job());
+    withDrive();
+    await publishPOST(req(), params);
+    expect(ensureFresh).toHaveBeenCalledWith("jobA");
+    expect(ensureFresh.mock.invocationCallOrder[0]).toBeLessThan(jobFind.mock.invocationCallOrder[0]);
+  });
+
+  it("builder fixed: the rebuild brought the revisions level ⇒ publishes and exports", async () => {
+    jobFind.mockResolvedValue(job({ rowsRevision: 2, artifactRevision: 2 }));
+    withDrive();
+    const res = await publishPOST(req(), params);
+    expect(res.status).toBe(200);
+    expect(updateSheet.mock.calls.length + createSheet.mock.calls.length).toBe(1);
+  });
+
+  it("builder still broken: artifact older than the rows ⇒ 409, Drive never called, status unchanged", async () => {
+    ensureFresh.mockResolvedValueOnce(false);
+    jobFind.mockResolvedValue(job({ rowsRevision: 2, artifactRevision: 1 }));
+    withDrive();
+    const res = await publishPOST(req(), params);
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toContain("האקסל לא תואם");
+    expect(createSheet).not.toHaveBeenCalled();
+    expect(updateSheet).not.toHaveBeenCalled();
+    expect(jobUpdateMany).not.toHaveBeenCalled();
   });
 });

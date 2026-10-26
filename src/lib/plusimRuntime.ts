@@ -1,5 +1,5 @@
 "use client";
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import {
   useExternalStoreRuntime,
   WebSpeechDictationAdapter,
@@ -30,7 +30,23 @@ interface LocalMessage {
 interface UsePlusimRuntimeOptions {
   initialConversationId?: string | null;
   sectionContext?: string | null;
+  /**
+   * Another chat endpoint with the same request/response shape (the report
+   * "שיחה עם הסוכן" tab, docs/plans/report-adjust-chat.md C1). All optional:
+   * without them the runtime talks to /api/chat exactly as before.
+   */
+  chatUrl?: string;
+  historyUrl?: (conversationId: string) => string;
+  /** Extra request headers, e.g. the admin save token. */
+  headers?: Record<string, string>;
+  /** Called after every assistant reply lands (e.g. to refresh the page). */
+  onReply?: () => void;
+  /** Show the endpoint's own `error` text (already Hebrew) instead of the generic one. */
+  showServerErrors?: boolean;
 }
+
+const DEFAULT_CHAT_URL = "/api/chat";
+const defaultHistoryUrl = (cid: string) => `/api/chat/history?conversationId=${cid}`;
 
 function extractText(message: AppendMessage): string {
   if (typeof message.content === "string") return message.content;
@@ -68,6 +84,11 @@ export function usePlusimRuntime(opts: UsePlusimRuntimeOptions = {}) {
 
   // Keep refs in sync so callbacks always see latest values.
   sectionContextRef.current = opts.sectionContext ?? null;
+  // Endpoint options read by the callbacks below; refreshed after each render.
+  const endpointRef = useRef(opts);
+  useEffect(() => {
+    endpointRef.current = opts;
+  });
 
   const hydrate = useCallback((rows: HistoryRow[], cid: string) => {
     conversationIdRef.current = cid;
@@ -120,9 +141,10 @@ export function usePlusimRuntime(opts: UsePlusimRuntimeOptions = {}) {
     const timeoutId = setTimeout(() => controller.abort(), CHAT_CLIENT_TIMEOUT_MS);
 
     try {
-      const res = await fetch("/api/chat", {
+      const ep = endpointRef.current;
+      const res = await fetch(ep.chatUrl ?? DEFAULT_CHAT_URL, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...ep.headers },
         body: JSON.stringify({
           conversationId: conversationIdRef.current,
           message: text,
@@ -134,10 +156,17 @@ export function usePlusimRuntime(opts: UsePlusimRuntimeOptions = {}) {
       if (!res.ok) {
         // The API's error strings are developer-facing English; surface a
         // Hebrew message to the user instead.
+        const serverError = ep.showServerErrors
+          ? await res
+              .json()
+              .then((d: { error?: unknown }) => (typeof d.error === "string" ? d.error : null))
+              .catch(() => null)
+          : null;
         const errorText =
-          res.status === 429
+          serverError ??
+          (res.status === 429
             ? "הגעתם לקצב ההודעות המרבי. נסו שוב בעוד רגע."
-            : "משהו השתבש. נסו שוב.";
+            : "משהו השתבש. נסו שוב.");
         setMessages((prev) => [
           ...prev,
           {
@@ -165,6 +194,7 @@ export function usePlusimRuntime(opts: UsePlusimRuntimeOptions = {}) {
           createdAt: new Date(data.assistantMessage.createdAt),
         },
       ]);
+      ep.onReply?.();
     } catch (err: unknown) {
       const isAbort = err instanceof Error && err.name === "AbortError";
       setMessages((prev) => [
@@ -194,8 +224,10 @@ export function usePlusimRuntime(opts: UsePlusimRuntimeOptions = {}) {
     async (cid: string, gen: number, controller: AbortController): Promise<HistoryRow[] | null> => {
       const timer = setTimeout(() => controller.abort(), PICKUP_FETCH_TIMEOUT_MS);
       try {
-        const res = await fetch(`/api/chat/history?conversationId=${cid}`, {
+        const ep = endpointRef.current;
+        const res = await fetch((ep.historyUrl ?? defaultHistoryUrl)(cid), {
           signal: controller.signal,
+          ...(ep.headers ? { headers: ep.headers } : {}),
         });
         if (!res.ok) return null;
         const data = await res.json();
@@ -233,8 +265,10 @@ export function usePlusimRuntime(opts: UsePlusimRuntimeOptions = {}) {
       let rows: HistoryRow[] | null = null;
       const timer = setTimeout(() => controller.abort(), PICKUP_FETCH_TIMEOUT_MS);
       try {
-        const res = await fetch(`/api/chat/history?conversationId=${cid}`, {
+        const ep = endpointRef.current;
+        const res = await fetch((ep.historyUrl ?? defaultHistoryUrl)(cid), {
           signal: controller.signal,
+          ...(ep.headers ? { headers: ep.headers } : {}),
         });
         if (res.ok) {
           const data = await res.json();
@@ -283,6 +317,7 @@ export function usePlusimRuntime(opts: UsePlusimRuntimeOptions = {}) {
         const outcome = pollOutcome(rows as PickupRow[], pendingId, pendingCreatedAtMs);
         if (outcome === "complete") {
           hydrate(rows, cid);
+          endpointRef.current.onReply?.();
           stopped = true;
           setIsRunning(false);
           clearTimers();
@@ -318,6 +353,7 @@ export function usePlusimRuntime(opts: UsePlusimRuntimeOptions = {}) {
         if (gen !== pickupGenRef.current || !rows) return;
         if (pollOutcome(rows as PickupRow[], pendingId, pendingCreatedAtMs) === "complete") {
           hydrate(rows, cid);
+          endpointRef.current.onReply?.();
         }
       }, remainingMs)
     );

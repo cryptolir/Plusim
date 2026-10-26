@@ -101,6 +101,14 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
       agentTokenHash: null,
       agentTokenExpiresAt: null,
       queueJobId: null,
+      // A new generation voids any adjustment-chat turn of the old one
+      // (docs/plans/report-adjust-chat.md B6), and its result will store rows
+      // and workbook together, so the revisions restart in step.
+      adjustTokenHash: null,
+      adjustTokenExpiresAt: null,
+      adjustGeneration: null,
+      rowsRevision: 0,
+      artifactRevision: 0,
     },
   });
   if (cas.count === 0) {
