@@ -22,13 +22,36 @@ const MAX_MERCHANT_CHARS = 200;
 // 500 × 200 chars × 4 UTF-8 bytes, plus JSON punctuation.
 const MAX_BODY_BYTES = 512 * 1024;
 
+/**
+ * The body as UTF-8 text, or null once it exceeds `limit` bytes. Reads the
+ * stream incrementally and cancels it at the limit, so an oversized or endless
+ * (chunked) body never gets buffered in full.
+ */
+async function readBodyCapped(req: NextRequest, limit: number): Promise<string | null> {
+  if (!req.body) return "";
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: string }> }) {
   const { jobId } = await ctx.params;
   const auth = await authorizeAgentJobRequest(req, jobId);
   if (auth instanceof NextResponse) return auth;
 
-  const text = await req.text();
-  if (Buffer.byteLength(text, "utf8") > MAX_BODY_BYTES) {
+  const text = await readBodyCapped(req, MAX_BODY_BYTES);
+  if (text === null) {
     return NextResponse.json({ error: "body too large" }, { status: 413 });
   }
   let body: unknown;

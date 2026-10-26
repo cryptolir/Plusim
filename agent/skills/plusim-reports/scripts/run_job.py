@@ -331,14 +331,24 @@ def parse_with_limits(name: str, fn, kind: str = "file"):
     an error that says which statement to re-export.
     """
     timeout = parse_timeout_s()
+    armed = [True]
 
     def on_alarm(_signum, _frame):
-        raise _ParseTimeout()
+        # Disarmed first thing in the inner finally: an alarm that lands after
+        # that point is ignored instead of escaping as a bare _ParseTimeout.
+        if armed[0]:
+            raise _ParseTimeout()
 
     previous = signal.signal(signal.SIGALRM, on_alarm)
-    signal.setitimer(signal.ITIMER_REAL, timeout)
     try:
-        return fn()
+        # Arming happens INSIDE the protected region, so even an alarm that
+        # fires before fn() starts becomes the file-named timeout.
+        try:
+            signal.setitimer(signal.ITIMER_REAL, timeout)
+            return fn()
+        finally:
+            armed[0] = False
+            signal.setitimer(signal.ITIMER_REAL, 0)
     except _ParseTimeout:
         raise ParseFileError(name, f"parse timed out after {timeout:g}s") from None
     except _NAMED_FILE_ERRORS:
@@ -346,7 +356,6 @@ def parse_with_limits(name: str, fn, kind: str = "file"):
     except Exception as e:
         raise ParseFileError(name, f"unreadable {kind} ({type(e).__name__})") from e
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous)
 
 
@@ -576,7 +585,8 @@ def resolve_dictionary(manifest: dict, txns: list[dict]) -> dict[str, str]:
 # leaves only the small amounts unjudged.
 JUDGMENT_BATCH_SIZE = 40
 BATCH_DIR = "judgment_batches"
-_JUDGMENTS_FILE_RE = re.compile(r"^judgments-(\d{3})\.json$")
+# batch_name/judgments_name pad to 3 digits; batch 1000+ simply has more.
+_JUDGMENTS_FILE_RE = re.compile(r"^judgments-(\d{3,})\.json$")
 
 
 def batch_name(n: int) -> str:
@@ -621,7 +631,11 @@ def load_judgments(wd: str) -> tuple[dict[str, dict], list[str]]:
     paths = []
     if os.path.exists(os.path.join(wd, "judgments.json")):
         paths.append("judgments.json")
-    paths += sorted(n for n in os.listdir(wd) if _JUDGMENTS_FILE_RE.match(n))
+    # Numeric order, so judgments-1000.json comes after judgments-999.json.
+    paths += sorted(
+        (n for n in os.listdir(wd) if _JUDGMENTS_FILE_RE.match(n)),
+        key=lambda n: int(_JUDGMENTS_FILE_RE.match(n).group(1)),
+    )
     merged: dict[str, dict] = {}
     origin: dict[str, str] = {}
     warnings: list[str] = []

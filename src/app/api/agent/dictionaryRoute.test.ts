@@ -98,6 +98,33 @@ describe("dictionary route", () => {
     expect((await POST(post("{not json"), params)).status).toBe(400);
   });
 
+  it("an endless streamed body → 413 after the limit, and the stream is cancelled", async () => {
+    let pulled = 0;
+    let cancelled = false;
+    const chunk = new TextEncoder().encode("x".repeat(64 * 1024));
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1;
+        controller.enqueue(chunk);
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const request = new NextRequest(`https://plusim.xyz/api/agent/jobs/jobA/dictionary?t=${TOKEN}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${RUNTIME}`, "content-type": "application/json" },
+      body,
+      // @ts-expect-error -- Node's fetch requires duplex for a streamed request body
+      duplex: "half",
+    });
+    const res = await POST(request, params);
+    expect(res.status).toBe(413);
+    expect(cancelled).toBe(true);
+    expect(pulled).toBeLessThanOrEqual(10); // 512 KB / 64 KB, plus the read that crossed it
+    expect(mappingFind).not.toHaveBeenCalled();
+  });
+
   it("an oversized body → 413, no query", async () => {
     const res = await POST(post({ merchants: ["x"], pad: "y".repeat(600 * 1024) }), params);
     expect(res.status).toBe(413);

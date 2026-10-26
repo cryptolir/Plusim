@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -152,6 +153,16 @@ class TestJudgmentBatches(unittest.TestCase):
         self.assertIn("5 בתי עסק לא נבדקו — נשארו ללא סיווג", result["agentNotes"])
         self.assertEqual(sum(1 for t in result["transactions"] if t["uncategorized"]), 5)
 
+    def test_batch_numbers_past_999_are_loaded_in_numeric_order(self):
+        p = self.prepare([("חנות א", 1000), ("חנות ב", 2000)])
+        p.w.write(R.judgments_name(1000), {"חנות א": {"category": "חשמל"}, "חנות ב": {"category": "חשמל"}})
+        p.w.write(R.judgments_name(999), {"חנות א": {"uncategorized": True}})
+        self.assertEqual(R.judgments_name(1000), "judgments-1000.json")
+        judgments, warnings = R.load_judgments(p.w.wd)
+        self.assertEqual(judgments["חנות ב"], {"category": "חשמל"})  # batch 1000 is read
+        self.assertEqual(judgments["חנות א"], {"uncategorized": True})  # 999 before 1000
+        self.assertIn("judgments-999.json and judgments-1000.json", warnings[0])
+
     def test_reprepare_clears_old_batches_and_judgments(self):
         p = self.prepare([(nm(i), 1000 - i) for i in range(45)])
         p.w.write(R.judgments_name(2), {nm(44): {"category": "חשמל"}})
@@ -280,6 +291,17 @@ class TestParseLimits(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PLUSIM_PARSE_TIMEOUT_S": "0.05"}):
             with self.assertRaises(R.ParseFileError):
                 self.run_prepare(stubborn, check_pages=False)
+
+    def test_a_tiny_timeout_never_escapes_unnamed_and_restores_the_handler(self):
+        before = signal.getsignal(signal.SIGALRM)
+        with mock.patch.dict(os.environ, {"PLUSIM_PARSE_TIMEOUT_S": "0.000001"}):
+            for _ in range(300):
+                try:
+                    R.parse_with_limits("x.pdf", lambda: sum(range(2000)), "PDF")
+                except R.ParseFileError as e:
+                    self.assertEqual(str(e), "x.pdf: parse timed out after 1e-06s")
+                self.assertIs(signal.getsignal(signal.SIGALRM), before)
+        self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0.0, 0.0))
 
     def test_timeout_default_and_bad_env(self):
         for raw in ("", "abc", "0", "-3"):
