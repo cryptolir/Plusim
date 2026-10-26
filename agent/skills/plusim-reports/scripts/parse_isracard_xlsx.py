@@ -41,6 +41,10 @@ class Txn:
     # key and the identity compared when overlapping exports are merged
     # (docs/plans/scale-large-statements.md A1).
     balance_agorot: int | None = None
+    # The bank's own per-posting voucher (Discount "אסמכתה"), when it prints one.
+    # Part of a row's identity when overlapping exports are compared: two
+    # same-day withdrawals that differ only by voucher are DIFFERENT rows.
+    voucher: str = ""
 
 
 @dataclass

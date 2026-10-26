@@ -108,6 +108,7 @@ def parse_discount_xlsx(path: str) -> ParseResult:
                 direction=direction,
                 kind=kind,
                 balance_agorot=bal_agorot,
+                voucher=voucher,
             )
         )
         if isinstance(balance, (int, float)):

@@ -106,8 +106,9 @@ def _identity(t) -> tuple:
     """What must match for two exports to be showing the SAME physical row.
     Compared position-by-position within a day, never as a set: a purchase, its
     refund and an identical second purchase repeat (date, description, amount,
-    balance) and only their ORDER tells them apart."""
-    return (t.date, t.merchant, t.amount_agorot, t.balance_agorot, t.note)
+    balance) and only their ORDER tells them apart. A bank-printed voucher (Discount)
+    is part of the identity: two rows that differ only by voucher are distinct."""
+    return (t.date, t.merchant, t.amount_agorot, t.balance_agorot, t.note, getattr(t, "voucher", ""))
 
 
 class _Export:

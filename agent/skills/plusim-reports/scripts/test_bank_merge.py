@@ -456,6 +456,55 @@ class TestDiscount(unittest.TestCase):
         self.assertEqual(res.bank_labels, {"discount-6789"})
 
 
+def _discount_xlsx(rows):
+    """rows: [(date, description, amount, balance_or_None, voucher)] → a Discount export."""
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "עובר ושב"
+    ws.append(["חשבון: 0123-456789 | שם"])
+    ws.append(["תנועות אחרונות"])
+    ws.append(["תאריך", "יום ערך", "תיאור התנועה", "זכות/חובה", "יתרה", "אסמכתה", "עמלה", "ערוץ"])
+    for d, desc, amount, bal, voucher in rows:
+        ws.append([d, d, desc, amount, bal, voucher, "", "אינטרנט"])
+    path = os.path.join(tempfile.mkdtemp(), "d.xlsx")
+    wb.save(path)
+    import parse_discount_xlsx as D
+
+    return D.parse_discount_xlsx(path)
+
+
+class TestDiscountVoucherIdentity(unittest.TestCase):
+    """Codex PR-1 review, P1: the voucher is part of a row's cross-export identity."""
+
+    DAY = datetime.datetime(2026, 5, 3)
+
+    def test_same_day_withdrawals_with_different_vouchers_refuse_when_balance_is_absent(self):
+        a = _discount_xlsx([(self.DAY, "משיכת מזומן", -400.0, None, "111")])
+        b = _discount_xlsx([(self.DAY, "משיכת מזומן", -400.0, None, "222")])
+        self.assertEqual([t.balance_agorot for t in a.transactions + b.transactions], [None, None])
+        with self.assertRaises(BR.AmbiguousBankMergeError):
+            BR.merge_bank_exports([("a.xlsx", a), ("b.xlsx", b)])
+        # nothing was removed before the refusal
+        self.assertEqual((len(a.transactions), len(b.transactions)), (1, 1))
+
+    def test_same_voucher_is_the_same_row_and_merges(self):
+        a = _discount_xlsx([(self.DAY, "משיכת מזומן", -400.0, None, "111")])
+        b = _discount_xlsx([(self.DAY, "משיכת מזומן", -400.0, None, "111")])
+        _n, _w, removed = BR.merge_bank_exports([("a.xlsx", a), ("b.xlsx", b)])
+        self.assertEqual(removed, 1)
+        self.assertEqual(len(a.transactions) + len(b.transactions), 1)
+
+    def test_distinct_vouchers_in_both_exports_of_the_same_day_are_kept_in_order(self):
+        rows = [(self.DAY, "משיכת מזומן", -400.0, None, "222"), (self.DAY, "משיכת מזומן", -400.0, None, "111")]
+        a = _discount_xlsx(rows)
+        b = _discount_xlsx(rows)
+        _n, _w, removed = BR.merge_bank_exports([("a.xlsx", a), ("b.xlsx", b)])
+        self.assertEqual(removed, 2)
+        self.assertEqual(sorted(t.voucher for r in (a, b) for t in r.transactions), ["111", "222"])
+
+
 class TestPrepareIntegration(unittest.TestCase):
     """cmd_prepare end to end on two overlapping Hapoalim exports."""
 
