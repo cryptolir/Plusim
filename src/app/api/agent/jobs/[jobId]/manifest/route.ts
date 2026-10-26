@@ -49,7 +49,11 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     // Base ∪ admin-added ReportCategory leaves — the same filtered merge the
     // result callback validates against, so app and agent can never disagree.
     taxonomy: await getMergedTaxonomy(),
+    // Deprecated, kept for skills that predate dictionaryResolveUrl: the 2,000
+    // most recent approved entries. A current skill asks the dictionary route
+    // about exactly its job's merchants instead (no cap).
     merchantDictionary: dictionary,
+    dictionaryResolveUrl: `${base}/api/agent/jobs/${jobId}/dictionary${q}`,
     reportRules: reportRules ?? "",
     callback: { resultUrl: `${base}/api/agent/jobs/${jobId}/result${q}` },
     constraints: {

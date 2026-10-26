@@ -6,23 +6,27 @@ Phases:
              deterministic categorizer (dictionary → rules → MAX-category map),
              write state + needs_judgment.json (merchants only a human/model
              judgment can place). Exit code 0; prints a summary.
-  finalize — merge judgments.json (if any), mark leftovers uncategorized,
+  judge-status — how much of the judgment shortlist is judged so far.
+  finalize — merge judgments.json and every judgments-NNN.json, mark
+             leftovers uncategorized,
              verify to-the-agora, build the xlsx, POST the result callback
              (or write result.json with --dry-run). Prints the outcome.
   cleanup  — delete downloaded statements + intermediates (PII hygiene).
 
 Deterministic parsing/dedup/build/verify lives in code; the ONLY model step is
-filling judgments.json for the shortlist. Never guess there — prefer
+filling judgments-NNN.json for each shortlist batch. Never guess there — prefer
 {"uncategorized": true} with a reason (reference/categorization-rules.md).
 """
 from __future__ import annotations
 
 import argparse
 import base64
+import glob
 import json
 import os
 import re
 import shutil
+import signal
 import sys
 import unicodedata
 import urllib.request
@@ -36,13 +40,14 @@ import urllib.request
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "vendor"))
 sys.path.insert(0, _HERE)
-from bank_rows import merge_bank_exports  # noqa: E402
+from bank_rows import AmbiguousBankMergeError, merge_bank_exports  # noqa: E402
 from build_report_xlsx import INCOME_SECTION, build_workbook  # noqa: E402
 from parse_bank_pdf import detect_bank_pdf, parse_bank_pdf  # noqa: E402
 from parse_discount_xlsx import parse_discount_xlsx  # noqa: E402
 from parse_isracard_xlsx import parse_isracard_xlsx  # noqa: E402
 from parse_leumi_pdf import detect_leumi_pdf, parse_leumi_pdf  # noqa: E402
 from parse_max_pdf import detect_max_pdf, parse_max_pdf  # noqa: E402
+from pypdf import PdfReader  # noqa: E402
 from verify_report import verify  # noqa: E402
 
 TOKEN_ENV = "PLUSIM_RUNTIME_TOKEN"
@@ -275,6 +280,103 @@ class UnknownStatementError(Exception):
     """
 
 
+class ScannedPdfError(Exception):
+    """A PDF with no text layer (a scan or a photo). The parsers read text only;
+    OCR is a later plan, and this is the one place it would hook in."""
+
+    def __init__(self, name: str):
+        super().__init__(
+            f"{name}: קובץ PDF סרוק (אין בו שכבת טקסט). הפרסר אינו מבצע OCR — "
+            "ייצאו מחדש מאתר הבנק/החברה"
+        )
+
+
+class ParseFileError(Exception):
+    """One statement file could not be read. The message always starts with the
+    file's name, so the job's error says which file to replace
+    (docs/plans/scale-large-statements.md A5)."""
+
+    def __init__(self, name: str, reason: str):
+        super().__init__(f"{name}: {reason}")
+        self.name = name
+        self.reason = reason
+
+
+class _ParseTimeout(BaseException):
+    """Raised by the SIGALRM handler. A BaseException, so a parser's own broad
+    `except Exception` cannot swallow the timeout."""
+
+
+# Errors that already name their file — passed through as they are.
+_NAMED_FILE_ERRORS = (ParseFileError, UnknownStatementError, ScannedPdfError)
+
+DEFAULT_PARSE_TIMEOUT_S = 120.0
+MAX_PDF_PAGES = 600
+# A page with fewer characters than this carries no usable text layer.
+SCANNED_PAGE_CHARS = 20
+
+
+def parse_timeout_s() -> float:
+    try:
+        v = float(os.environ.get("PLUSIM_PARSE_TIMEOUT_S", ""))
+    except ValueError:
+        return DEFAULT_PARSE_TIMEOUT_S
+    return v if v > 0 else DEFAULT_PARSE_TIMEOUT_S
+
+
+def parse_with_limits(name: str, fn, kind: str = "file"):
+    """Run one file's parse under a wall-clock limit; any failure names the file.
+
+    `prepare` aborts on the first failing file — a partial report is worse than
+    an error that says which statement to re-export.
+    """
+    timeout = parse_timeout_s()
+    armed = [True]
+
+    def on_alarm(_signum, _frame):
+        # Disarmed first thing in the inner finally: an alarm that lands after
+        # that point is ignored instead of escaping as a bare _ParseTimeout.
+        if armed[0]:
+            raise _ParseTimeout()
+
+    previous = signal.signal(signal.SIGALRM, on_alarm)
+    try:
+        # Arming happens INSIDE the protected region, so even an alarm that
+        # fires before fn() starts becomes the file-named timeout.
+        try:
+            signal.setitimer(signal.ITIMER_REAL, timeout)
+            return fn()
+        finally:
+            armed[0] = False
+            signal.setitimer(signal.ITIMER_REAL, 0)
+    except _ParseTimeout:
+        raise ParseFileError(name, f"parse timed out after {timeout:g}s") from None
+    except _NAMED_FILE_ERRORS:
+        raise
+    except Exception as e:
+        raise ParseFileError(name, f"unreadable {kind} ({type(e).__name__})") from e
+    finally:
+        signal.signal(signal.SIGALRM, previous)
+
+
+def check_pdf_pages(path: str, name: str) -> None:
+    pages = len(PdfReader(path).pages)
+    if pages > MAX_PDF_PAGES:
+        raise ParseFileError(name, f"more than {MAX_PDF_PAGES} pages")
+
+
+def is_scanned_pdf(path: str) -> bool:
+    """True when no page carries a text layer. A file that cannot be read at
+    all is not proven scanned — it falls through to the generic refusal."""
+    try:
+        pages = PdfReader(path).pages
+        return len(pages) > 0 and all(
+            len((p.extract_text() or "").strip()) < SCANNED_PAGE_CHARS for p in pages
+        )
+    except Exception:
+        return False
+
+
 def parse_xlsx_auto(path: str):
     """Dispatch an xlsx statement to the right parser by content.
 
@@ -310,6 +412,9 @@ def parse_pdf_auto(path: str, label: str, name: str):
         return parse_leumi_pdf(path, label)
     if detect_max_pdf(path):
         return parse_max_pdf(path, label)
+    # Checked only once no detector matched, so a real statement never pays for it.
+    if is_scanned_pdf(path):
+        raise ScannedPdfError(name)
     raise UnknownStatementError(
         f"{name}: unrecognized PDF — not a MAX or Leumi/Isracard card statement and "
         "not a Bank Hapoalim / Bank Leumi current-account (עובר ושב) export. "
@@ -425,13 +530,161 @@ def categorize(
                 "kind": kind,
                 "samples": [],
                 "maxCategory": t.get("max_category", ""),
+                "count": 0,
+                "totalAgorot": 0,
             },
         )
+        entry["count"] += 1
+        entry["totalAgorot"] += abs(t["amountAgorot"])
         if len(entry["samples"]) < 5:
             entry["samples"].append(
                 {"date": t["date"], "amountAgorot": t["amountAgorot"], "note": t.get("note", "")}
             )
     return list(unresolved.values())
+
+
+# The app resolves at most this many merchants per dictionary request, each at
+# most MAX_MERCHANT_LEN characters (POST /api/agent/jobs/:jobId/dictionary).
+DICTIONARY_CHUNK = 500
+MAX_MERCHANT_LEN = 200
+
+
+def resolve_dictionary(manifest: dict, txns: list[dict]) -> dict[str, str]:
+    """merchant → approved category, for this job's expense merchants.
+
+    A manifest with `dictionaryResolveUrl` is asked about exactly the merchants
+    present, in chunks — no cap on the dictionary's size. An older app sends
+    only the inline `merchantDictionary` (its 2,000 most recent entries); that
+    path is unchanged (plan A3).
+    """
+    url = manifest.get("dictionaryResolveUrl")
+    if not url:
+        return {
+            normalize_merchant(d["merchantPattern"]): d["category"]
+            for d in manifest.get("merchantDictionary", [])
+        }
+    # Credits never take a dictionary category (one direction per merchant).
+    merchants = sorted(
+        {
+            t["merchant"]
+            for t in txns
+            if (t.get("kind") or "expense") != "credit" and 0 < len(t["merchant"]) <= MAX_MERCHANT_LEN
+        }
+    )
+    hits: dict[str, str] = {}
+    for i in range(0, len(merchants), DICTIONARY_CHUNK):
+        res = http_json(url, {"merchants": merchants[i : i + DICTIONARY_CHUNK]})
+        for merchant, category in (res.get("hits") or {}).items():
+            if isinstance(merchant, str) and isinstance(category, str):
+                hits[normalize_merchant(merchant)] = category
+    return hits
+
+
+# Judgment batches: the shortlist is split so one model read never has to hold
+# hundreds of merchants (plan A2). Biggest money first, so an unfinished run
+# leaves only the small amounts unjudged.
+JUDGMENT_BATCH_SIZE = 40
+BATCH_DIR = "judgment_batches"
+# batch_name/judgments_name pad to 3 digits; batch 1000+ simply has more.
+_JUDGMENTS_FILE_RE = re.compile(r"^judgments-(\d{3,})\.json$")
+
+
+def batch_name(n: int) -> str:
+    return f"batch-{n:03d}.json"
+
+
+def judgments_name(n: int) -> str:
+    return f"judgments-{n:03d}.json"
+
+
+def write_judgment_batches(wd: str, shortlist: list[dict], report_rules: str) -> int:
+    # A re-run of prepare in the same workdir starts the judgment over: old
+    # batches and old judgments would no longer match the new shortlist.
+    shutil.rmtree(os.path.join(wd, BATCH_DIR), ignore_errors=True)
+    for old in glob.glob(os.path.join(wd, "judgments*.json")):
+        os.remove(old)
+    os.makedirs(os.path.join(wd, BATCH_DIR))
+
+    ordered = sorted(shortlist, key=lambda e: (-e["totalAgorot"], e["key"]))
+    batches = [ordered[i : i + JUDGMENT_BATCH_SIZE] for i in range(0, len(ordered), JUDGMENT_BATCH_SIZE)]
+    for n, merchants in enumerate(batches, 1):
+        with open(os.path.join(wd, BATCH_DIR, batch_name(n)), "w", encoding="utf-8") as f:
+            json.dump(
+                {"batch": n, "of": len(batches), "reportRules": report_rules, "merchants": merchants},
+                f,
+                ensure_ascii=False,
+                indent=1,
+            )
+    with open(os.path.join(wd, "needs_judgment.json"), "w", encoding="utf-8") as f:
+        json.dump(
+            {"reportRules": report_rules, "batches": len(batches), "entries": len(ordered), "batchDir": BATCH_DIR},
+            f,
+            ensure_ascii=False,
+            indent=1,
+        )
+    return len(batches)
+
+
+def load_judgments(wd: str) -> tuple[dict[str, dict], list[str]]:
+    """judgments.json, then judgments-NNN.json in batch order. A key decided in
+    two files keeps the first decision and is reported."""
+    paths = []
+    if os.path.exists(os.path.join(wd, "judgments.json")):
+        paths.append("judgments.json")
+    # Numeric order, so judgments-1000.json comes after judgments-999.json.
+    paths += sorted(
+        (n for n in os.listdir(wd) if _JUDGMENTS_FILE_RE.match(n)),
+        key=lambda n: int(_JUDGMENTS_FILE_RE.match(n).group(1)),
+    )
+    merged: dict[str, dict] = {}
+    origin: dict[str, str] = {}
+    warnings: list[str] = []
+    for name in paths:
+        with open(os.path.join(wd, name), encoding="utf-8") as f:
+            for raw, decision in json.load(f).items():
+                key = normalize_judgment_key(raw)
+                if key in merged:
+                    warnings.append(f"judgment for {key} appears in {origin[key]} and {name} — the first was kept")
+                    continue
+                merged[key] = decision
+                origin[key] = name
+    return merged, warnings
+
+
+def _summarize(keys: list[str], limit: int = 5) -> str:
+    shown = ", ".join(keys[:limit])
+    return shown + (f" (+{len(keys) - limit})" if len(keys) > limit else "")
+
+
+def cmd_judge_status(args) -> None:
+    wd = safe_workdir(args.workdir)
+    with open(os.path.join(wd, "needs_judgment.json"), encoding="utf-8") as f:
+        index = json.load(f)
+    shortlist: set[str] = set()
+    judged_batches = 0
+    next_batch = None
+    for n in range(1, index["batches"] + 1):
+        with open(os.path.join(wd, BATCH_DIR, batch_name(n)), encoding="utf-8") as f:
+            shortlist |= {e["key"] for e in json.load(f)["merchants"]}
+        if os.path.exists(os.path.join(wd, judgments_name(n))):
+            judged_batches += 1
+        elif next_batch is None:
+            next_batch = os.path.join(wd, BATCH_DIR, batch_name(n))
+    judgments, _ = load_judgments(wd)
+    judged = len(shortlist & judgments.keys())
+    print(
+        json.dumps(
+            {
+                "phase": "judge-status",
+                "batches": index["batches"],
+                "judgedBatches": judged_batches,
+                "entriesJudged": judged,
+                "remaining": len(shortlist) - judged,
+                "next": next_batch,
+            },
+            ensure_ascii=False,
+        )
+    )
 
 
 def cmd_prepare(args) -> None:
@@ -460,14 +713,23 @@ def cmd_prepare(args) -> None:
     max_seq = 0
     parsed: list[tuple[str, object]] = []
     for file in manifest["files"]:
-        dest = safe_dest(files_dir, file["name"])
-        http_download(file.get("url") or file["path"], dest)
+        name = file["name"]
+        dest = safe_dest(files_dir, name)
+        try:
+            http_download(file.get("url") or file["path"], dest)
+        except Exception as e:
+            raise ParseFileError(name, f"download failed ({type(e).__name__})") from e
         if file["mime"].endswith("pdf"):
             max_seq += 1
             label = file.get("sourceLabel") or f"max-{max_seq}"
-            r = parse_pdf_auto(dest, label, file["name"])
+
+            def parse_pdf(dest=dest, label=label, name=name):
+                check_pdf_pages(dest, name)
+                return parse_pdf_auto(dest, label, name)
+
+            r = parse_with_limits(name, parse_pdf, "PDF")
         else:
-            r = parse_xlsx_auto(dest)
+            r = parse_with_limits(name, lambda dest=dest: parse_xlsx_auto(dest), "xlsx")
         # A recognized layout that still yields nothing is not fatal (a genuinely
         # empty billing period exists), but it must never pass silently — this is
         # the warning that would have named the file behind "transactions empty".
@@ -540,10 +802,7 @@ def cmd_prepare(args) -> None:
         warnings.extend(r.warnings)
 
     leaves = {leaf for sec in manifest["taxonomy"] for leaf in sec["leaves"]}
-    dictionary = {
-        normalize_merchant(d["merchantPattern"]): d["category"]
-        for d in manifest.get("merchantDictionary", [])
-    }
+    dictionary = resolve_dictionary(manifest, all_txns)
     shortlist = categorize(all_txns, dictionary, leaves, income_leaves(manifest["taxonomy"]))
 
     # Admin-authored extra categorization rules (edited in the Plusim app's
@@ -562,8 +821,7 @@ def cmd_prepare(args) -> None:
     }
     with open(os.path.join(wd, "state.json"), "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False)
-    with open(os.path.join(wd, "needs_judgment.json"), "w", encoding="utf-8") as f:
-        json.dump({"reportRules": report_rules, "merchants": shortlist}, f, ensure_ascii=False, indent=1)
+    batches = write_judgment_batches(wd, shortlist, report_rules)
 
     print(
         json.dumps(
@@ -575,6 +833,7 @@ def cmd_prepare(args) -> None:
                 "bankOverlapRemoved": overlap_removed,
                 "autoCategorized": sum(1 for t in all_txns if t["category"]),
                 "needsJudgment": len(shortlist),
+                "judgmentBatches": batches,
                 "reportRules": bool(report_rules),
                 "warnings": warnings,
             },
@@ -590,11 +849,19 @@ def cmd_finalize(args) -> None:
     with open(os.path.join(wd, "manifest.json"), encoding="utf-8") as f:
         manifest = json.load(f)
 
-    judgments: dict[str, dict] = {}
-    jpath = os.path.join(wd, "judgments.json")
-    if os.path.exists(jpath):
-        with open(jpath, encoding="utf-8") as f:
-            judgments = {normalize_judgment_key(k): v for k, v in json.load(f).items()}
+    judgments, judgment_warnings = load_judgments(wd)
+    # The shortlist is exactly the rows the deterministic pass left open.
+    shortlist = {
+        judgment_key(t["merchant"], t.get("kind") or "expense")
+        for t in state["txns"]
+        if not t["category"] and not t["uncategorized"]
+    }
+    unknown = sorted(judgments.keys() - shortlist)
+    if unknown:
+        judgment_warnings.append(f"{len(unknown)} judgments name merchants not in the shortlist — ignored: {_summarize(unknown)}")
+    unjudged = len(shortlist - judgments.keys())
+    if unjudged:
+        judgment_warnings.append(f"{unjudged} בתי עסק לא נבדקו — נשארו ללא סיווג")
 
     leaves = {leaf for sec in manifest["taxonomy"] for leaf in sec["leaves"]}
     income = income_leaves(manifest["taxonomy"])
@@ -707,14 +974,14 @@ def cmd_finalize(args) -> None:
         "xlsxBase64": xlsx_b64,
         "xlsxFilename": f"plusim-report-{manifest['job']['id']}.xlsx",
         "proposedMappings": proposed,
-        "agentNotes": "; ".join(state["warnings"] + problems) or None,
+        "agentNotes": "; ".join(state["warnings"] + judgment_warnings + problems) or None,
     }
 
     if args.dry_run:
         out = os.path.join(wd, "result.json")
         with open(out, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
-        print(json.dumps({"phase": "finalize", "dryRun": True, "status": payload["status"], "problems": problems, **{k: summary[k] for k in ("txCount", "uncategorizedCount")}}, ensure_ascii=False))
+        print(json.dumps({"phase": "finalize", "dryRun": True, "status": payload["status"], "problems": problems, "judgmentWarnings": judgment_warnings, **{k: summary[k] for k in ("txCount", "uncategorizedCount")}}, ensure_ascii=False))
         return
 
     res = http_json(manifest["callback"]["resultUrl"], payload)
@@ -724,6 +991,7 @@ def cmd_finalize(args) -> None:
                 "phase": "finalize",
                 "status": payload["status"],
                 "problems": problems,
+                "judgmentWarnings": judgment_warnings,
                 "txCount": summary["txCount"],
                 "uncategorizedCount": summary["uncategorizedCount"],
                 "serverResponse": res,
@@ -752,6 +1020,9 @@ def main() -> None:
     fin.add_argument("--workdir", required=True)
     fin.add_argument("--dry-run", action="store_true")
 
+    js = sub.add_parser("judge-status")
+    js.add_argument("--workdir", required=True)
+
     cl = sub.add_parser("cleanup")
     cl.add_argument("--workdir", required=True)
 
@@ -759,9 +1030,17 @@ def main() -> None:
     if args.cmd == "prepare":
         if not args.manifest_url and not args.manifest_file:
             p.error("prepare needs --manifest-url or --manifest-file")
-        cmd_prepare(args)
+        try:
+            cmd_prepare(args)
+        except (*_NAMED_FILE_ERRORS, AmbiguousBankMergeError) as e:
+            # A statement problem, not a script crash: one line that names the
+            # file, and a retry cannot fix it (SKILL.md failure handling).
+            print(json.dumps({"phase": "prepare", "error": str(e)}, ensure_ascii=False))
+            sys.exit(2)
     elif args.cmd == "finalize":
         cmd_finalize(args)
+    elif args.cmd == "judge-status":
+        cmd_judge_status(args)
     else:
         cmd_cleanup(args)
 

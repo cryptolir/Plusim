@@ -541,7 +541,9 @@ class TestPrepareIntegration(unittest.TestCase):
                 self.pages = [_Page(by_name[os.path.basename(path)])]
 
         out = []
-        with mock.patch.object(B, "PdfReader", Rd), mock.patch("builtins.print", lambda *a, **k: out.append(a[0])):
+        with mock.patch.object(B, "PdfReader", Rd), mock.patch.object(R, "PdfReader", Rd), mock.patch(
+            "builtins.print", lambda *a, **k: out.append(a[0])
+        ):
             R.cmd_prepare(mock.Mock(workdir=clean, manifest_file=mpath, manifest_url=None))
         summary = json.loads(out[-1])
         with open(os.path.join(clean, "state.json"), encoding="utf-8") as f:

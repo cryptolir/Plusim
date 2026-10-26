@@ -56,6 +56,13 @@ python3 -m pip install --target /home/node/.openclaw/workspace/skills/plusim-rep
    `PLUSIM_RUNTIME_TOKEN`), parses every statement, dedups, applies the
    merchant dictionary + deterministic rules, and prints a JSON summary.
 
+   If a statement file cannot be used, `prepare` exits with code 2 and prints
+   one line `{"phase": "prepare", "error": "<file name>: <reason>"}`. Examples:
+   a parse that timed out, an unreadable file, a PDF of more than 600 pages, a
+   scanned PDF with no text layer. Do **not** retry. Reply
+   `FAILED <jobId> <that error>` and run cleanup. The client has to replace
+   that file.
+
    Bank current-account statements (Hapoalim / Leumi PDF, Discount xlsx) are
    split by the scripts into three kinds of row: a **debit paying a credit
    card** (ישראכרט, מקס, לאומי קארד…) is a *settlement* — already itemized on
@@ -81,11 +88,15 @@ python3 -m pip install --target /home/node/.openclaw/workspace/skills/plusim-rep
    the app. None of this blocks the report. Nothing for you to do; do NOT "fix"
    such dates by hand in judgments.json.
 
-2. **Read the shortlist.** `$WD/needs_judgment.json` is an object with two keys:
+2. **Read the shortlist index.** `$WD/needs_judgment.json` holds
+   `reportRules`, `batches` (how many batch files), `entries` (how many
+   merchants in total) and `batchDir`. The merchants themselves are in
+   `$WD/judgment_batches/batch-001.json`, `batch-002.json`, … — at most 40
+   per file, the largest amounts first. Each batch file has:
    - `merchants` — the entries the deterministic pass (merchant dictionary →
      built-in rules → MAX category; income rules for bank credits) could NOT
-     place, with sample dates/amounts/notes and MAX's own category hint when
-     present. Each entry has a `key` and a `kind`: `"expense"` (a charge or a
+     place, with sample dates/amounts/notes, `count` (rows) and
+     `totalAgorot` (Σ|amount|), and MAX's own category hint when present. Each entry has a `key` and a `kind`: `"expense"` (a charge or a
      bank debit; key = the merchant) or `"credit"` (a bank credit — money IN;
      key = `<merchant>␟credit`, with the ␟ separator). The same counterparty
      may appear twice, once per direction — judge each on its own.
@@ -94,11 +105,25 @@ python3 -m pip install --target /home/node/.openclaw/workspace/skills/plusim-rep
      categories the deterministic pass already assigned (exact per-merchant
      overrides are made app-side via the merchant dictionary, which runs first).
 
-3. **Judge (the only model step).** Following
-   `/home/node/.openclaw/workspace/skills/plusim-reports/reference/categorization-rules.md` **plus** any `reportRules` from
-   `needs_judgment.json` (when `reportRules` conflicts with the reference doc,
-   follow `reportRules`; an empty `reportRules` means the static playbook only),
-   assign a category to each merchant in `merchants` and write `$WD/judgments.json`:
+3. **Judge (the only model step) — one batch at a time.** Following
+   `/home/node/.openclaw/workspace/skills/plusim-reports/reference/categorization-rules.md` **plus** any `reportRules`
+   (when `reportRules` conflicts with the reference doc, follow `reportRules`;
+   an empty `reportRules` means the static playbook only), loop:
+
+   1. Ask which batch is next:
+
+      ```
+      python3 /home/node/.openclaw/workspace/skills/plusim-reports/scripts/run_job.py judge-status --workdir $WD
+      ```
+
+      It prints `batches`, `judgedBatches`, `entriesJudged`, `remaining` and
+      `next` (the path of the next batch file, or `null` when all are done).
+   2. Read `next`, judge every merchant in its `merchants`, and write the
+      decisions to `$WD/judgments-NNN.json` — the same number as the batch
+      (`batch-003.json` → `judgments-003.json`).
+   3. Repeat until `next` is `null`, then finalize.
+
+   A job with 40 merchants or fewer is one batch. Each judgments file looks like:
 
    ```json
    {
@@ -110,6 +135,9 @@ python3 -m pip install --target /home/node/.openclaw/workspace/skills/plusim-rep
    ```
 
    - Use each entry's `key` verbatim as the JSON key (copy the ␟ for credits).
+   - Judge each merchant once. A key in two files keeps the first decision and
+     is reported to the admin. A merchant you never judge stays uncategorized,
+     and finalize tells the admin how many were left ("N בתי עסק לא נבדקו").
    - Category names must be EXACT leaf names from the manifest's taxonomy.
    - A **credit** entry takes either a leaf of the `הכנסות` section (salary,
      allowance, treasury refund, an incoming transfer that is income) **or** an
