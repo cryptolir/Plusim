@@ -1,6 +1,6 @@
 # Plusim — Scaling the report pipeline to large statement sets
 
-> **Status:** **Rev 2 — revised after Codex round 1** (2026-10-26).
+> **Status:** **Rev 3 — revised after Codex round 2** (2026-10-26).
 >
 > **Process** (self-contained): plan PR → adversarial review → each round becomes a new Rev on
 > this branch with resolution notes → every caught hole becomes a named test the implementation
@@ -8,6 +8,17 @@
 > *Delivery*.
 >
 > **Review log:**
+> - Rev 3 — **Codex round 2** (2 findings, both P2, both accepted):
+>   **P2** the cache was unique on `(fileId, parserVersion)`, so a hijacked turn could `PUT` unlimited
+>   distinct versions — **one cache row per file**; a `PUT` *replaces* it (storage ≤ one 20 MB payload
+>   per file), a `GET` with another version is a miss (B1, B4; tests `test_cache_put_replaces_not_
+>   accumulates`, `test_cache_get_other_version_is_a_miss`).
+>   **P2** the latest-`to` export can be the one that *excluded* Leumi's oldest row, which the
+>   older export holds — Rev 2 would refuse instead of recovering it — **selection is now
+>   completeness-aware**: a parser reports the days on which it excluded a row, and an export is
+>   not eligible to supply a day it is known to be incomplete for when another export covers
+>   it (Decision 2, A1; test `test_leumi_oldest_row_present_in_neighbour_file_is_kept` now covers the
+>   incomplete export having the latest `to`).
 > - Rev 2 — **Codex round 1** (4 findings, all accepted):
 >   **P1** the balance-keyed *set union* silently removes a real row when one export holds
 >   `purchase ₪10 → 90`, `refund → 100` and another holds a second identical `purchase → 90` on
@@ -119,8 +130,12 @@ the model's context or ~1,000 rows in a request body.
    whether two files hold the same physical row.
 2. **Cross-file dedup is a per-day partition, not a set union.** Each export declares its period
    `[from, to]` (parsed from its header; fallback: min/max row date, which can only under-claim).
-   For every calendar day, rows are taken from **exactly one** export — the one covering that day
-   with the **latest `to`** (most recent export; ties → manifest order). Every *other* export that
+   For every calendar day, rows are taken from **exactly one** export — among the exports covering
+   that day **and not known to be incomplete for it**, the one with the **latest `to`** (most
+   recent export; ties → manifest order). A parser reports the days on which it *excluded* a row
+   (Leumi's oldest row when its amount cannot be derived — `_parse_leumi`'s "oldest row … excluded"
+   warning) as that export's `incomplete_days`; if every covering export is incomplete for a day,
+   the latest-`to` one is used and the gap warning stands. Every *other* export that
    covers that day must hold a **contiguous, order-preserving sub-sequence** of the chosen export's
    rows for that day (allowing an earlier export generated mid-day on its last day); anything else
    — a different count, order or content — is an **ambiguous merge and `prepare` refuses**, naming
@@ -174,6 +189,10 @@ capability (`cryptolir/openclaw-dashboard#811`) is not touched and nothing here 
     Hapoalim's `dd/mm/yyyy-dd/mm/yyyy` line and Leumi's `בין התאריכים dd.mm.yy-dd.mm.yy` line,
     taking min/max of the two dates (printed direction differs by RTL); no printed period ⇒
     min/max row date.
+  - `ParseResult` also gains `incomplete_days: dict[label, set[iso-date]]`; `_parse_leumi` fills it
+    with the date of every row it excludes (`parse_bank_pdf.py` oldest-row branch). The incomplete
+    export's rows for that day are a prefix of the complete export's rows, so the sub-sequence rule
+    below accepts them and the merge **recovers** the excluded row from the neighbour (Codex P2).
   - `bank_rows.merge_bank_exports(results) -> (merged_results, notes, warnings)`: group by bank
     label; for each day choose the export per Decision 2; verify the other covering exports' rows
     for that day are an order-preserving contiguous sub-sequence (full key **and** Leumi
@@ -232,7 +251,7 @@ capability (`cryptolir/openclaw-dashboard#811`) is not touched and nothing here 
   StatementFile       + sha256 String?                       // set at upload; null on old rows ⇒ no cache
   ParsedStatement     { id, fileId → StatementFile (cascade), parserVersion String,
                         sourceLabel String?, payload Json, createdAt;
-                        @@unique([fileId, parserVersion]) }
+                        @@unique([fileId]) }          // ONE row per file — a PUT replaces it
   ReportResultStage   { id, jobId → ReportJob (cascade), uploadId String, kind String, // "rows"|"artifact"
                         seq Int, size Int, rowCount Int, payload Json?, bytes Bytes?, createdAt;
                         @@unique([jobId, uploadId, kind, seq]) }
@@ -256,7 +275,10 @@ capability (`cryptolir/openclaw-dashboard#811`) is not touched and nothing here 
   (`DriveOutsideRootError` ⇒ 403; other Drive errors ⇒ 502) — and **both** the download route and
   both cache methods call it, before any cached payload is read or written. A cache hit therefore
   still costs one Drive metadata walk (no bytes, no parse). Then: `PUT` accepted only when the row
-  has a `sha256` and `parserVersion` is a 64-hex string; payload ≤ 20 MB; stored with `upsert`.
+  has a `sha256` and `parserVersion` is a 64-hex string; payload ≤ 20 MB; stored with an `upsert`
+  on `fileId` that **replaces** the previous payload and `parserVersion` (Codex P2: a hijacked turn
+  cannot accumulate rows by cycling versions — storage per file is one payload). `GET ?v=` returns
+  the row only when its stored `parserVersion` equals `v`, else 404 (a miss).
   A file that is reassigned or moved becomes unreadable through the cache the moment it becomes
   unreadable through the download.
 - **B5. Result v2** — every route runs `authorizeAgentJobRequest`, and **every write is one
@@ -397,6 +419,9 @@ plan would hook.
 - **Chain-existence check is a weak completeness test** (a missing run of rows whose end balance
   coincidentally equals another row's). It is a *warning* and strictly stronger than today's
   per-file check, which cannot see between files at all; documented in `categorization-rules.md`.
+- **Cache storage**: one `ParsedStatement` row per file (≤ 20 MB), replaced on write, deleted with
+  the file/job. Total is bounded by the job's file count × 20 MB — the same order as the statements
+  themselves.
 - **Poisoned cache**: a hijacked turn could `PUT` altered parse results for a file. Cached rows get
   the same verification as fresh ones (card Σ / bank chain), so amount changes fail; **date or
   merchant** edits would not. Mitigation: per-file binding + sha256 + parser hash; the cache dies
@@ -429,14 +454,19 @@ Skill (`python3 -m unittest`, generated fixtures, no PII):
   `test_two_accounts_with_same_last4_refuse_instead_of_mixing`,
   `test_period_parsed_from_hapoalim_and_leumi_headers`, `test_contained_file_adds_nothing`, `test_same_file_twice_adds_nothing`,
   `test_overlap_note_names_both_files_and_count`, `test_gap_between_exports_is_a_warning_naming_the_date`,
-  `test_leumi_oldest_row_present_in_neighbour_file_is_kept`, `test_discount_fallback_key_includes_balance`,
+  `test_leumi_oldest_row_present_in_neighbour_file_is_kept` (including when the **incomplete export
+  has the latest `to`** — Codex P2: the older export supplies the day and the row is recovered),
+  `test_all_covering_exports_incomplete_keeps_latest_and_warns`,
+  `test_parser_reports_incomplete_days_for_excluded_rows`, `test_discount_fallback_key_includes_balance`,
   `test_card_sources_still_warn_on_duplicate_label`.
 - `test_batches_are_at_most_40_ordered_by_total_amount`, `test_finalize_merges_all_judgment_files`,
   `test_duplicate_or_unknown_judgment_key_is_a_warning`, `test_unjudged_count_is_reported_in_agent_notes`,
   `test_small_job_is_one_batch`, `test_judge_status_counts`.
 - `test_dictionary_resolved_in_chunks_of_500`, `test_old_manifest_uses_inline_dictionary`,
   `test_resolved_income_leaf_is_ignored`.
-- `test_cache_hit_skips_byte_download_and_parse`, `test_cache_miss_puts_result`,
+- `test_cache_put_replaces_not_accumulates` (**Codex P2**: N distinct valid versions ⇒ exactly one
+  row, one payload), `test_cache_get_other_version_is_a_miss`,
+  `test_cache_hit_skips_byte_download_and_parse`, `test_cache_miss_puts_result`,
   `test_cache_ignored_on_parser_version_change`, `test_cache_ignored_on_label_change`,
   `test_cached_rows_are_verified_like_fresh_rows`.
 - `test_parse_timeout_names_the_file`, `test_any_parse_exception_names_the_file`,
