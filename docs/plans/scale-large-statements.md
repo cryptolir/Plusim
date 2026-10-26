@@ -1,6 +1,6 @@
 # Plusim — Scaling the report pipeline to large statement sets
 
-> **Status:** **Rev 1 — draft for adversarial review** (2026-10-26).
+> **Status:** **Rev 2 — revised after Codex round 1** (2026-10-26).
 >
 > **Process** (self-contained): plan PR → adversarial review → each round becomes a new Rev on
 > this branch with resolution notes → every caught hole becomes a named test the implementation
@@ -8,6 +8,20 @@
 > *Delivery*.
 >
 > **Review log:**
+> - Rev 2 — **Codex round 1** (3 findings, all accepted):
+>   **P1** the balance-keyed *set union* silently removes a real row when one export holds
+>   `purchase ₪10 → 90`, `refund → 100` and another holds a second identical `purchase → 90` on
+>   the same date (reproduced by the reviewer) — **cross-file dedup is now a per-day partition
+>   driven by each export's printed period, never a set union over row content, and an ambiguous
+>   day refuses the merge naming the files** (Decisions 1–3, A1; tests
+>   `test_split_export_with_repeating_balance_keeps_both_purchases` and four more).
+>   **P1** v2 `commit` reused v1's CAS, so a commit that already loaded upload A could finalize it
+>   after a concurrent `begin` superseded it with B — **every v2 write now claims the job row with
+>   `resultUploadId === uploadId` in the same statement, and `commit` claims before it reads the
+>   stage** (B5; test `test_commit_after_superseding_begin_is_rejected`).
+>   **P2** staging was bounded only at commit — **bounded at ingestion**: `seq` range, per-chunk
+>   rows/bytes, cumulative row/byte quota checked atomically under the job-row lock, a single
+>   artifact slot (B1, B5; tests `test_chunk_over_quota_is_rejected_before_persistence`, …).
 > - Rev 1 — authored from (a) an overlapping-export experiment on the two real bank statements
 >   and (b) a 1k / 5k / 20k synthetic scale measurement of the current pipeline, both below, plus
 >   a file-anchored read of the caps. Minimalism pass done by hand (the `ponytail-review` skill is
@@ -46,8 +60,13 @@ Findings:
 4. The Leumi parser excluded file 1's oldest row (`oldest row — no older balance and no sibling`)
    although file 2 contains that very row with a valid neighbour: information the second file
    had was thrown away.
-5. A **running balance after each row** is printed by both banks and identifies a physical row
-   uniquely even among identical rows (two identical ₪5,730 credits have different balances).
+5. A **running balance after each row** is printed by both banks and distinguishes the two identical
+   ₪5,730 credits — but (Codex, Rev 2) it does **not** make a row unique in general: a purchase, its
+   refund and an identical second purchase on one day repeat `(date, description, amount, balance)`.
+   Balance is therefore a *within-file ordering/consistency* signal, not a cross-file identity.
+6. The row-count splits in E1 rows 3–4 are adversarial stress cases; **real exports are day-granular**
+   (each prints its period: Hapoalim `06/10/2026-06/04/2026`, Leumi `בין התאריכים 01.03.26-06.10.26`).
+   Rev 2's merge uses exactly that.
 
 ### E2 — current pipeline at scale (measured, synthetic Hapoalim-shaped, no PII)
 
@@ -89,17 +108,24 @@ the model's context or ~1,000 rows in a request body.
 
 ## Decisions (defaults — to be attacked)
 
-1. **Bank row identity includes the running balance.** Key = `label|date|description|amount|balance_after`.
-   A physical row is unique by construction (E1-5), so cross-file dedup is a set union, an identical
-   adjacent pair is never a false collision (E1-2), and `seq` is only a fallback for the (so far
-   unobserved) case of two rows identical *including balance*.
-2. **Cross-file merge happens in the skill, before categorization**, per source label. The app's
-   `duplicate dedupKey` fatal stays untouched as the safety net — a merge bug surfaces as a
-   fatal, never as a silent double count.
-3. **Completeness across files is the chain, not file order.** After the union, every row except the
-   overall oldest must have a successor row whose `balance_after == balance + amount`; a row
-   without one is a **gap warning naming the date** ("missing rows after 2026-05-03").
-   No ordering of files or rows is assumed.
+1. **A bank row's key includes the running balance** — `label|date|description|amount|balance_after`
+   (+ `|seq` only on an exact repeat **within one file**, e.g. Codex's purchase/refund/purchase). The
+   app-side `duplicate dedupKey` guard keeps working per file; the key is *not* used to decide
+   whether two files hold the same physical row.
+2. **Cross-file dedup is a per-day partition, not a set union.** Each export declares its period
+   `[from, to]` (parsed from its header; fallback: min/max row date, which can only under-claim).
+   For every calendar day, rows are taken from **exactly one** export — the one covering that day
+   with the **latest `to`** (most recent export; ties → manifest order). Every *other* export that
+   covers that day must hold a **contiguous, order-preserving sub-sequence** of the chosen export's
+   rows for that day (allowing an earlier export generated mid-day on its last day); anything else
+   — a different count, order or content — is an **ambiguous merge and `prepare` refuses**, naming
+   the two files and the day, rather than guessing which rows are real. Days covered by one export
+   only are taken as-is. Rows are never removed on content equality alone.
+3. **Completeness across files is the chain, not file order.** After the partition, every row except
+   the overall oldest must have a successor row whose `balance_after == balance + amount`; a row
+   without one is a **gap warning naming the date**, and a day claimed by no export between two
+   periods is reported as an uncovered range. The check assumes no ordering of files. It is a
+   completeness *warning*, never the reason a row is kept or dropped (Codex's example passes it).
 4. **Judgment is batched, ordered by money, and its coverage is reported**; the model never sees
    more than one batch.
 5. **The merchant dictionary is resolved server-side**: the agent sends the distinct merchants it has,
@@ -137,21 +163,25 @@ capability (`cryptolir/openclaw-dashboard#811`) is not touched and nothing here 
 
 ### Phase A — agent skill (`agent/skills/plusim-reports/scripts/`)
 
-- **A1. Balance-keyed identity and cross-file merge.**
+- **A1. Balance-keyed keys and the per-day cross-file merge.**
   - `parse_bank_pdf._emit` (`:260-272`) and `parse_discount_xlsx` fallback key: `…|<balance_after>`;
-    `Txn` gains `balance_agorot: int | None` (bank rows only); `seq` appended only on an exact
-    key repeat within one file.
-  - `bank_rows.merge_bank_exports(results) -> (merged_results, notes, warnings)`: group
-    `ParseResult`s by bank source label; for each group take the **union by key** (first file in
-    manifest order wins; its `note` is kept); run `check_chain_union(rows)` (Decision 3). Emits one
-    non-blocking note per merged label — `"N שורות חופפות בין הקבצים <f1>, <f2> הוסרו"` — into
-    `agentNotes`, and counts in the `prepare` summary (`bankOverlapRemoved: n`).
-    Called from `cmd_prepare` after the file loop (`run_job.py:436-520`), replacing today's bare
-    `duplicate source label` warning (`:514`), which stays only for card sources.
-  - The Leumi "oldest row excluded" rule is unchanged; with a neighbour file the row exists as a
-    normal row in the union, and without one the **gap warning** now names it (E1-4).
-  - Different accounts that share a last-4 collapse to one label: their union shows gaps, which is
-    the warning the admin needs; documented, not engineered around.
+    `Txn` gains `balance_agorot` (bank rows). `ParseResult` gains `periods: dict[label, (from, to)]`:
+    Hapoalim's `dd/mm/yyyy-dd/mm/yyyy` line and Leumi's `בין התאריכים dd.mm.yy-dd.mm.yy` line,
+    taking min/max of the two dates (printed direction differs by RTL); no printed period ⇒
+    min/max row date.
+  - `bank_rows.merge_bank_exports(results) -> (merged_results, notes, warnings)`: group by bank
+    label; for each day choose the export per Decision 2; verify the other covering exports' rows
+    for that day are an order-preserving contiguous sub-sequence (full key **and** Leumi
+    reference compared); on violation raise `AmbiguousBankMergeError(file_a, file_b, day, detail)`.
+    One non-blocking note per merged label — `"N שורות חופפות מהקבצים <f1> ו־<f2> (<from>–<to>) לא נספרו פעמיים"`
+    — goes into `agentNotes` and the `prepare` summary (`bankOverlapRemoved: n`). Called from
+    `cmd_prepare` after the file loop (`run_job.py:436-520`), replacing today's bare
+    `duplicate source label` warning (`:514`) for bank sources (card sources keep it).
+  - Chain check across the merged rows (Decision 3). The Leumi "oldest row excluded" rule is
+    unchanged; a neighbour export now supplies that row as a normal row, and without one the gap
+    warning names it (E1-4).
+  - Different accounts that share a last-4 collapse to one label; their periods overlap with
+    different content, so the merge **refuses** rather than mixing them — the right outcome.
 - **A2. Judgment batching.** `prepare` writes `needs_judgment.json` as an index
   (`{reportRules, batches: n, entries: m}`) and `judgment_batches/batch-NNN.json`, **≤ 40 entries
   each, ordered by Σ|amount| descending**, each entry gaining `count` and `totalAgorot`. New
@@ -198,7 +228,7 @@ capability (`cryptolir/openclaw-dashboard#811`) is not touched and nothing here 
                         sourceLabel String?, payload Json, createdAt;
                         @@unique([fileId, parserVersion]) }
   ReportResultStage   { id, jobId → ReportJob (cascade), uploadId String, kind String, // "rows"|"artifact"
-                        seq Int, payload Json?, bytes Bytes?, createdAt;
+                        seq Int, size Int, rowCount Int, payload Json?, bytes Bytes?, createdAt;
                         @@unique([jobId, uploadId, kind, seq]) }
   ReportJob           + resultUploadId String?
   ```
@@ -214,20 +244,35 @@ capability (`cryptolir/openclaw-dashboard#811`) is not touched and nothing here 
 - **B4. Parse cache routes** — `GET|PUT /api/agent/jobs/[jobId]/files/[fileId]/parsed?v=`: bound to
   `{ id: fileId, jobId }` of the authorized job; `PUT` accepted only when the row has a `sha256`
   and the `parserVersion` is a 64-hex string; payload ≤ 20 MB; stored with `upsert`.
-- **B5. Result v2** — all three routes use `authorizeAgentJobRequest` **and** the existing
-  `acceptingWhere` CAS (`status in (dispatched|processing) AND agentTokenHash`):
-  - `POST …/result/begin` → CAS-guarded: clears this job's stage rows, mints `uploadId`, stores it
-    in `resultUploadId`; returns `{uploadId}`.
-  - `POST …/result/chunk?u=<uploadId>` — body `{kind:"rows", seq, transactions:[≤1000]}` is
-    structurally parsed with the **same per-row parser** as v1 (extracted from `parseAgentResult`);
-    or `PUT …/result/artifact?u=` with raw bytes (`decodeXlsx`-checked, ≤ 40 MB, no base64).
-    Idempotent per `(jobId, uploadId, kind, seq)`; rejected unless `u === job.resultUploadId` and the CAS holds.
+- **B5. Result v2** — every route runs `authorizeAgentJobRequest`, and **every write is one
+  interactive `$transaction` whose first statement claims the job row** — an `updateMany` on
+  `{ id, status in (dispatched|processing), agentTokenHash, resultUploadId: <uploadId> }`
+  (`begin` is the exception: it claims on the v1 predicate and **sets** `resultUploadId`).
+  `count 0` ⇒ 409 and nothing else in that transaction runs. The claim takes the job row's lock
+  until the transaction ends, so `begin`, `chunk` and `commit` are **serialized against each other**
+  and against the result route / publish / run CASes (Codex P1: a commit can no longer finalize an
+  upload that a concurrent `begin` has superseded — it either claims first, and the later
+  `begin` then fails the status predicate, or loses the claim and is rejected).
+  - `POST …/result/begin` — claim on the v1 predicate; `stage.deleteMany({ jobId })`; mint
+    `uploadId`; set `resultUploadId`; return `{uploadId}`.
+  - `POST …/result/chunk?u=` — claim as above, then **ingestion quotas, inside the same
+    transaction (so under the lock — atomic, no check-then-write gap)** (Codex P2): `seq` an
+    integer in `[0, 50)`; rows per chunk ≤ 1,000; request body ≤ 2 MB; staged rows for this
+    `(jobId, uploadId, "rows")` plus this chunk (minus the chunk it replaces) ≤ 50,000 and staged
+    bytes ≤ 64 MB (aggregates of the `rowCount` / `size` columns); violation ⇒ **413 before
+    persistence**. A chunk is idempotent per `seq` (replace). Rows are parsed with the same per-row
+    parser as v1 (extracted from `parseAgentResult`) *before* the transaction opens.
+  - `PUT …/result/artifact?u=` — same claim; **a single slot** (`seq` fixed at 0, replace allowed);
+    raw bytes, `decodeXlsx`-checked, ≤ 40 MB, counted in the same 64 MB budget.
   - `POST …/result/commit` — body `{uploadId, chunks, txCount, settlements, sourceTotals,
-    proposedMappings, status, agentNotes, xlsxFilename}`: loads chunks `0..chunks-1` (any gap or
-    count mismatch ⇒ 409), assembles an `AgentResult`, runs **`parseAgentResult`-equivalent caps and
-    `verifyAgentResult` unchanged**, then the **same single `$transaction` as v1**
-    (CAS → delete rows/settlements/artifact → `createMany` in batches of 3,000 → create artifact
-    from the staged bytes → delete stage rows). `maxDuration = 120`.
+    proposedMappings, status, agentNotes, xlsxFilename}`. One transaction: **(1) claim** with
+    `resultUploadId: uploadId`, setting `resultUploadId = null` in that same statement (so no later
+    `chunk` can touch it and a second `commit` cannot claim); **(2) only then load the stage**
+    `0..chunks-1` (gap or `Σ rowCount ≠ txCount` ⇒ throw ⇒ rollback ⇒ the claim is undone and 409);
+    **(3)** assemble an `AgentResult`, run the v1 caps-aware parse and **`verifyAgentResult`
+    unchanged**; **(4)** the same writes as v1 (delete rows/settlements/artifact → `createMany` in
+    batches of 3,000 → artifact from the staged bytes → delete this upload's stage rows → job update
+    with status/verification). `maxDuration = 120`.
   - **Caps (explicit)**: v1 unchanged (5,000 rows). v2: `MAX_TXNS_V2 = 50,000`, `MAX_SETTLEMENTS_V2 =
     10,000`, per-source net total `|v| < 10¹²` agorot (a **separate** `intTotalAgorot`; the per-row
     `|v| < 10⁹` stays — E2 shows the row cap is not the problem, the sum cap is), artifact ≤ 40 MB.
@@ -306,10 +351,12 @@ plan would hook.
 
 ## Ponytail cuts
 
-- **yagni:** recovering Leumi's excluded oldest row from the neighbour file — the union already
-  contains it as a normal row when a neighbour exists, and the gap warning names it when not.
-- **yagni:** an order-aware sequence-alignment merge — set union by balance-keyed identity plus a
-  chain-existence check needs no ordering.
+- **yagni:** recovering Leumi's excluded oldest row from the neighbour file — the day-partition
+  already takes it as a normal row when a neighbour export covers that day, and the gap warning
+  names it when not.
+- **yagni:** content-based row alignment between exports — *Rev 1's set union was exactly this and
+  Codex broke it* (repeating balances). The per-day partition needs only each export's period and
+  an order-preserving sub-sequence check, and refuses what it cannot prove.
 - **yagni:** a cross-job parse cache or content-addressed store — per-file rows only.
 - **yagni:** a `judge` subcommand that calls the model — batching is files + a status command.
 - **yagni:** dictionary result caching on the app — one indexed `IN` query per 500 merchants.
@@ -324,21 +371,24 @@ plan would hook.
 
 ## Risks / contingencies
 
-- **A merge bug hides a missing row.** The union can only *remove* rows that share the full
-  `(date, description, amount, balance)` identity; a wrong removal of a distinct row would need two
-  distinct rows with identical balance-after, which the chain check cannot distinguish from one
-  row. Mitigation: gap warnings, the overlap note (counts + file names) in `agentNotes`, the
-  fatal safety net, and tests for the E1 boundary cases.
+- **A merge bug hides or double-counts a row.** Rows are never removed on content equality: a day's
+  rows come from one export, and any other export's rows for that day must match it as an
+  order-preserving sub-sequence or the merge **refuses** (Codex P1 — the repeating-balance case is a
+  named test). What can still go wrong is an export whose *printed period is wrong or missing*: the
+  fallback (min/max row date) only under-claims, which leaves days to a single export — never
+  removes. Residual: two exports that both omit the same day's rows are indistinguishable from
+  an empty day — the chain gap warning and the overlap note are the only signals. The app-side
+  `duplicate dedupKey` fatal remains for the double-count direction.
 - **Chain-existence check is a weak completeness test** (a missing run of rows whose end balance
-  coincidentally equals another row's). It is strictly stronger than today's per-file check
-  (which cannot see between files at all); the limitation is documented in `categorization-rules.md`.
+  coincidentally equals another row's). It is a *warning* and strictly stronger than today's
+  per-file check, which cannot see between files at all; documented in `categorization-rules.md`.
 - **Poisoned cache**: a hijacked turn could `PUT` altered parse results for a file. Cached rows get
   the same verification as fresh ones (card Σ / bank chain), so amount changes fail; **date or
   merchant** edits would not. Mitigation: per-file binding + sha256 + parser hash; the cache dies
   with the file/job; re-uploading the file (or any parser change) cold-starts it. *Review ask.*
-- **Staging growth**: `ReportResultStage` holds up to ~15 MB per upload; cleared by `begin`, by
-  commit, and by cascade with the job. A crashed upload leaves rows until the next `begin`.
-  A sweep is not planned; flagged for review.
+- **Staging growth**: bounded **at ingestion** per job — 50 chunks, 50,000 rows, 64 MB, one
+  artifact slot (B5) — so an abandoned or hostile upload costs at most 64 MB until the next `begin`
+  (always the first call of the next run), a `commit`, or cascade with the job. No sweeper.
 - **Judgment time**: 580 merchants = 15 batches ≈ 15 model rounds. Slower than one huge read, but the
   one huge read does not fit; ordering by money puts the decisions that matter first.
 - **Admin pagination removes "all rows on one page"** — copy/export of the whole ledger
@@ -351,10 +401,18 @@ plan would hook.
 
 Skill (`python3 -m unittest`, generated fixtures, no PII):
 
-- `test_overlapping_exports_union_by_balance_key` (E1 rows 1–2, both banks: emitted == physical),
-  `test_adjacent_exports_identical_pair_boundary_is_not_a_duplicate` (E1 row 3),
-  `test_overlap_on_identical_pair_member_keeps_both_rows` (E1 row 4),
-  `test_contained_file_adds_nothing`, `test_same_file_twice_adds_nothing`,
+- `test_overlapping_day_aligned_exports_are_not_double_counted` (E1 rows 1–2 rebuilt on day
+  boundaries, both banks: emitted == physical),
+  `test_split_export_with_repeating_balance_keeps_both_purchases` (**Codex P1**: purchase→90,
+  refund→100, identical purchase→90 on one day, split across two exports — all three rows survive),
+  `test_adjacent_exports_with_identical_same_day_pair_keep_both_rows`,
+  `test_row_count_split_inside_a_day_refuses_naming_files_and_day` (E1 rows 3–4 as stress: ambiguous
+  ⇒ `AmbiguousBankMergeError`, never a silent drop),
+  `test_earlier_export_partial_last_day_is_a_subsequence_and_merges`,
+  `test_conflicting_content_on_a_shared_day_refuses`,
+  `test_missing_printed_period_falls_back_to_row_range_and_never_removes`,
+  `test_two_accounts_with_same_last4_refuse_instead_of_mixing`,
+  `test_period_parsed_from_hapoalim_and_leumi_headers`, `test_contained_file_adds_nothing`, `test_same_file_twice_adds_nothing`,
   `test_overlap_note_names_both_files_and_count`, `test_gap_between_exports_is_a_warning_naming_the_date`,
   `test_leumi_oldest_row_present_in_neighbour_file_is_kept`, `test_discount_fallback_key_includes_balance`,
   `test_card_sources_still_warn_on_duplicate_label`.
@@ -375,7 +433,13 @@ Skill (`python3 -m unittest`, generated fixtures, no PII):
 App (`pnpm test`):
 
 - `reportResultScale.test.ts`: v2 begin/chunk/commit end to end with a mocked db at 50,000 rows;
-  chunk idempotency; gap or count mismatch ⇒ 409; commit without CAS ⇒ 409 and **nothing** written;
+  chunk idempotency; gap or count mismatch ⇒ 409; **`test_commit_after_superseding_begin_is_rejected`**
+  (interleaved: A claims/loads, B `begin`s, A's write is refused — and the converse order),
+  `test_second_commit_of_the_same_upload_is_rejected` (claim nulls `resultUploadId`),
+  **`test_chunk_over_quota_is_rejected_before_persistence`** (seq ≥ 50, > 1,000 rows, > 2 MB body,
+  cumulative rows > 50,000, cumulative bytes > 64 MB — each 413 with the stage unchanged),
+  `test_second_artifact_replaces_the_single_slot`, `test_every_v2_write_claims_with_upload_id`
+  (source-level: no v2 transaction writes before its claim); commit without CAS ⇒ 409 and **nothing** written;
   wrong/old `uploadId` ⇒ rejected; v1 still rejects 5,001 rows; v2 rejects 50,001; a ₪20 M source
   total accepted in v2 and still `bad totals` in v1; stored `problems` truncated to 200 with
   `problemsTotal`, `fatal` unchanged; `resultMergedSet` / `resultRace` pass unchanged.
