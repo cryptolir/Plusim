@@ -12,7 +12,7 @@ vi.mock("@/lib/reportsAdminAuth", () => ({ authorizeReportsRequest: vi.fn() }));
 vi.mock("@/lib/db", () => ({
   db: {
     reportJob: { findUnique: vi.fn(), update: vi.fn(), delete: vi.fn() },
-    statementFile: { create: vi.fn(), count: vi.fn(), deleteMany: vi.fn() },
+    statementFile: { create: vi.fn(), count: vi.fn(), deleteMany: vi.fn(), findMany: vi.fn() },
     userDriveFolder: { findUnique: vi.fn() },
   },
 }));
@@ -52,7 +52,7 @@ const params = { params: Promise.resolve({ jobId: "jobA" }) };
 function appendReq(names = ["extra.pdf"]) {
   const fd = new FormData();
   for (const n of names) {
-    fd.append("files", new File([Buffer.from("%PDF-1.4 statement")], n, { type: "application/pdf" }));
+    fd.append("files", new File([Buffer.from(`%PDF-1.4 statement ${n}`)], n, { type: "application/pdf" }));
   }
   return new NextRequest("https://plusim.xyz/admin/api/reports/jobA/files", { method: "POST", body: fd });
 }
@@ -65,6 +65,7 @@ beforeEach(() => {
   folderFind.mockResolvedValue({ userId: "u1", folderId: "folder-1" });
   assertRoot.mockResolvedValue({ id: "folder-1" });
   fileCount.mockResolvedValue(0);
+  (db.statementFile.findMany as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
   uploadBin.mockResolvedValue({ id: "drive-new" });
   fileCreate.mockResolvedValue({ id: "row-new" });
   fileDeleteMany.mockResolvedValue({ count: 0 });

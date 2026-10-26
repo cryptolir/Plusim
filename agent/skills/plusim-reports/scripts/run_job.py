@@ -36,6 +36,7 @@ import urllib.request
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "vendor"))
 sys.path.insert(0, _HERE)
+from bank_rows import merge_bank_exports  # noqa: E402
 from build_report_xlsx import INCOME_SECTION, build_workbook  # noqa: E402
 from parse_bank_pdf import detect_bank_pdf, parse_bank_pdf  # noqa: E402
 from parse_discount_xlsx import parse_discount_xlsx  # noqa: E402
@@ -457,6 +458,7 @@ def cmd_prepare(args) -> None:
     bank_labels: set[str] = set()
     warnings: list[str] = []
     max_seq = 0
+    parsed: list[tuple[str, object]] = []
     for file in manifest["files"]:
         dest = safe_dest(files_dir, file["name"])
         http_download(file.get("url") or file["path"], dest)
@@ -471,6 +473,21 @@ def cmd_prepare(args) -> None:
         # the warning that would have named the file behind "transactions empty".
         if not r.transactions:
             warnings.append(f"{file['name']}: parsed 0 transactions — check the file covers a billed period")
+        parsed.append((file["name"], r))
+
+    # Overlapping exports of ONE bank account are collapsed here, before anything
+    # is categorized or deduplicated by key: each day's rows come from exactly one
+    # export, and an ambiguous day refuses the whole run naming the files
+    # (docs/plans/scale-large-statements.md A1). Card sources are untouched.
+    overlap_notes, merge_warnings, overlap_removed = merge_bank_exports(parsed)
+    warnings.extend(overlap_notes)
+    warnings.extend(merge_warnings)
+    merged_bank_labels = {
+        lbl for _, r in parsed for lbl in getattr(r, "bank_labels", ())
+    }
+    seen_labels: set[str] = set()
+
+    for _name, r in parsed:
         for t in r.transactions:
             kind = getattr(t, "kind", "expense")
             if kind == "settlement":
@@ -510,8 +527,11 @@ def cmd_prepare(args) -> None:
                 }
             )
         for label, total in r.source_totals.items():
-            if label in source_totals:
+            # A bank label shared by several exports was merged above (and its
+            # overlap noted); only a CARD label seen twice is still a surprise.
+            if label in seen_labels and label not in merged_bank_labels:
                 warnings.append(f"duplicate source label {label} across files")
+            seen_labels.add(label)
             source_totals[label] = total
         for label, cycles in getattr(r, "charge_cycles", {}).items():
             if cycles:
@@ -552,6 +572,7 @@ def cmd_prepare(args) -> None:
                 "files": len(manifest["files"]),
                 "transactions": len(all_txns),
                 "settlements": len(settlements),
+                "bankOverlapRemoved": overlap_removed,
                 "autoCategorized": sum(1 for t in all_txns if t["category"]),
                 "needsJudgment": len(shortlist),
                 "reportRules": bool(report_rules),

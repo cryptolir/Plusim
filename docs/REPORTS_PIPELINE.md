@@ -70,6 +70,12 @@ format, no schema change, and no agent-skill change.
   `needs_review` with per-source diagnostics, never a silent partial report.
 - **Month = transaction calendar month**, not billing month; charge amount
   after discounts/installments; credits negative; pending-vs-billed deduped.
+- **Overlapping bank exports** (`docs/plans/scale-large-statements.md` A1/B2): several exports of one
+  account are merged per calendar day in the skill (`bank_rows.merge_bank_exports`) using each
+  export's printed period; an inconsistent day refuses the run naming both files; a bank row's
+  dedup key carries its running balance. The app side adds `StatementFile.sha256` and refuses a
+  byte-identical file already on the job (409) before any Drive write. The app's
+  `duplicate dedupKey` fatal stays as the safety net.
 - **Bank statements** (`docs/plans/bank-statements.md`): detection runs the
   bank detector FIRST (both real bank exports also carry `ישראכרט` rows and
   slash dates, which the card detectors used to accept); completeness is the

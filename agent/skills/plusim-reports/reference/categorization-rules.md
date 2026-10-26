@@ -21,6 +21,16 @@ invariants the scripts enforce.
   "fixed" by adding/removing/adjusting rows to force agreement. A bank
   current-account export prints no total: its completeness is the intact
   running-balance chain (a break is a warning naming the row).
+- **Overlapping bank exports**: when several exports of one account overlap,
+  rows are merged **per calendar day** from exactly one export (the latest
+  period end, skipping an export known to be incomplete for that day); every
+  other export covering the day must show the same rows (equal, an earlier
+  export's older part of its last day, or one row fewer where a parser excluded
+  its oldest row). Anything else refuses the run naming both files and the day —
+  rows are never removed on content equality alone, because a purchase, its
+  refund and an identical second purchase repeat date, description, amount and
+  balance. A day no export covers, and a row whose successor balance is missing,
+  are warnings.
 - **Settlements** (bank statements): a bank *debit* whose payee is a card
   issuer (`SETTLEMENT_PAYEES` in `../scripts/bank_rows.py`, matched on whole
   tokens, observed strings only) pays a card statement that is itemized on its

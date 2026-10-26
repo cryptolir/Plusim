@@ -90,7 +90,12 @@ def parse_discount_xlsx(path: str) -> ParseResult:
         channel = str(row[7] or "").strip() if len(row) > 7 else ""
         balance = row[4] if len(row) > 4 else None
 
-        key = f"{label}|{voucher}" if voucher else f"{label}|{date}|{merchant}|{agorot}"
+        bal_agorot = _agorot(balance) if isinstance(balance, (int, float)) else None
+        if voucher:
+            key = f"{label}|{voucher}"
+        else:
+            # No voucher: the running balance separates identical same-day rows.
+            key = f"{label}|{date}|{merchant}|{agorot}" + (f"|{bal_agorot}" if bal_agorot is not None else "")
         direction, kind = classify_bank_row(merchant, agorot)
         res.transactions.append(
             Txn(
@@ -102,6 +107,8 @@ def parse_discount_xlsx(path: str) -> ParseResult:
                 note=channel,
                 direction=direction,
                 kind=kind,
+                balance_agorot=bal_agorot,
+                voucher=voucher,
             )
         )
         if isinstance(balance, (int, float)):

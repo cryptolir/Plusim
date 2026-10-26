@@ -65,6 +65,14 @@ python3 -m pip install --target /home/node/.openclaw/workspace/skills/plusim-rep
    judgment; every other debit is an ordinary expense. Nothing for you to do
    here either — never move a settlement back by hand.
 
+   Several exports of the SAME bank account (overlapping periods) are merged by
+   the scripts **day by day**: each day's rows come from exactly one export, and
+   the others must show the same rows. `prepare` prints the overlap as a note in
+   the summary (`bankOverlapRemoved`) and in `agentNotes`. If two exports
+   disagree about a day, `prepare` stops with a message naming both files and
+   the day — report it as `FAILED <jobId> <that message>`; never try to pick the
+   "right" rows yourself and never delete rows to make the files agree.
+
    Installment rows (`תשלום N מתוך M`, incl. the `קרדיט` wording) are re-dated
    here: statements print the ORIGINAL DEAL date on them, so each is moved to
    the charge date of the total block that closes it — falling back to the

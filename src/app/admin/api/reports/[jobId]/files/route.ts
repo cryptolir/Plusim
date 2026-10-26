@@ -28,6 +28,7 @@ import { authorizeReportsRequest } from "@/lib/reportsAdminAuth";
 import { trashFile } from "@/lib/googleDrive";
 import {
   prepareStatements,
+  refuseDuplicateStatements,
   resolveTargetFolder,
   uploadStatements,
   type WrittenStatement,
@@ -61,6 +62,10 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
   }
   const prepared = await prepareStatements(form);
   if (prepared instanceof NextResponse) return prepared;
+
+  // Byte-identical files are refused before any Drive write (plan B2).
+  const duplicate = await refuseDuplicateStatements(prepared, jobId);
+  if (duplicate) return duplicate;
 
   const folderId = await resolveTargetFolder(job.targetUserId);
   if (folderId instanceof NextResponse) return folderId;
