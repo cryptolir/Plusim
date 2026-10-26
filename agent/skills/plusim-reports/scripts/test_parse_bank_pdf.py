@@ -176,7 +176,7 @@ class TestHapoalim(unittest.TestCase):
 
     def test_hapoalim_dedup_key_shape(self):
         self.assertEqual(
-            self.by["ע.מפעולות-ישיר"].dedup_key, "hapoalim-1812|2026-10-04|ע.מפעולות-ישיר|3850|1"
+            self.by["ע.מפעולות-ישיר"].dedup_key, "hapoalim-1812|2026-10-04|ע.מפעולות-ישיר|3850|100000"
         )
 
     def test_balance_chain_break_is_a_warning_not_a_drop(self):

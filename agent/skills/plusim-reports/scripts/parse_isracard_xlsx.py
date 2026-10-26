@@ -37,6 +37,10 @@ class Txn:
     # defaults: every card row is a debit-side expense (credits are refunds).
     direction: str = "debit"  # "debit" | "credit"
     kind: str = "expense"  # "expense" | "credit" | "settlement"
+    # Running balance printed AFTER this row (bank rows only). Part of the dedup
+    # key and the identity compared when overlapping exports are merged
+    # (docs/plans/scale-large-statements.md A1).
+    balance_agorot: int | None = None
 
 
 @dataclass
@@ -53,6 +57,15 @@ class ParseResult:
     # card source that merely lacks a printed total (MAX -pending) is never
     # mistaken for a bank: income may only come from these (verify_report.py).
     bank_labels: set[str] = field(default_factory=set)
+    # Bank sources only. label -> (from, to) ISO dates the export PRINTS as its
+    # period (min/max of the two printed dates — RTL prints them in either order);
+    # absent ⇒ the merge falls back to the min/max row date, which can only
+    # under-claim coverage.
+    periods: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # label -> days on which this parser EXCLUDED a row (Leumi's oldest row when
+    # its amount cannot be derived). The merge never prefers an export for a day
+    # it is known to be incomplete for when another export covers that day.
+    incomplete_days: dict[str, set[str]] = field(default_factory=dict)
 
 
 def _agorot(v) -> int:

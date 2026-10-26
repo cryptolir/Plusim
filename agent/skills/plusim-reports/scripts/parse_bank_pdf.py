@@ -41,6 +41,8 @@ HAPOALIM_MARKER = "bankhapoalim.co.il"
 LEUMI_MARKER = "בנק לאומי"
 STATEMENT_MARKER = "תנועות בחשבון"
 
+HAPOALIM_PERIOD_RE = re.compile(r"^(\d{2}/\d{2}/\d{4})-(\d{2}/\d{2}/\d{4})$")
+LEUMI_PERIOD_RE = re.compile(r"(\d{2})\.(\d{2})\.(\d{2})-(\d{2})\.(\d{2})\.(\d{2})")
 HAPOALIM_ROW_RE = re.compile(r"^(\d{2}/\d{2}/\d{4})(.+?)([\d,]+\.\d{2})₪(-?[\d,]+\.\d{2})##([12])$")
 # Locates a Leumi row and its balance only — the amount is derived from the
 # balance chain because the reference is glued to it (see module doc).
@@ -63,6 +65,31 @@ def _fmt(agorot: int) -> str:
 def _iso(d: str) -> str:
     dd, mm, yyyy = d.split("/")
     return f"{yyyy}-{mm}-{dd}"
+
+
+def _hapoalim_period(lines: list[str]) -> tuple[str, str] | None:
+    """`06/10/2026-06/04/2026` — the printed period. Min/max, because the RTL
+    print order puts the END first."""
+    for ln in lines:
+        m = HAPOALIM_PERIOD_RE.match(ln.strip())
+        if m:
+            a, b = _iso(m.group(1)), _iso(m.group(2))
+            return (min(a, b), max(a, b))
+    return None
+
+
+def _leumi_period(lines: list[str]) -> tuple[str, str] | None:
+    """`בין התאריכים01.03.26-06.10.26` — the printed period."""
+    for ln in lines:
+        s = ln.replace(ZWSP, "")
+        if "בין התאריכים" not in s:
+            continue
+        m = LEUMI_PERIOD_RE.search(s)
+        if m:
+            d1, m1, y1, d2, m2, y2 = m.groups()
+            a, b = f"20{y1}-{m1}-{d1}", f"20{y2}-{m2}-{d2}"
+            return (min(a, b), max(a, b))
+    return None
 
 
 def _text(path: str) -> tuple[str, list[str]]:
@@ -139,7 +166,7 @@ def _parse_hapoalim(path: str, lines: list[str]) -> ParseResult:
         located.append((_iso(date_s), desc + amount_s, amount, _agorot(balance_s)))
 
     chain: list[tuple[int, int, str]] = []
-    rows: list[tuple[str, str, int]] = []
+    rows: list[tuple[str, str, int, int]] = []
     for i, (date, glued, rx_amount, bal) in enumerate(located):
         amount, desc = rx_amount, glued[: -len(_fmt(rx_amount))].strip()
         if i + 1 < len(located):
@@ -155,12 +182,15 @@ def _parse_hapoalim(path: str, lines: list[str]) -> ParseResult:
                 and (delta_amount < 0) == (rx_amount < 0)
             ):
                 amount, desc = delta_amount, glued[: -len(suffix)].strip()
-        rows.append((date, desc, amount))
+        rows.append((date, desc, amount, bal))
         chain.append((amount, bal, f"{date} {desc}"))
     _emit(res, label, rows, notes=None)
     res.warnings.extend(check_balance_chain(chain, path))
     res.source_totals[label] = None
     res.bank_labels.add(label)
+    period = _hapoalim_period(lines)
+    if period:
+        res.periods[label] = period
     if not res.transactions:
         res.warnings.append(f"{path}: no transactions parsed")
     return res
@@ -230,23 +260,29 @@ def _parse_leumi(path: str, lines: list[str]) -> ParseResult:
                 sib = []
         if not sib:
             dropped = i
+            # Recorded so a merge with a neighbouring export recovers this row
+            # from the export that holds it (plan A1, Codex round 2).
+            res.incomplete_days.setdefault(label, set()).add(date)
             res.warnings.append(
                 f"{path}: {desc} {date}: oldest row — no older balance and no sibling reference; excluded"
             )
 
-    rows: list[tuple[str, str, int]] = []
+    rows: list[tuple[str, str, int, int]] = []
     notes: list[str] = []
     chain: list[tuple[int, int, str]] = []
     for i, (date, desc, _glued, bal) in enumerate(located):
         if i == dropped or amounts[i] is None:
             continue
-        rows.append((date, desc, amounts[i]))
+        rows.append((date, desc, amounts[i], bal))
         notes.append(f"אסמכתא {refs[i]}" if refs[i] else "")
         chain.append((amounts[i], bal, f"{date} {desc}"))
     _emit(res, label, rows, notes)
     res.warnings.extend(check_balance_chain(chain, path))
     res.source_totals[label] = None
     res.bank_labels.add(label)
+    period = _leumi_period(lines)
+    if period:
+        res.periods[label] = period
     if not res.transactions:
         res.warnings.append(f"{path}: no transactions parsed")
     return res
@@ -257,11 +293,21 @@ def _parse_leumi(path: str, lines: list[str]) -> ParseResult:
 # ────────────────────────────────────────────────────────────────────
 
 
-def _emit(res: ParseResult, label: str, rows: list[tuple[str, str, int]], notes: list[str] | None) -> None:
-    seq: dict[str, int] = {}
-    for i, (date, desc, amount) in enumerate(rows):
-        base = f"{label}|{date}|{desc}|{amount}"
-        seq[base] = seq.get(base, 0) + 1
+def _emit(
+    res: ParseResult,
+    label: str,
+    rows: list[tuple[str, str, int, int]],
+    notes: list[str] | None,
+) -> None:
+    """Key = `label|date|description|amount|balance_after`, plus `|<n>` ONLY on an
+    exact repeat within this file (a purchase, its refund and an identical second
+    purchase repeat the whole tuple). The key is unique within one file; whether
+    two FILES hold the same physical row is decided by bank_rows.merge_bank_exports
+    from the exports' periods, never from key equality."""
+    seen: dict[str, int] = {}
+    for i, (date, desc, amount, balance) in enumerate(rows):
+        base = f"{label}|{date}|{desc}|{amount}|{balance}"
+        seen[base] = seen.get(base, 0) + 1
         direction, kind = classify_bank_row(desc, amount)
         res.transactions.append(
             Txn(
@@ -269,10 +315,11 @@ def _emit(res: ParseResult, label: str, rows: list[tuple[str, str, int]], notes:
                 merchant=desc,
                 amount_agorot=amount,
                 source_label=label,
-                dedup_key=f"{base}|{seq[base]}",
+                dedup_key=base if seen[base] == 1 else f"{base}|{seen[base]}",
                 note=notes[i] if notes else "",
                 direction=direction,
                 kind=kind,
+                balance_agorot=balance,
             )
         )
 

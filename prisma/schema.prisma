@@ -110,10 +110,15 @@ model StatementFile {
   driveFileId   String
   driveFolderId String
   sourceLabel   String? // e.g. "isracard-4962", "max"
+  // sha256 hex of the uploaded bytes, set at upload (null on rows from before the
+  // column): an identical re-upload to the same job is refused, and a later
+  // parse cache can key on it (docs/plans/scale-large-statements.md B2).
+  sha256        String?
   createdAt     DateTime  @default(now())
   job           ReportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
 
   @@index([jobId])
+  @@index([jobId, sha256])
 }
 
 model ReportArtifact {

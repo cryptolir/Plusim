@@ -12,6 +12,7 @@
  * Rollback differs per caller and stays there: create drops the whole job,
  * append removes only what it just added.
  */
+import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import {
@@ -29,6 +30,8 @@ export interface PreparedStatement {
   mime: string;
   size: number;
   bytes: Buffer;
+  /** sha256 hex of `bytes` — identical-file refusal and the future parse cache key. */
+  sha256: string;
 }
 
 function sniffMime(name: string, buf: Buffer): string | null {
@@ -61,9 +64,54 @@ export async function prepareStatements(form: FormData): Promise<PreparedStateme
         { status: 400 },
       );
     }
-    prepared.push({ filename: f.name.slice(0, 200), mime, size: bytes.length, bytes });
+    prepared.push({
+      filename: f.name.slice(0, 200),
+      mime,
+      size: bytes.length,
+      bytes,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    });
   }
   return prepared;
+}
+
+/**
+ * Refuse byte-identical statements (docs/plans/scale-large-statements.md B2):
+ *  - two identical files in the SAME request, and
+ *  - when `jobId` is given (append), a file whose bytes are already on THIS job.
+ * The same bytes on ANOTHER job are fine — that is a different report. An identical
+ * file can never add a transaction, but an overlapping re-export is the normal case
+ * and is merged by the agent; this only stops the exact re-upload before it costs a
+ * Drive write and a parse. Returns a NextResponse to return as-is, or null.
+ */
+export async function refuseDuplicateStatements(
+  prepared: PreparedStatement[],
+  jobId?: string,
+): Promise<NextResponse | null> {
+  const first = new Map<string, string>();
+  for (const p of prepared) {
+    const earlier = first.get(p.sha256);
+    if (earlier !== undefined) {
+      return NextResponse.json(
+        { error: `${p.filename}: זהה לקובץ ${earlier} שנבחר באותה העלאה` },
+        { status: 409 },
+      );
+    }
+    first.set(p.sha256, p.filename);
+  }
+  if (!jobId) return null;
+  const existing = await db.statementFile.findMany({
+    where: { jobId, sha256: { in: prepared.map((p) => p.sha256) } },
+    select: { sha256: true, filename: true },
+  });
+  if (existing.length > 0) {
+    const hit = prepared.find((p) => p.sha256 === existing[0].sha256)!;
+    return NextResponse.json(
+      { error: `${hit.filename}: הקובץ כבר הועלה לעבודה הזו (${existing[0].filename})` },
+      { status: 409 },
+    );
+  }
+  return null;
 }
 
 /**
@@ -134,6 +182,7 @@ export async function uploadStatements(opts: {
         size: p.size,
         driveFileId: entry.id,
         driveFolderId: opts.folderId,
+        sha256: p.sha256,
       },
       select: { id: true },
     });

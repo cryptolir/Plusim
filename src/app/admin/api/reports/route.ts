@@ -16,6 +16,7 @@ import { authorizeReportsRequest } from "@/lib/reportsAdminAuth";
 import { trashFile } from "@/lib/googleDrive";
 import {
   prepareStatements,
+  refuseDuplicateStatements,
   resolveTargetFolder,
   uploadStatements,
   type WrittenStatement,
@@ -41,6 +42,10 @@ export async function POST(req: NextRequest) {
 
   const prepared = await prepareStatements(form);
   if (prepared instanceof NextResponse) return prepared;
+
+  // A new job has no files yet: only identical files inside this request can clash.
+  const duplicate = await refuseDuplicateStatements(prepared);
+  if (duplicate) return duplicate;
 
   // Precondition: Drive connected + the target user has an assigned folder that
   // is still under the root (re-contained at write time).
