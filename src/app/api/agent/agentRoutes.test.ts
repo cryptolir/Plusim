@@ -32,6 +32,7 @@ import { sha256Hex } from "@/lib/agentRuntimeAuth";
 import { GET as manifestGET } from "./jobs/[jobId]/manifest/route";
 import { GET as filesGET } from "./jobs/[jobId]/files/[fileId]/route";
 import { POST as resultPOST } from "./jobs/[jobId]/result/route";
+import { POST as dictionaryPOST } from "./jobs/[jobId]/dictionary/route";
 
 const RUNTIME = "runtime-secret";
 const TOKEN = "job-token";
@@ -83,6 +84,27 @@ describe("each public agent route invokes the guard", () => {
     jobFind.mockResolvedValue(validJob());
     const res = await resultPOST(req("jobs/jobA/result", { bearer: RUNTIME, t: "wrong" }), params({ jobId: "jobA" }));
     expect(res.status).toBe(404);
+  });
+  it("dictionary: missing bearer → 401", async () => {
+    const res = await dictionaryPOST(req("jobs/jobA/dictionary", { t: TOKEN }), params({ jobId: "jobA" }));
+    expect(res.status).toBe(401);
+    expect(db.merchantMapping.findMany).not.toHaveBeenCalled();
+  });
+  it("dictionary: valid bearer + WRONG per-job token → 404", async () => {
+    jobFind.mockResolvedValue(validJob());
+    const res = await dictionaryPOST(req("jobs/jobA/dictionary", { bearer: RUNTIME, t: "wrong" }), params({ jobId: "jobA" }));
+    expect(res.status).toBe(404);
+    expect(db.merchantMapping.findMany).not.toHaveBeenCalled();
+  });
+  it("manifest: carries the dictionary resolve URL with the job token", async () => {
+    jobFind.mockResolvedValue(validJob());
+    (db.statementFile.findMany as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (db.merchantMapping.findMany as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    const res = await manifestGET(req("jobs/jobA/manifest", { bearer: RUNTIME, t: TOKEN }), params({ jobId: "jobA" }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.dictionaryResolveUrl).toMatch(/\/api\/agent\/jobs\/jobA\/dictionary\?t=job-token$/);
+    expect(body.merchantDictionary).toEqual([]);
   });
 });
 

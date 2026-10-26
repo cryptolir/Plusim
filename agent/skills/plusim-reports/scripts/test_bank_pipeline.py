@@ -251,7 +251,9 @@ class TestPrepareMovesSettlements(unittest.TestCase):
                 },
             )
             args = mock.Mock(workdir=w.wd, manifest_file=os.path.join(w.wd, "manifest.json"), manifest_url=None)
-            with mock.patch.object(R, "parse_pdf_auto", lambda *a: res), mock.patch("builtins.print"):
+            with mock.patch.object(R, "parse_pdf_auto", lambda *a: res), mock.patch.object(
+                R, "check_pdf_pages", lambda *a: None
+            ), mock.patch("builtins.print"):
                 R.cmd_prepare(args)
             state = w.read("state.json")
         finally:
