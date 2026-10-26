@@ -69,6 +69,20 @@ admin):
 | `PLUSIM_DRIVE_ROOT_FOLDER_ID` | The shared Drive root that contains every client subfolder |
 | `DRIVE_TOKEN_ENCRYPTION_KEY` / `DRIVE_OAUTH_STATE_SECRET` | `openssl rand -base64 32` each |
 
+## Python in the image (report workbook rebuild)
+
+`nixpacks.toml` at the repo root adds Python 3 with `openpyxl` to the Nixpacks setup
+phase of **both** services (web and worker build from the same repo). The web app runs
+`agent/skills/plusim-reports/scripts/build_report_xlsx.py` to rebuild a report's Excel
+after a chat adjustment (docs/plans/report-adjust-chat.md B7–B8). After a deploy, check:
+
+- the build log lists the Python package in the setup phase, and
+- the worker log shows `[workbook] python3 + openpyxl available` (an error line there
+  means chat edits will report "the Excel was not updated" until the image is fixed;
+  publishing rebuilds the Excel once it is).
+
+Rollback: delete `nixpacks.toml`. Edits still apply; only the Excel rebuild stops.
+
 ## Report-dispatch worker (second Coolify service, same repo)
 
 Report jobs are dispatched by a dedicated worker

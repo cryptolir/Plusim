@@ -59,9 +59,21 @@ import { useEffect, useState, type FC } from "react";
 // and the live Composer is swapped for a non-interactive placeholder, so no send
 // — composer OR suggestion — can fire before the conversation id / history is
 // ready. See docs/plans/chat-bootstrap.md (P1c/P1e).
-export const Thread: FC<{ firstName?: string | null; sendEnabled?: boolean }> = ({
+// The welcome props are optional and default to the home chat's copy, so the
+// existing callers render byte-identically; the report "שיחה עם הסוכן" tab
+// passes its own (docs/plans/report-adjust-chat.md C1).
+interface WelcomeProps {
+  welcomeTitle?: string;
+  welcomeSubtitle?: string;
+  showSuggestions?: boolean;
+}
+
+export const Thread: FC<{ firstName?: string | null; sendEnabled?: boolean } & WelcomeProps> = ({
   firstName,
   sendEnabled = true,
+  welcomeTitle,
+  welcomeSubtitle,
+  showSuggestions = true,
 }) => {
   return (
     <ThreadPrimitive.Root
@@ -79,7 +91,13 @@ export const Thread: FC<{ firstName?: string | null; sendEnabled?: boolean }> = 
       >
         <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col px-4 pt-4">
           <AuiIf condition={(s) => s.thread.isEmpty}>
-            <ThreadWelcome firstName={firstName} sendEnabled={sendEnabled} />
+            <ThreadWelcome
+              firstName={firstName}
+              sendEnabled={sendEnabled}
+              welcomeTitle={welcomeTitle}
+              welcomeSubtitle={welcomeSubtitle}
+              showSuggestions={showSuggestions}
+            />
           </AuiIf>
 
           <div
@@ -174,9 +192,12 @@ const ThreadScrollToBottom: FC = () => {
   );
 };
 
-const ThreadWelcome: FC<{ firstName?: string | null; sendEnabled?: boolean }> = ({
+const ThreadWelcome: FC<{ firstName?: string | null; sendEnabled?: boolean } & WelcomeProps> = ({
   firstName,
   sendEnabled = true,
+  welcomeTitle,
+  welcomeSubtitle,
+  showSuggestions = true,
 }) => {
   return (
     <div className="aui-thread-welcome-root my-auto flex grow flex-col">
@@ -185,10 +206,10 @@ const ThreadWelcome: FC<{ firstName?: string | null; sendEnabled?: boolean }> = 
           <AgentAvatar className="fade-in zoom-in-75 animate-in fill-mode-both size-16 shadow-md duration-300" />
           <div>
             <h1 className="aui-thread-welcome-message-inner fade-in slide-in-from-bottom-1 animate-in fill-mode-both bg-gradient-to-l from-emerald-600 to-teal-500 bg-clip-text font-heading text-3xl text-transparent duration-200">
-              {firstName ? `שלום, ${firstName}!` : "שלום!"}
+              {welcomeTitle ?? (firstName ? `שלום, ${firstName}!` : "שלום!")}
             </h1>
             <p className="aui-thread-welcome-message-inner fade-in slide-in-from-bottom-1 animate-in fill-mode-both text-muted-foreground mt-1 text-xl delay-75 duration-200">
-              איך אוכל לעזור לך היום?
+              {welcomeSubtitle ?? "איך אוכל לעזור לך היום?"}
             </p>
           </div>
         </div>
@@ -196,7 +217,7 @@ const ThreadWelcome: FC<{ firstName?: string | null; sendEnabled?: boolean }> = 
       {/* Suggestions are a send entry point (SuggestionPrimitive.Trigger send) —
           withhold them until the page enables sending, or a click could fire a
           send before the conversation id / history is ready. */}
-      {sendEnabled && <ThreadSuggestions />}
+      {sendEnabled && showSuggestions && <ThreadSuggestions />}
     </div>
   );
 };

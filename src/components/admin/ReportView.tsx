@@ -26,6 +26,7 @@ import {
   type AnalysisTxn,
 } from "@/lib/reportAnalysis";
 import { IncomeBlock } from "@/components/report/IncomeBlock";
+import { ReportChatTab } from "@/components/admin/ReportChatTab";
 
 /** "8/12" chip for an installment row — display-only, read from the note. */
 function InstallmentBadge({ note }: { note: string | null | undefined }) {
@@ -41,13 +42,14 @@ function InstallmentBadge({ note }: { note: string | null | undefined }) {
   );
 }
 
-type Tab = "matrix" | "distribution" | "transactions" | "uncategorized";
+type Tab = "matrix" | "distribution" | "transactions" | "uncategorized" | "agent";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "matrix", label: "ניתוח תוצאות" },
   { id: "distribution", label: "התפלגות ההוצאות" },
   { id: "transactions", label: "פירוט תנועות" },
   { id: "uncategorized", label: "ללא סיווג" },
+  { id: "agent", label: "שיחה עם הסוכן" },
 ];
 
 /**
@@ -139,11 +141,13 @@ export function ReportView({
   analysis,
   transactions,
   taxonomy,
+  saveToken,
 }: {
   job: { id: string; title: string; user: string; publishedAt: string | null; sheetUrl: string | null };
   analysis: Analysis;
   transactions: AnalysisTxn[];
   taxonomy: TaxonomySection[];
+  saveToken: string;
 }) {
   const [tab, setTab] = useState<Tab>("matrix");
   const [open, setOpen] = useState<Set<string>>(new Set());
@@ -292,7 +296,10 @@ export function ReportView({
         </nav>
       </header>
 
-      {allMonths.length === 0 ? (
+      {tab === "agent" ? (
+        // Independent of the month filter: the chat talks about the whole report.
+        <ReportChatTab jobId={job.id} saveToken={saveToken} />
+      ) : allMonths.length === 0 ? (
         <p className="rounded-xl border p-6 text-center text-muted-foreground">
           אין תנועות בדוח הזה.
         </p>

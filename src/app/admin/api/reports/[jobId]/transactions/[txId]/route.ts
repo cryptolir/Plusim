@@ -35,27 +35,22 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeReportsRequest } from "@/lib/reportsAdminAuth";
 import { getMergedTaxonomy, getValidLeafSet } from "@/lib/reportCategories";
-import { isIncomeLeaf, type TxnKind } from "@/config/reportTaxonomy";
+import { type TxnKind } from "@/config/reportTaxonomy";
 import { bankSources } from "@/lib/reportAnalysis";
+import {
+  AGENT_OWNS_ROWS,
+  EDIT_ERRORS,
+  checkCategory,
+  incomeRowError,
+  kindForCategory,
+  normalizeDate,
+} from "@/lib/reportEdits";
 
 export const dynamic = "force-dynamic";
 
-/** Statuses during which the agent owns the transaction rows. */
-const AGENT_OWNS_ROWS = ["dispatched", "processing"];
-
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-/**
- * A calendar date, or null. The shape test alone accepts 2026-02-31, which
- * Date() silently rolls forward to March 3 — so the parsed value must render
- * back to the same string. Exported for direct testing.
- */
-export function normalizeDate(raw: unknown): string | null {
-  if (typeof raw !== "string" || !DATE_RE.test(raw)) return null;
-  const d = new Date(`${raw}T00:00:00Z`);
-  if (Number.isNaN(d.getTime())) return null;
-  return d.toISOString().slice(0, 10) === raw ? raw : null;
-}
+// The date rule lives in reportEdits.ts (shared with the agent adjust route);
+// re-exported here for the existing direct tests.
+export { normalizeDate };
 
 export async function PATCH(
   req: NextRequest,
@@ -86,10 +81,12 @@ export async function PATCH(
   let category = "";
   let incomeLeaf = false;
   if (wantsCategory) {
-    category = typeof body.category === "string" ? body.category : "";
-    if (!(await getValidLeafSet()).has(category)) {
-      return NextResponse.json({ error: "קטגוריה לא מוכרת" }, { status: 400 });
-    }
+    const checked = checkCategory(body.category, {
+      validLeaves: await getValidLeafSet(),
+      taxonomy: await getMergedTaxonomy(),
+    });
+    if ("error" in checked) return NextResponse.json({ error: checked.error }, { status: 400 });
+    category = checked.category;
     // Income invariant (docs/plans/bank-statements.md B5): an הכנסות leaf makes
     // the row income and is allowed only on a bank credit (negative amount from
     // a source with no printed total); any other leaf makes it an expense — for
@@ -97,32 +94,28 @@ export async function PATCH(
     // category so the two can never diverge (verification treats a mismatch as
     // fatal). The pre-read is for validation only; the write below is still the
     // one conditional statement.
-    incomeLeaf = isIncomeLeaf(category, await getMergedTaxonomy());
+    incomeLeaf = checked.incomeLeaf;
     if (incomeLeaf) {
       const row = await db.reportTransaction.findFirst({
         where: { id: txId, jobId },
         select: { amountAgorot: true, sourceLabel: true, job: { select: { verification: true } } },
       });
       if (!row) return NextResponse.json({ error: "העסקה לא נמצאה" }, { status: 404 });
-      if (row.amountAgorot >= 0) {
-        return NextResponse.json({ error: "קטגוריית הכנסה אפשרית רק לזיכוי (סכום שלילי)" }, { status: 400 });
-      }
       // Bank-ness is the parser's explicit flag on the stored verification
       // (perSource[].bank) — never "no printed total". Fails closed on a null
       // or old-shape verification.
-      if (!bankSources(row.job.verification).has(row.sourceLabel)) {
-        return NextResponse.json({ error: "קטגוריית הכנסה אפשרית רק לשורה מחשבון בנק" }, { status: 400 });
-      }
+      const err = incomeRowError(row, bankSources(row.job.verification));
+      if (err) return NextResponse.json({ error: err }, { status: 400 });
     }
     data.category = category;
     data.uncategorized = false;
-    data.kind = incomeLeaf ? "income" : "expense";
+    data.kind = kindForCategory(incomeLeaf);
   }
 
   if (wantsDate) {
     const date = normalizeDate(body.date);
     if (!date) {
-      return NextResponse.json({ error: "תאריך לא תקין" }, { status: 400 });
+      return NextResponse.json({ error: EDIT_ERRORS.badDate }, { status: 400 });
     }
     // month is derived here, in the same write, so the two can never diverge —
     // a mismatch is a FATAL verification problem (reportResult.ts).

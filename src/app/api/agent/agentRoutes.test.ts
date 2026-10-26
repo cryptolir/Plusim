@@ -33,6 +33,8 @@ import { GET as manifestGET } from "./jobs/[jobId]/manifest/route";
 import { GET as filesGET } from "./jobs/[jobId]/files/[fileId]/route";
 import { POST as resultPOST } from "./jobs/[jobId]/result/route";
 import { POST as dictionaryPOST } from "./jobs/[jobId]/dictionary/route";
+import { GET as rowsGET } from "./jobs/[jobId]/rows/route";
+import { POST as adjustPOST } from "./jobs/[jobId]/adjust/route";
 
 const RUNTIME = "runtime-secret";
 const TOKEN = "job-token";
@@ -105,6 +107,22 @@ describe("each public agent route invokes the guard", () => {
     const body = await res.json();
     expect(body.dictionaryResolveUrl).toMatch(/\/api\/agent\/jobs\/jobA\/dictionary\?t=job-token$/);
     expect(body.merchantDictionary).toEqual([]);
+  });
+});
+
+describe("adjustment-chat routes invoke the adjust guard (report-adjust-chat B5)", () => {
+  it.each([
+    ["rows", () => rowsGET(req("jobs/jobA/rows", { t: TOKEN }), params({ jobId: "jobA" }))],
+    ["adjust", () => adjustPOST(req("jobs/jobA/adjust", { t: TOKEN }), params({ jobId: "jobA" }))],
+  ])("%s: missing bearer → 401", async (_n, call) => {
+    expect((await call()).status).toBe(401);
+  });
+  it.each([
+    ["rows", () => rowsGET(req("jobs/jobA/rows", { bearer: RUNTIME, t: TOKEN }), params({ jobId: "jobA" }))],
+    ["adjust", () => adjustPOST(req("jobs/jobA/adjust", { bearer: RUNTIME, t: TOKEN }), params({ jobId: "jobA" }))],
+  ])("%s: a valid RUN token is not an adjust token → 404", async (_n, call) => {
+    jobFind.mockResolvedValue(validJob({ status: "published" }));
+    expect((await call()).status).toBe(404);
   });
 });
 

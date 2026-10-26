@@ -86,12 +86,23 @@ model ReportJob {
   dispatchedAt  DateTime?
   completedAt   DateTime?
   publishedAt   DateTime?
+  // "Ask the agent" adjustment turn (docs/plans/report-adjust-chat.md B1):
+  //   adjustTokenHash/ExpiresAt — sha256 of a per-turn token, cleared when the turn ends
+  //   adjustGeneration          — dispatchedAt the token was minted for (a re-run voids it)
+  //   rowsRevision              — bumped by every applied adjust
+  //   artifactRevision          — rowsRevision the stored workbook was built from
+  adjustTokenHash      String?
+  adjustTokenExpiresAt DateTime?
+  adjustGeneration     DateTime?
+  rowsRevision         Int       @default(0)
+  artifactRevision     Int       @default(0)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
   files         StatementFile[]
   artifacts     ReportArtifact[]
   transactions  ReportTransaction[]
   settlements   ReportSettlement[]
+  chatMessages  ReportChatMessage[]
 
   @@index([targetUserId, publishedAt(sort: Desc)])
 }
@@ -119,6 +130,22 @@ model StatementFile {
 
   @@index([jobId])
   @@index([jobId, sha256])
+}
+
+// The admin's "שיחה עם הסוכן" thread for one job. `generation` is the job's
+// dispatchedAt for the turn, so a re-run starts a clean thread and a reply that
+// lands after a re-run stays filed under the old one.
+model ReportChatMessage {
+  id         String    @id @default(cuid())
+  jobId      String
+  role       String // "user" | "assistant"
+  content    String
+  actor      String? // admin email for user messages
+  generation DateTime
+  createdAt  DateTime  @default(now())
+  job        ReportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, generation, createdAt])
 }
 
 model ReportArtifact {

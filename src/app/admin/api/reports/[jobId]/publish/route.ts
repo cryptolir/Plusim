@@ -29,6 +29,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { authorizeReportsRequest } from "@/lib/reportsAdminAuth";
+import { ensureFreshWorkbook } from "@/lib/reportWorkbook";
 import {
   isDriveConnected,
   assertEntryUnderRoot,
@@ -49,6 +50,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
   if (auth instanceof NextResponse) return auth;
 
   const { jobId } = await ctx.params;
+  // A chat adjustment whose workbook rebuild failed leaves the stored artifact
+  // older than the rows; rebuild it now, from the rows, before anything is
+  // exported (docs/plans/report-adjust-chat.md B7a). A no-op for a job never
+  // adjusted. Whether it worked is decided by the snapshot check below.
+  await ensureFreshWorkbook(jobId);
   // ONE consistent snapshot of the job AND the artifact it will export, so every
   // guard below and the Drive write all refer to the SAME state. Reading the
   // artifact separately at export time would let a callback landing mid-publish
@@ -75,6 +81,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
           verification: true,
           dispatchedAt: true,
           completedAt: true,
+          rowsRevision: true,
+          artifactRevision: true,
         },
       }),
       db.reportArtifact.findFirst({ where: { jobId }, orderBy: { createdAt: "desc" } }),
@@ -96,6 +104,14 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
   if (fatal) {
     return NextResponse.json(
       { error: "לא ניתן לפרסם — באימות הדוח נמצאו בעיות חמורות; יש להריץ את הסוכן מחדש" },
+      { status: 409 },
+    );
+  }
+  // Workbook freshness: the artifact must reflect the rows' latest chat edits,
+  // or the Sheet would disagree with the online report (plan B7a).
+  if (job.artifactRevision < job.rowsRevision) {
+    return NextResponse.json(
+      { error: "האקסל לא תואם לתיקונים האחרונים — נסו לפרסם שוב בעוד רגע" },
       { status: 409 },
     );
   }

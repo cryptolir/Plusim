@@ -18,6 +18,7 @@ import {
 } from "@/lib/reportQueue";
 import { handleReportDispatch, handleReportDispatchDead } from "./dispatch";
 import { reconcileExpiredProcessing } from "./reconcile";
+import { checkWorkbookBuilder } from "@/lib/workbookBuilder";
 
 const RECONCILE_INTERVAL_MS = 60 * 60 * 1000;
 
@@ -53,6 +54,10 @@ async function main(): Promise<void> {
   setInterval(() => {
     void reconcileExpiredProcessing().catch((e) => console.error("[worker] reconcile failed:", e));
   }, RECONCILE_INTERVAL_MS).unref();
+
+  // Same image as the web service: one clear line if the workbook builder
+  // cannot run, before an admin's chat edit finds out (report-adjust-chat B8).
+  void checkWorkbookBuilder();
 
   console.log("[worker] report-dispatch worker started (concurrency 1)");
 
