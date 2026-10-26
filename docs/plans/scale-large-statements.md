@@ -8,7 +8,7 @@
 > *Delivery*.
 >
 > **Review log:**
-> - Rev 2 — **Codex round 1** (3 findings, all accepted):
+> - Rev 2 — **Codex round 1** (4 findings, all accepted):
 >   **P1** the balance-keyed *set union* silently removes a real row when one export holds
 >   `purchase ₪10 → 90`, `refund → 100` and another holds a second identical `purchase → 90` on
 >   the same date (reproduced by the reviewer) — **cross-file dedup is now a per-day partition
@@ -22,6 +22,11 @@
 >   **P2** staging was bounded only at commit — **bounded at ingestion**: `seq` range, per-chunk
 >   rows/bytes, cumulative row/byte quota checked atomically under the job-row lock, a single
 >   artifact slot (B1, B5; tests `test_chunk_over_quota_is_rejected_before_persistence`, …).
+>   **P1** a cache hit skips the download, so it also skipped the existing route's Drive
+>   containment checks (current `UserDriveFolder` binding + `assertEntryUnderFolder`) — **the parse
+>   cache routes now run the identical checks, extracted into one shared helper used by both the
+>   file download and the cache routes** (A4, B4; tests for reassigned folder, moved file, stale
+>   `driveFolderId`).
 > - Rev 1 — authored from (a) an overlapping-export experiment on the two real bank statements
 >   and (b) a 1k / 5k / 20k synthetic scale measurement of the current pipeline, both below, plus
 >   a file-anchored read of the caps. Minimalism pass done by hand (the `ponytail-review` skill is
@@ -197,7 +202,8 @@ capability (`cryptolir/openclaw-dashboard#811`) is not touched and nothing here 
   exactly as it consumes `dictionary` today (`run_job.py:523-527`). **Fallback:** a manifest without
   `dictionaryResolveUrl` (old app) uses the inline `merchantDictionary`, byte-for-byte today's path.
 - **A4. Per-file parse cache.** Manifest file entries gain `sha256`, `parsedUrl`. For each file:
-  `GET parsedUrl?v=<PARSER_VERSION>`; **hit** ⇒ skip download and parse; **miss** ⇒ download, parse,
+  `GET parsedUrl?v=<PARSER_VERSION>` (the route enforces the same Drive containment as the
+  download, B4); **hit** ⇒ skip the byte download and the parse; **miss** ⇒ download, parse,
   `PUT` the serialized `ParseResult` (transactions, source totals, charge cycles, bank labels,
   warnings, **and the `sourceLabel` it was parsed under**). `PARSER_VERSION` = sha256 of the bytes
   of `parse_*.py`, `bank_rows.py`, `parse_isracard_xlsx.py` computed at start — it cannot be
@@ -241,9 +247,18 @@ capability (`cryptolir/openclaw-dashboard#811`) is not touched and nothing here 
   set and **not** in an income leaf (the skill's own rule). The manifest keeps inline
   `merchantDictionary` (top 2,000, **deprecated, kept for old skills**) and adds
   `dictionaryResolveUrl`, `callback.beginUrl`, `files[].sha256`, `files[].parsedUrl`.
-- **B4. Parse cache routes** — `GET|PUT /api/agent/jobs/[jobId]/files/[fileId]/parsed?v=`: bound to
-  `{ id: fileId, jobId }` of the authorized job; `PUT` accepted only when the row has a `sha256`
-  and the `parserVersion` is a 64-hex string; payload ≤ 20 MB; stored with `upsert`.
+- **B4. Parse cache routes** — `GET|PUT /api/agent/jobs/[jobId]/files/[fileId]/parsed?v=`.
+  **Cached statement contents are served under exactly the access rules of the bytes they were
+  derived from** (Codex P1): the three checks in `files/[fileId]/route.ts:28-44` are extracted into
+  one shared helper `authorizeStatementFileAccess(auth, jobId, fileId)` — (1) the `StatementFile`
+  belongs to this job (404), (2) its `driveFolderId` equals the job user's **current**
+  `UserDriveFolder.folderId` (404), (3) `assertEntryUnderFolder(driveFileId, folderId)` passes
+  (`DriveOutsideRootError` ⇒ 403; other Drive errors ⇒ 502) — and **both** the download route and
+  both cache methods call it, before any cached payload is read or written. A cache hit therefore
+  still costs one Drive metadata walk (no bytes, no parse). Then: `PUT` accepted only when the row
+  has a `sha256` and `parserVersion` is a 64-hex string; payload ≤ 20 MB; stored with `upsert`.
+  A file that is reassigned or moved becomes unreadable through the cache the moment it becomes
+  unreadable through the download.
 - **B5. Result v2** — every route runs `authorizeAgentJobRequest`, and **every write is one
   interactive `$transaction` whose first statement claims the job row** — an `updateMany` on
   `{ id, status in (dispatched|processing), agentTokenHash, resultUploadId: <uploadId> }`
@@ -421,7 +436,7 @@ Skill (`python3 -m unittest`, generated fixtures, no PII):
   `test_small_job_is_one_batch`, `test_judge_status_counts`.
 - `test_dictionary_resolved_in_chunks_of_500`, `test_old_manifest_uses_inline_dictionary`,
   `test_resolved_income_leaf_is_ignored`.
-- `test_cache_hit_skips_download_and_parse`, `test_cache_miss_puts_result`,
+- `test_cache_hit_skips_byte_download_and_parse`, `test_cache_miss_puts_result`,
   `test_cache_ignored_on_parser_version_change`, `test_cache_ignored_on_label_change`,
   `test_cached_rows_are_verified_like_fresh_rows`.
 - `test_parse_timeout_names_the_file`, `test_any_parse_exception_names_the_file`,
@@ -445,6 +460,12 @@ App (`pnpm test`):
   `problemsTotal`, `fatal` unchanged; `resultMergedSet` / `resultRace` pass unchanged.
 - `agentRoutes.test.ts` extended: dictionary, parsed (GET/PUT), begin/chunk/artifact/commit each call
   the guard; another job's file id ⇒ 404; `PUT parsed` without `sha256` ⇒ 409.
+- `parsedContainment.test.ts` (**Codex P1**): cache `GET` and `PUT` return **404 after the user's
+  folder is reassigned**, **404 for a stale `driveFolderId`**, **403 when `assertEntryUnderFolder`
+  throws `DriveOutsideRootError`** (file moved into another user's folder), 502 on other Drive
+  errors — each with the cache row untouched; a cache hit calls `assertEntryUnderFolder` exactly
+  once and never `getFileBytes`; and a source-level assertion that the download route and both cache
+  methods call the **same** `authorizeStatementFileAccess`.
 - `dictionaryRoute.test.ts`: only approved, only requested, only valid non-income leaves, > 500 ⇒ 400.
 - `uploadDuplicate.test.ts`: same bytes twice on one job ⇒ 409 (Hebrew); same bytes on another job ⇒ allowed.
 - `adminTransactionsRoute.test.ts`: auth, `pageSize` clamp, filters, stable order, `total`.
