@@ -18,14 +18,19 @@ the target user sees the processed report in `/report`. Agent-side skill + ops r
         mints per-job token → callAgent() on session app:plusim:report-job:<id>
         message: "PLUSIM_REPORT_JOB v1 / manifest: <url?t=token>"  (≤3000 chars)
    → onlyclaw (plusim-reports skill):
-        GET  /api/agent/jobs/:id/manifest   (files, taxonomy, dictionary, report_rules, callback)
+        GET  /api/agent/jobs/:id/manifest   (files, taxonomy, dictionaryResolveUrl
+                                             [+ deprecated inline dictionary], report_rules, callback)
         GET  /api/agent/jobs/:id/files/:fid
+        POST /api/agent/jobs/:id/dictionary (≤ 500 merchants per call → approved,
+                                             valid, non-income categories)
         python: parse (bank PDF first: Hapoalim / Leumi current account; then
                 Leumi/Isracard card pdf; MAX pdf; Isracard xlsx / Discount xlsx)
                 → bank debits to a card issuer become `settlements`, bank credits
                 become kind=credit → dedup → deterministic categorize (expense rows:
                 dictionary → RULES; credit rows: INCOME_RULES only)
-        model: judge the unresolved (merchant, kind) shortlist (never guesses →
+        model: judge the unresolved (merchant, kind) shortlist in batches of ≤ 40,
+               largest Σ|amount| first (`judge-status` → batch-NNN.json →
+               judgments-NNN.json; never guesses →
                un_categorized; a credit takes an הכנסות leaf or an expense leaf
                with "refund": true), applying the admin report_rules in the manifest
         python: build workbook (month sheets + income block, ניתוח תוצאות,
@@ -100,6 +105,14 @@ format, no schema change, and no agent-skill change.
   dedup key carries its running balance. The app side adds `StatementFile.sha256` and refuses a
   byte-identical file already on the job (409) before any Drive write. The app's
   `duplicate dedupKey` fatal stays as the safety net.
+- **Large jobs** (same plan, A2/A3/A5): the dictionary is resolved per job through
+  `POST /api/agent/jobs/:id/dictionary` (no 2,000 cap; an old skill still reads the inline
+  `merchantDictionary`). The judgment shortlist is split into batches of ≤ 40; finalize merges
+  every `judgments-NNN.json`, warns on a key judged twice or not in the shortlist, and notes
+  `"N בתי עסק לא נבדקו"` in `agentNotes`. Each file is parsed under a timeout
+  (`PLUSIM_PARSE_TIMEOUT_S`, default 120 s) and a 600-page cap; any failure stops `prepare`
+  with one line naming the file (exit 2), and a PDF with no text layer gets the Hebrew
+  scanned-PDF error.
 - **Bank statements** (`docs/plans/bank-statements.md`): detection runs the
   bank detector FIRST (both real bank exports also carry `ישראכרט` rows and
   slash dates, which the card detectors used to accept); completeness is the
@@ -239,6 +252,8 @@ src/lib/reportResult.test.ts              verifyAgentResult fatal-vs-reviewable 
                                           parseAgentResult fail-closed; decodeXlsx non-zip
 src/lib/agentRuntimeAuth.test.ts          both auth layers (bearer + per-job token) — 401/404 matrix
 src/app/api/agent/agentRoutes.test.ts     each public route invokes the guard; files/ folder-confinement
+src/app/api/agent/dictionaryRoute.test.ts only approved, only requested, only valid non-income leaves;
+                                          > 500 / malformed ⇒ 400, oversized ⇒ 413
 src/app/api/agent/adjustFlow.test.ts      adjust auth (both token kinds, generation), old turn after a
                                           re-run, strict body, all-or-nothing, income invariant, no
                                           workbook bytes, revisioned rebuild order, real builder
