@@ -1,6 +1,6 @@
 # Plusim — "Ask the agent" tab: adjust a report by chatting with onlyclaw
 
-> **Status:** **Rev 2 — revised after Codex round 1** (2026-10-26).
+> **Status:** **Rev 3 — revised after Codex round 2** (2026-10-26).
 >
 > **Process** (self-contained): plan PR → adversarial review → each round becomes a new Rev on
 > this branch with resolution notes → every caught hole becomes a named test the implementation
@@ -23,6 +23,21 @@
 >     rows with the same `build_workbook`, run server-side (B7), which needs Python + `openpyxl` in
 >     the app image (B8 — an infra change, reviewed here). Named tests
 >     `test_adjust_cannot_supply_workbook_bytes` and `test_rebuilt_workbook_matches_db_rows`.
+> - Rev 3 — Codex round 2 (one P1, two P2s), all accepted:
+>   - **P1 — overlapping rebuilds can store an older snapshot.** Two `adjust` calls in one turn
+>     could finish their rebuilds in reverse order. Fix: a per-job `rowsRevision`, bumped by every
+>     `adjust` in its row-writing transaction; the rebuild reads a consistent `(revision, rows)`
+>     snapshot and its artifact write CASes on that revision **and** on `artifactRevision <
+>     revision`, so an older snapshot can never replace a newer one. Named test
+>     `test_reversed_rebuild_completion_keeps_the_newer_workbook`.
+>   - **P2 — an old turn's reply lands in the new thread.** Fix: every `ReportChatMessage` stores
+>     the `generation` of its turn; history filters on `generation = dispatchedAt` (not on
+>     `createdAt`). Named test `test_previous_turn_reply_after_dispatch_is_not_in_new_thread`.
+>   - **P2 — no working recovery after a failed rebuild.** Re-publish did not rebuild. Fix: the
+>     artifact records the revision it was built from; **publish and the client download call
+>     `ensureFreshWorkbook`** first — a stale artifact is rebuilt there, and if that fails, publish
+>     refuses (409, Hebrew) and the download returns 503 (Hebrew) instead of serving a workbook
+>     that disagrees with the rows. Named test `test_failed_rebuild_then_publish_rebuilds_or_refuses`.
 
 ## Context (file-anchored)
 
@@ -159,12 +174,15 @@ openclaw-dashboard.
   ```
   model ReportJob { … adjustTokenHash String?  adjustTokenExpiresAt DateTime?
                       adjustGeneration DateTime?          // dispatchedAt the token was minted for
+                      rowsRevision     Int @default(0)    // bumped by every applied adjust
+                      artifactRevision Int @default(0)    // rowsRevision the stored artifact was built from
                       chatMessages ReportChatMessage[] }
   model ReportChatMessage {
     id String @id @default(cuid()); jobId String; role String   // "user" | "assistant"
     content String; actor String?; createdAt DateTime @default(now())
+    generation DateTime                                  // the job's dispatchedAt for this turn
     job ReportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
-    @@index([jobId, createdAt])
+    @@index([jobId, generation, createdAt])
   }
   ```
 - **B2. Shared edit rules** — `src/lib/reportEdits.ts` (pure): `normalizeDate` (moved from the admin
@@ -194,7 +212,10 @@ openclaw-dashboard.
   5. **In `finally`**: `updateMany({ where: { id, adjustTokenHash: <mine> }, data: { adjustTokenHash:
      null, adjustTokenExpiresAt: null, adjustGeneration: null } })` (success, agent error and timeout alike). Persist the
      assistant reply on success; `502` (Hebrew) on agent failure — the user message stays.
-  - `GET` (same path): messages with `createdAt >= job.dispatchedAt`, ordered `(createdAt, id)`, +
+  - Both the user message and the assistant reply are stored with `generation` = the generation the
+    token was minted for (step 3) — **not** the job's `dispatchedAt` at write time — so a reply that
+    arrives after a re-run is filed under the old generation (Rev 3, Codex P2).
+  - `GET` (same path): messages with `generation = job.dispatchedAt`, ordered `(createdAt, id)`, +
     `serverNow` — the exact shape `pendingReplyPickup` consumes.
 - **B5. Agent routes** (all `authorizeAdjustRequest`, all in `/api/agent/jobs/[jobId]/…`):
   - `GET rows` — `{ job: { id, status }, taxonomy: merged, transactions: [{ id, month, date,
@@ -203,8 +224,8 @@ openclaw-dashboard.
     ids, ≥ 1 field each, **unknown fields rejected** (the route builds `data` itself from validated
     fields; the body can never carry `amountAgorot`, `sourceLabel`, `dedupKey`, `jobId`, …).
     One interactive `$transaction`: (a) CAS `reportJob.updateMany({ where: { id, status: { in:
-    ADJUSTABLE }, adjustTokenHash: auth.tokenHash, dispatchedAt: auth.generation }, data: { updatedAt:
-    now } })`, `count 0` ⇒ 409
+    ADJUSTABLE }, adjustTokenHash: auth.tokenHash, dispatchedAt: auth.generation }, data: {
+    rowsRevision: { increment: 1 } } })`, `count 0` ⇒ 409
     nothing written; (b) read the target rows `where: { id: { in }, jobId }` — any missing id ⇒
     throw ⇒ rollback ⇒ 409; (c) for each edit `resolveEdit` ⇒ any `error` ⇒ rollback ⇒ 400 naming the
     row; (d) `reportTransaction.updateMany({ where: { id, jobId }, data: { …derived, note: <existing +
@@ -216,25 +237,45 @@ openclaw-dashboard.
     adjustment. `adjust`'s strict body parse rejects any extra field, `xlsxBase64` included.
 - **B6. Run route revokes the adjust token at dispatch** (Rev 2, Codex P1). The dispatch CAS in
   `run/route.ts` already clears `agentTokenHash`; it also sets `adjustTokenHash`,
-  `adjustTokenExpiresAt` and `adjustGeneration` to `null` in the same write. Together with B3's
+  `adjustTokenExpiresAt` and `adjustGeneration` to `null`, and `rowsRevision` /
+  `artifactRevision` to `0`, in the same write (a run's result stores rows and artifact together,
+  so they start in step). Together with B3's
   generation check this is belt and braces: an old turn's token dies at dispatch, and even a token
   minted in a race is bound to a generation that no longer exists. The chat thread restarts (B4
   history filter, session key). `result/route.ts` is unchanged.
 - **B7. App-side workbook rebuild** — `src/lib/reportWorkbook.ts`,
   `rebuildReportWorkbook(jobId, generation)`:
-  1. Read the job's rows (ordered `month, date, id`) and the merged taxonomy; map each row to the
-     dict `build_workbook` takes (`month, date, merchant, amountAgorot, category, uncategorized,
-     sourceLabel, note, kind`) in one pure `toWorkbookTxn`.
+  1. Read a **consistent snapshot**: `rowsRevision` R₁, then the job's rows (ordered `month, date,
+     id`), then `rowsRevision` R₂; R₁ ≠ R₂ ⇒ retry (at most 3, then `"failed"`). `adjust` bumps the
+     revision in the same transaction as its row writes, so R₁ = R₂ means the rows read are exactly
+     revision R. Read the merged taxonomy; map each row to the dict `build_workbook` takes (`month,
+     date, merchant, amountAgorot, category, uncategorized, sourceLabel, note, kind`) in one pure
+     `toWorkbookTxn`.
   2. `execFile("python3", [<repo>/agent/skills/plusim-reports/scripts/build_report_xlsx.py,
      "--out", <tmp file>])` with `{taxonomy, txns}` on stdin; timeout 60 s; no shell; the temp
      file lives in a fresh `mkdtemp` dir removed in `finally`. `build_report_xlsx.py` gains a
      `__main__` that does exactly `build_workbook(taxonomy, txns, out)` — no other logic.
   3. In one transaction: CAS `reportJob.updateMany({ where: { id, status: { in: ADJUSTABLE },
-     dispatchedAt: generation }, data: { updatedAt } })`, then `reportArtifact.deleteMany({ jobId })`
-     + `create` (filename unchanged). `count 0` ⇒ the job moved on (re-run) ⇒ nothing written.
+     dispatchedAt: generation, rowsRevision: R, artifactRevision: { lt: R } }, data: {
+     artifactRevision: R } })`, then `reportArtifact.deleteMany({ jobId })` + `create` (filename
+     unchanged). `count 0` ⇒ a re-run, a newer edit, or a newer rebuild already won ⇒ nothing written
+     and the result is `"superseded"` (Rev 3, Codex P1: an older snapshot can never overwrite a newer
+     workbook, whatever order the rebuilds finish in; the newest edit's own rebuild stores its
+     revision).
   4. Any failure ⇒ `"failed"`, logged with the reason; rows stay committed (Decision 4).
-  The publish route needs no change: it exports whatever artifact is stored, now always built by
-  either the run or the app.
+  `ensureFreshWorkbook(jobId)` = `artifactRevision < rowsRevision` ? `rebuildReportWorkbook(jobId,
+  dispatchedAt)` : `"fresh"`.
+- **B7a. Recovery path: publish and download never ship a stale workbook** (Rev 3, Codex P2).
+  - `publish/route.ts` calls `ensureFreshWorkbook` **before** its existing snapshot read; then its
+    one-transaction snapshot also reads `rowsRevision`/`artifactRevision` and refuses (409, Hebrew
+    "האקסל לא תואם לתיקונים האחרונים — נסו לפרסם שוב בעוד רגע") when they differ, so a rebuild that
+    failed (or an edit that landed in between) never reaches the Sheet. Everything else in the
+    route is unchanged.
+  - The client download (`api/reports/[jobId]/download`) calls `ensureFreshWorkbook` first; if the
+    artifact is still stale it returns 503 (Hebrew "הדוח מתעדכן — נסו שוב בעוד רגע") rather than a
+    workbook that disagrees with the online report.
+  - So the recovery after a fixed deploy is the action the admin already takes — **פרסום** — and it
+    rebuilds; there is no separate retry button.
 - **B8. Python in the app image (infra)** — `nixpacks.toml` at the repo root adds a Python with
   `openpyxl` to the Nixpacks setup phase, keeping the Node defaults (`nixPkgs = ["...",
   "(python3.withPackages (ps: [ ps.openpyxl ]))"]`). A startup self-check in the worker boot
@@ -334,9 +375,10 @@ re-publish.
   cleared in the chat route's `finally` (and expires in 150 s), so a transcript holds a dead
   token. Admins only can mint one.
 - **Stale Excel window.** `adjust` committed, the app rebuild failed (Python missing, timeout) →
-  Excel stale, rows fresh. The response carries `workbook: "failed"`, the agent says so, and the
-  next successful adjust rebuilds. A concurrent manual edit between the rebuild's row read and its
-  write leaves the Excel one edit behind — the same limitation manual edits already have.
+  Excel stale, rows fresh, `artifactRevision < rowsRevision`. The response carries
+  `workbook: "failed"`, the agent says so; publish and download rebuild or refuse (B7a), so the
+  stale bytes reach neither the Sheet nor the client. Manual admin edits do not bump the revision
+  (unchanged behaviour: they never reached the Excel), though a later rebuild includes them.
 - **Python in the app image** (B8). Build-time only: no new network, no new secret; the builder
   runs as a child process with a fixed argv, stdin input, a temp dir and a timeout. Failure mode is
   `"failed"`, never a broken report. Image size grows by a Python runtime + `openpyxl`.
@@ -392,12 +434,24 @@ App (`pnpm test`):
   job's artifact in one transaction. Plus one test that runs the real `python3` builder when
   available (skipped with a printed reason otherwise) and checks the ledger sheet's rows equal the
   input rows.
+- **`test_reversed_rebuild_completion_keeps_the_newer_workbook`** (Rev 3, Codex P1): adjusts A
+  then B in one generation; rebuild B (revision 2) stores first, rebuild A (revision 1) finishes
+  last ⇒ A's CAS no-matches, the stored artifact and `artifactRevision` stay B's; also a snapshot
+  whose revision changes mid-read retries.
+- **`test_failed_rebuild_then_publish_rebuilds_or_refuses`** (Rev 3, Codex P2): rebuild fails ⇒
+  `artifactRevision < rowsRevision`; publish with the builder fixed ⇒ rebuilds, then exports the
+  new bytes; publish with the builder still broken ⇒ 409, Drive never called; download while stale
+  and unbuildable ⇒ 503; a never-adjusted job (revisions 0/0) publishes and downloads with no
+  rebuild call (regression guard for today's path).
 - `adjustChatRoute.test.ts`: non-admin ⇒ 401/403, no token minted; status `processing` ⇒ 409;
   **second message while a live token exists ⇒ 409 and the first token is not overwritten**; the
   outbound message contains the three URLs and the admin text, the session key is
   `app:plusim:report-adjust:<jobId>:<gen>`, `appUserId` absent; **the token is cleared in `finally`
   on success, agent error and timeout**; reply persisted only on success; history returns only
-  messages `>= dispatchedAt` in `(createdAt, id)` order with `serverNow`.
+  messages with `generation = dispatchedAt` in `(createdAt, id)` order with `serverNow`;
+  **`test_previous_turn_reply_after_dispatch_is_not_in_new_thread`** (Rev 3, Codex P2): a turn
+  minted for G replies after a re-run to G′ ⇒ the reply is stored with generation G and the G′
+  history does not contain it.
 - `editTransaction.test.ts` + `mergedCategoryGuards.test.ts` pass **unchanged** (refactor guard).
 - `reportEdits.test.ts`: the shared rules table.
 - `agentRoutes.test.ts`: the two new routes call the guard; `hebrewErrors.test.ts` covers the
